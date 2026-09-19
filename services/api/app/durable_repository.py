@@ -104,9 +104,14 @@ class DurableStore(DevelopmentStore):
                                          (DevelopmentStore.MAX_DATASETS + DevelopmentStore.MAX_RELEASES + DevelopmentStore.MAX_CONTROLS + 1,)).fetchone()[0]
         if count > DevelopmentStore.MAX_DATASETS + DevelopmentStore.MAX_RELEASES + DevelopmentStore.MAX_CONTROLS:
             raise unavailable()
-        for kind, identifier, tenant, size, expiry, blob in self._connection.execute("SELECT kind,id,tenant,size_bytes,expires_at,blob FROM records"):
+        # Read SQLite metadata before any BLOB payload. A corrupted database can
+        # otherwise force Python to materialize an unbounded value during load.
+        for kind, identifier, tenant, size, expiry, blob_length in self._connection.execute("SELECT kind,id,tenant,size_bytes,expires_at,length(blob) FROM records"):
             if kind not in {"dataset", "release", *self.CONTROL_KINDS}:
                 raise unavailable()
+            if type(blob_length) is not int or not 28 <= blob_length <= self.MAX_RECORD_BLOB:
+                raise unavailable()
+            blob = self._connection.execute("SELECT blob FROM records WHERE kind=? AND id=?", (kind, identifier)).fetchone()[0]
             record = self._open(blob, [tenant, kind, identifier], self.MAX_RECORD_BLOB)
             if record["id"] != identifier or record["tenant"] != tenant or record["size_bytes"] != size or record["expires_at"] != expiry:
                 raise unavailable()
@@ -135,7 +140,10 @@ class DurableStore(DevelopmentStore):
                                          (DevelopmentStore.MAX_AUDIT_EVENTS + 1,)).fetchone()[0]
         if count > DevelopmentStore.MAX_AUDIT_EVENTS:
             raise unavailable()
-        for tenant, sequence, blob in self._connection.execute("SELECT tenant,seq,blob FROM audit ORDER BY tenant,seq"):
+        for tenant, sequence, blob_length in self._connection.execute("SELECT tenant,seq,length(blob) FROM audit ORDER BY tenant,seq"):
+            if type(blob_length) is not int or not 28 <= blob_length <= self.MAX_AUDIT_BLOB:
+                raise unavailable()
+            blob = self._connection.execute("SELECT blob FROM audit WHERE tenant=? AND seq=?", (tenant, sequence)).fetchone()[0]
             entry = self._open(blob, [tenant, "audit", sequence], self.MAX_AUDIT_BLOB)
             entries = self._audit.setdefault(tenant, [])
             if sequence != len(entries) + 1 or entry["event"]["seq"] != sequence:
