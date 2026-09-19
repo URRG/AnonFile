@@ -26,7 +26,7 @@ Open the localhost UI and supply the processor token. Changing request fields cl
 
 ## Tests
 
-From `services/api`: `python -m pytest -q`. From `apps/web`: `npm test` and `npm run build`. Container test targets: `make api-test`, `make web-test` (Docker required). CI executes Python and client tests plus the TypeScript/Vite build. Tests use only synthetic fixtures, no cloud model or customer data.
+From `services/api`: `python -m pytest -q`. From `apps/web`: `npm test` and `npm run build`. After installing Python API dependencies, `npm run test:integration` starts a temporary localhost API with generated synthetic credentials, exercises the actual client over HTTP and shuts it down. If Python is not on PATH, set `ANONFLOW_TEST_PYTHON` to the desired interpreter. This is a client/API integration test, not a rendered-browser test. Container test targets: `make api-test`, `make web-test` (Docker required). CI executes these suites plus the TypeScript/Vite build. Tests use only synthetic fixtures, no cloud model or customer data.
 
 ## Independent gold-label evaluation
 
@@ -43,7 +43,7 @@ The bundled synthetic examples are regression fixtures, not a qualification benc
 ## Limits and known gaps
 
 - One nonempty text input OR a nonempty list of objects, not both; at most 2 MB UTF-8 processing input, 10,000 records, depth 32 and bounded nodes. The HTTP body has a separate 2.1 MB cap, so JSON escaping/metadata can reduce the effective accepted payload.
-- Immutable-original spans and overlap union prevent replacement offsets from skipping known hits. Recognized sensitive fields suppress descendants; numeric sensitive values become null. Sensitive values in object keys are rejected instead of collision-prone renaming. This is not comprehensive semantic detection.
+- Immutable-original spans and overlap union prevent replacement offsets from skipping known hits. Recognized sensitive scalar strings become markers; numeric/boolean sensitive values become null. Container-valued sensitive fields are rejected because nested keys may themselves contain identities or secrets. Source transformation markers are reserved and rejected in both modes to prevent collisions. Sensitive values in object keys are rejected instead of collision-prone renaming. This is not comprehensive semantic detection. Some unsupported processing structures can be retained at intake but will fail processing with a fixed error; no release is created.
 - Restricted-mode aliases are local, noncryptographic and not a production tokenization vault. Numbers may be unvalidated candidates. Learned names, medical/business meaning, indirect identification and relationships remain incomplete.
 - Development storage is bounded and expires on access, with no secure-erasure or durable-audit claim. Crash recovery, cross-worker consistency, at-rest encryption, OIDC, rate controls and production isolation remain unimplemented.
 - Findings are aggregate metadata. They and supplied dataset names/metadata still require access control; do not populate metadata fields with source secrets.

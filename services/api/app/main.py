@@ -12,14 +12,55 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.contracts import PayloadError
-from app.processing import process_payload
+from app.processing import detect_text, process_payload
 from app.repository import DevelopmentStore
 from app.security import Principal, load_principals, require_roles
 
 MAX_BODY_BYTES = 2_100_000
 MAX_PAYLOAD_BYTES = 2_000_000
+
+class StrictJSONRequest(Request):
+    """Parse once, rejecting ambiguous objects instead of silently losing values."""
+    async def json(self):
+        if not hasattr(self, "_json"):
+            def unique_object(pairs):
+                result = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise ValueError
+                    result[key] = value
+                return result
+
+            def reject_constant(value):
+                raise ValueError
+
+            def finite_float(value):
+                parsed = float(value)
+                if not math.isfinite(parsed):
+                    raise ValueError
+                return parsed
+
+            try:
+                self._json = json.loads((await self.body()).decode("utf-8"),
+                                        object_pairs_hook=unique_object,
+                                        parse_constant=reject_constant,
+                                        parse_float=finite_float)
+            except (ValueError, UnicodeError, RecursionError, OverflowError):
+                raise HTTPException(422, "Request validation failed") from None
+        return self._json
+
+
+class StrictJSONRoute(APIRoute):
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def strict_handler(request: Request):
+            return await handler(StrictJSONRequest(request.scope, request.receive))
+
+        return strict_handler
 
 class BodyLimitMiddleware:
     """Bound Content-Length and chunked bodies before JSON parsing/buffering."""
@@ -90,6 +131,10 @@ class DatasetCreate(StrictModel):
             if depth > 32 or nodes > 100_000:
                 raise ValueError("Unsupported payload structure")
             if isinstance(value, dict):
+                # A value embedded in a key cannot be safely renamed without a
+                # collision/provenance policy; reject before storing the source.
+                if any(detect_text(key) for key in value):
+                    raise ValueError("Sensitive object keys are unsupported")
                 stack.extend((v, depth + 1) for v in value.values())
                 nodes += len(value)
             elif isinstance(value, list):
@@ -168,6 +213,7 @@ def release_view(record):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="AnonFlow development API", version="0.2.0", docs_url=None, redoc_url=None, openapi_url=None)
+    app.router.route_class = StrictJSONRoute
     app.state.principals = load_principals()
     app.state.store = DevelopmentStore()
     app.add_middleware(BodyLimitMiddleware)

@@ -6,7 +6,7 @@ const source = readFileSync(new URL('../src/api.ts', import.meta.url), 'utf8')
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText
 const { requestRelease, validateRelease } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
 const request = { apiBase: 'http://localhost:8000', token: 'test-token', content: 'synthetic', recipient: 'buyer-test', mode: 'external_anonymized' }
-const safe = () => ({ id: 'release-1', dataset_id: 'dataset-1', status: 'REVIEW_REQUIRED', eligibility: 'REVIEW_REQUIRED', output: null, card: { policy_version: 'external-release-v1', release_mode: 'external_anonymized', evidence_status: 'INSUFFICIENT_EVIDENCE', scores: null, findings: [], gates: ['qualification'], limitations: ['rules-only'] } })
+const safe = () => ({ id: 'release-1', dataset_id: 'dataset-1', status: 'evaluation_incomplete', eligibility: 'REVIEW_REQUIRED', output: null, card: { release_id: 'release-1', dataset_id: 'dataset-1', eligibility: 'REVIEW_REQUIRED', policy_version: 'external-release-v1', release_mode: 'external_anonymized', evidence_status: 'INSUFFICIENT_EVIDENCE', scores: null, findings: [], gates: ['EXPORT_DISABLED', 'QUALIFICATION_REQUIRED'], limitations: ['rules-only'] } })
 for (const status of [401, 403, 409, 413, 422, 429, 500, 503]) {
   test(`HTTP ${status} never becomes a local successful release`, async t => {
     const mock = t.mock.method(globalThis, 'fetch', async () => new Response('raw-password-DO-NOT-ECHO', { status }))
@@ -58,4 +58,9 @@ test('UI has no credential persistence, clipboard export or demo fallback', () =
   const ui = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8')
   assert.doesNotMatch(ui, /localStorage|sessionStorage|clipboard|demoRelease/)
   assert.match(ui, /Synthetic data only/)
+})
+test('card identity, eligibility and required gates must match safe envelope', () => {
+  for (const change of [x => x.card.release_id = 'foreign', x => x.card.dataset_id = 'foreign', x => x.card.eligibility = 'APPROVED_ANONYMIZED', x => x.card.eligibility = 'BLOCKED', x => x.card.gates = [], x => x.status = 'approved', x => x.eligibility = ['REVIEW_REQUIRED'], x => x.card.release_mode = ['external_anonymized']]) {
+    const value = safe(); change(value); assert.throws(() => validateRelease(value), /unsafe response/)
+  }
 })

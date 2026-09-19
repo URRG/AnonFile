@@ -103,6 +103,40 @@ def test_errors_never_echo_values_or_json_paths(client):
     assert response.json() == {"detail": "Request validation failed"}
     assert "private" not in response.text and "@" not in response.text
 
+@pytest.mark.parametrize("body", [
+    '{"name":"x","content":"password=synthetic-secret","content":"ok"}',
+    '{"name":"x","records":[{"password":"synthetic-secret","password":"ok"}]}',
+    '{"name":"x","records":[{"password":"synthetic-secret","pass\\u0077ord":"ok"}]}',
+    '{"name":"x","content":"ok","name":"other"}',
+    '{"name":"x","records":[{"nested":{"value":1,"value":2}}]}',
+])
+def test_duplicate_json_keys_rejected_before_any_source_is_stored(client, body):
+    response = client.post("/datasets", headers={**auth(), "Content-Type": "application/json"}, content=body)
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Request validation failed"}
+    assert not client.app.state.store.datasets
+
+@pytest.mark.parametrize("value", ["NaN", "Infinity", "-Infinity", "1e999"])
+def test_all_nonfinite_json_numbers_rejected(client, value):
+    response = client.post("/datasets", headers={**auth(), "Content-Type": "application/json"}, content='{"name":"x","records":[{"value":' + value + '}]}')
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Request validation failed"}
+    assert not client.app.state.store.datasets
+
+def test_deep_malformed_and_invalid_encoding_safe(client):
+    bodies = [b'{"name":"private","content":', b'{"name":"x","content":"\xff"}', ('{"name":"x","records":' + '[' * 2000 + '0' + ']' * 2000 + '}').encode()]
+    for body in bodies:
+        response = client.post("/datasets", headers={**auth(), "Content-Type": "application/json"}, content=body)
+        assert response.status_code == 422
+        assert response.json() == {"detail": "Request validation failed"}
+
+def test_sensitive_keys_rejected_before_retention(client):
+    for records in [[{"example@example.test": "x"}], [{"safe": {"password=synthetic-secret": "x"}}]]:
+        response = client.post("/datasets", headers=auth(), json={"name": "x", "records": records})
+        assert response.status_code == 422
+        assert response.json() == {"detail": "Request validation failed"}
+        assert not client.app.state.store.datasets
+
 def test_content_length_limit(client):
     response = client.post("/datasets", headers={**auth(), "Content-Length": "2100001"}, content="x")
     assert response.status_code == 413

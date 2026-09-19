@@ -1,9 +1,10 @@
 """Bounded rules-only candidate processing, NEVER an anonymity certification.
 
-Only text and JSON-compatible record objects are supported. Sensitive field values
-retain container shapes; sensitive numbers/booleans become null, strings become
-markers. Object keys containing detectable sensitive values are rejected, not
-renamed (which could collide). All detection offsets refer to original text.
+Only text and JSON-compatible record objects are supported. Sensitive scalar
+numbers/booleans become null, strings become markers. Sensitive container-valued
+fields are rejected because their arbitrary nested keys may themselves be values.
+Object keys containing detectable sensitive values and source strings containing
+reserved output markers are rejected, not renamed. Offsets refer to original text.
 """
 from __future__ import annotations
 
@@ -26,10 +27,13 @@ LIMITATIONS = (
     "Free-text names, addresses, health context, business confidentiality and indirect identification are not comprehensively detected.",
     "Only text and JSON records are supported; language, semantic, document, media and linkage coverage are unqualified.",
     "Pattern matches are candidates, not validated identity or payment identifiers; false positives and false negatives remain.",
+    "Container-valued sensitive fields and reserved transformation markers in source strings or keys are unsupported and rejected.",
 )
 SEVERITY = {"medium": 1, "high": 2, "critical": 3}
 PRIORITY = {"CREDENTIAL": 9, "PAYMENT_SECRET": 8, "CARD": 7, "AADHAAR": 6,
-            "SENSITIVE_NUMBER": 5, "PAN": 4, "EMAIL": 3, "PHONE": 2, "IP_ADDRESS": 1}
+            "GOVERNMENT_ID": 6, "SENSITIVE_NUMBER": 5, "PAN": 4, "EMAIL": 3,
+            "PHONE": 2, "IP_ADDRESS": 1, "PERSON_NAME": 1, "ADDRESS": 1, "DATE_OF_BIRTH": 1}
+_RESERVED_MARKER = re.compile(r"\[(?:REDACTED_[A-Z_]+|[A-Z][A-Z_]*_[0-9]{4,})\]", re.IGNORECASE)
 
 # Quoted alternatives consume spaces/escaped quotes inside secret values. A
 # malformed/unterminated quoted value is suppressed through the end of its line.
@@ -71,6 +75,16 @@ def _normalized(text: str) -> tuple[str, list[int]]:
             chars.append(normalized_char)
             offsets.append(index)
     return "".join(chars), offsets
+
+
+def _rank(kind: str, severity: str) -> tuple[int, int]:
+    return SEVERITY[severity], PRIORITY[kind]
+
+
+def _reject_reserved_markers(text: str) -> None:
+    normalized, _ = _normalized(text)
+    if _RESERVED_MARKER.search(normalized):
+        raise PayloadError("Source transformation markers are unsupported.")
 
 
 def detect_text(text: str) -> tuple[Span, ...]:
@@ -121,7 +135,7 @@ def detect_text(text: str) -> tuple[Span, ...]:
     for candidate in sorted(candidates, key=lambda span: (span.start, span.end)):
         if merged and candidate.start < merged[-1].end:
             prior = merged.pop()
-            strongest = max((prior, candidate), key=lambda span: (SEVERITY[span.severity], PRIORITY[span.entity_type]))
+            strongest = max((prior, candidate), key=lambda span: _rank(span.entity_type, span.severity))
             merged.append(Span(prior.start, max(prior.end, candidate.end), strongest.entity_type, strongest.severity))
         else:
             merged.append(candidate)
@@ -188,6 +202,8 @@ def _validate_records(records: Any) -> None:
             raise PayloadError("Payload must contain only finite JSON values.")
         if byte_count > MAX_BYTES:
             raise PayloadError("Payload exceeds the byte limit.")
+        if kind is str:
+            _reject_reserved_markers(value)
 
 
 def process_payload(*, content: str | None = None, records: list[dict] | None = None,
@@ -217,6 +233,7 @@ def process_payload(*, content: str | None = None, records: list[dict] | None = 
     def transform_text(text: str) -> str:
         nonlocal changed_spans
         spans = detect_text(text)
+        _reject_reserved_markers(text)
         pieces: list[str] = []
         position = 0
         for span in spans:
@@ -229,12 +246,12 @@ def process_payload(*, content: str | None = None, records: list[dict] | None = 
 
     def transform(value: Any, sensitive: tuple[str, str] | None = None) -> Any:
         nonlocal redacted_fields
+        if sensitive is not None and type(value) in (dict, list):
+            raise PayloadError("Container-valued sensitive fields are unsupported.")
         if type(value) is dict:
             result = {}
             for key, child in value.items():
                 field = _field_type(key)
-                if sensitive is not None and (field is None or SEVERITY[sensitive[1]] >= SEVERITY[field[1]]):
-                    field = sensitive
                 result[key] = transform(child, field)
             return result
         if type(value) is list:
@@ -244,7 +261,7 @@ def process_payload(*, content: str | None = None, records: list[dict] | None = 
             # Keep the strongest classification if a field contains a credential.
             if type(value) is str:
                 for span in detect_text(value):
-                    if SEVERITY[span.severity] > SEVERITY[severity]:
+                    if _rank(span.entity_type, span.severity) > _rank(kind, severity):
                         kind, severity = span.entity_type, span.severity
             counts[(kind, severity)] += 1
             redacted_fields += 1

@@ -2,7 +2,7 @@ export type Mode = 'external_anonymized' | 'restricted_pseudonymized'
 export type ReleaseView = {
   id: string; dataset_id: string; status: string;
   eligibility: 'BLOCKED' | 'REVIEW_REQUIRED'; output: null;
-  card: { policy_version: string; release_mode: Mode; evidence_status: 'INSUFFICIENT_EVIDENCE'; scores: null;
+  card: { release_id: string; dataset_id: string; eligibility: 'BLOCKED' | 'REVIEW_REQUIRED'; policy_version: string; release_mode: Mode; evidence_status: 'INSUFFICIENT_EVIDENCE'; scores: null;
     findings: { entity_type: string; severity: string; count: number }[]; gates: string[]; limitations: string[] }
 }
 type Request = { apiBase: string; token: string; content: string; mode: Mode; recipient: string; signal?: AbortSignal }
@@ -10,11 +10,13 @@ const object = (v: unknown): v is Record<string, unknown> => typeof v === 'objec
 const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every(x => typeof x === 'string')
 const invalid = () => new Error('The API returned an invalid or unsafe response. No release was authorized.')
 export function validateRelease(value: unknown): ReleaseView {
-  if (!object(value) || typeof value.id !== 'string' || typeof value.dataset_id !== 'string' || typeof value.status !== 'string' ||
-      value.output !== null || !['BLOCKED', 'REVIEW_REQUIRED'].includes(String(value.eligibility)) || !object(value.card)) throw invalid()
+  if (!object(value) || typeof value.id !== 'string' || !value.id || typeof value.dataset_id !== 'string' || !value.dataset_id || value.status !== 'evaluation_incomplete' ||
+      value.output !== null || typeof value.eligibility !== 'string' || !['BLOCKED', 'REVIEW_REQUIRED'].includes(value.eligibility) || !object(value.card)) throw invalid()
   const card = value.card
-  if (card.evidence_status !== 'INSUFFICIENT_EVIDENCE' || card.scores !== null || typeof card.policy_version !== 'string' ||
-      !['external_anonymized', 'restricted_pseudonymized'].includes(String(card.release_mode)) || !strings(card.gates) || !strings(card.limitations) ||
+  if (card.release_id !== value.id || card.dataset_id !== value.dataset_id || card.eligibility !== value.eligibility ||
+      card.evidence_status !== 'INSUFFICIENT_EVIDENCE' || card.scores !== null || typeof card.policy_version !== 'string' ||
+      typeof card.release_mode !== 'string' || !['external_anonymized', 'restricted_pseudonymized'].includes(card.release_mode) ||
+      !strings(card.gates) || !card.gates.includes('EXPORT_DISABLED') || !card.gates.includes('QUALIFICATION_REQUIRED') || !strings(card.limitations) ||
       !Array.isArray(card.findings) || !card.findings.every(f => object(f) && typeof f.entity_type === 'string' && typeof f.severity === 'string' && typeof f.count === 'number' && Number.isSafeInteger(f.count) && f.count >= 0)) throw invalid()
   return value as ReleaseView
 }

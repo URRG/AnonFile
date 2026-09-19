@@ -64,7 +64,7 @@ def test_plus_prefixed_card_not_downgraded_to_phone():
 
 
 def test_nested_typed_records_preserve_non_sensitive_types_and_input():
-    records = [{"password": "fictional secret", "profile": {"name": "Example Person", "address": {"street": "Imaginary Avenue", "number": 12}},
+    records = [{"password": "fictional secret", "profile": {"name": "Example Person", "address": "12 Imaginary Avenue"},
                 "government_id": 123456789012, "enabled": True, "count": 4, "ratio": 1.25,
                 "items": [None, {"message": "user@example.invalid"}], "empty": ""}]
     before = copy.deepcopy(records)
@@ -72,7 +72,7 @@ def test_nested_typed_records_preserve_non_sensitive_types_and_input():
     assert records == before
     assert isinstance(result.output, list)
     assert result.output[0]["government_id"] is None
-    assert result.output[0]["profile"]["address"]["number"] is None
+    assert result.output[0]["profile"]["address"] == "[REDACTED_ADDRESS]"
     assert result.output[0]["enabled"] is True
     assert result.output[0]["count"] == 4
     assert result.output[0]["ratio"] == 1.25
@@ -82,10 +82,17 @@ def test_nested_typed_records_preserve_non_sensitive_types_and_input():
     assert json.loads(json.dumps(result.output, allow_nan=False)) == result.output
 
 
-def test_sensitive_parent_classification_not_downgraded_by_child_name():
-    result = process_payload(records=[{"password": {"name": "synthetic"}}])
-    assert result.critical_detected
-    assert result.output == [{"password": {"name": "[REDACTED_CREDENTIAL]"}}]
+@pytest.mark.parametrize("record", [
+    {"password": {"fictional-secret-value": True}}, {"name": {"Ada Example": True}},
+    {"address": {"Imaginary Avenue": 12}}, {"password": {"name": "synthetic"}},
+    {"password": [{"fictional-secret-value": True}]}, {"address": ["Imaginary Avenue"]},
+    {"card_number": {}}, {"cvv": []},
+])
+def test_sensitive_containers_rejected_without_key_leakage(record):
+    for mode in ("external_anonymized", "restricted_pseudonymized"):
+        with pytest.raises(PayloadError) as caught:
+            process_payload(records=[record], mode=mode)
+        assert str(caught.value) == "Container-valued sensitive fields are unsupported."
 
 
 def test_numeric_value_in_unknown_field_is_null_not_bare_marker():
@@ -159,6 +166,33 @@ def test_restricted_aliases_exact_case_and_release_local():
     assert "cryptographic" in " ".join(result.limitations)
     assert process_payload(content="a@example.invalid", mode="restricted_pseudonymized").output == "[EMAIL_0001]"
     assert process_payload(content="password=synthetic", mode="restricted_pseudonymized").output == "[REDACTED_CREDENTIAL]"
+
+
+@pytest.mark.parametrize("marker", ["[EMAIL_0001]", "[PERSON_NAME_10000]", "[email_0001]",
+    "［ＥＭＡＩＬ＿０００１］", "[EMAIL_00\u200b01]", "[REDACTED_CREDENTIAL]"])
+@pytest.mark.parametrize("mode", ["external_anonymized", "restricted_pseudonymized"])
+def test_source_marker_namespace_is_reserved_everywhere(marker, mode):
+    for payload in ({"content": f"Existing {marker}, contact ada@example.invalid"},
+                    {"records": [{"message": marker}, {"email": "ada@example.invalid"}]},
+                    {"records": [{marker: "safe", "email": "ada@example.invalid"}]},
+                    {"records": [{"password": marker}]}):
+        with pytest.raises(PayloadError) as caught:
+            process_payload(**payload, mode=mode)
+        assert str(caught.value) == "Source transformation markers are unsupported."
+
+
+@pytest.mark.parametrize("field", ["card_number", "government_id", "cvv", "name", "address", "dob"])
+def test_credentials_win_equal_critical_field_precedence(field):
+    result = process_payload(records=[{field: "password=fictional-secret"}], mode="restricted_pseudonymized")
+    assert result.output == [{field: "[REDACTED_CREDENTIAL]"}]
+    assert result.findings[0].entity_type == "CREDENTIAL"
+    assert result.critical_detected
+
+
+def test_payment_secret_field_not_downgraded_to_critical_card_alias():
+    result = process_payload(records=[{"cvv": "4111111111111111"}], mode="restricted_pseudonymized")
+    assert result.output == [{"cvv": "[REDACTED_PAYMENT_SECRET]"}]
+    assert result.findings[0].entity_type == "PAYMENT_SECRET"
 
 
 def test_unqualified_text_always_carries_explicit_limitations():

@@ -5,7 +5,7 @@ services:
     build:
       context: ./services/api
     environment:
-      ANONFLOW_ENV: development
+      ANONFLOW_ENV: ${ANONFLOW_ENV:-development}
       ANONFLOW_DEV_PRINCIPALS: ${ANONFLOW_DEV_PRINCIPALS:-}
       WEB_ORIGIN: http://localhost:3000
     ports:
