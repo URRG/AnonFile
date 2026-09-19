@@ -1,6 +1,7 @@
 """Fail-closed development API. Synthetic data only; no release qualification."""
 from __future__ import annotations
 import copy
+import hashlib
 import json
 import math
 import os
@@ -24,6 +25,15 @@ from app.security import Principal, configure_auth, require_roles
 from app.policies import PolicyError, PolicyProfile, PolicyRule, PolicySnapshot
 from app.rights import RightsError, RightsProfile, evaluate_rights
 from app.runs import ProcessingPlan, RunError, RunRegistry
+from app.candidate import (CandidateArtifact, CandidateError, LedgerAction, LedgerReason,
+                           PayloadKind, SchemaContract, TransformLedgerEntry)
+from app.residual_eval import (CandidateMetadata as ResidualCandidateMetadata, DetectorIdentity,
+                               DetectorResult, EvaluationError, EvaluationProfile,
+                               EvidenceStatus, candidate_schema_digest, evaluate_candidate)
+from app.qualification import (CandidateBinding, CategoryMeasurement, CategoryThreshold,
+                               EvaluationReport as QualificationReport, QualificationCriteria,
+                               QualificationError, qualify)
+from app.policies import TAXONOMY_CATEGORIES
 
 MAX_BODY_BYTES = 2_100_000
 MAX_PAYLOAD_BYTES = 2_000_000
@@ -276,6 +286,28 @@ class ProcessingRunView(BaseModel):
     recipient: str
     purpose: str
     events: list[dict[str, Any]]
+    candidate: dict[str, Any] | None = None
+
+class ResidualEvaluationView(BaseModel):
+    id: str
+    run_id: str
+    candidate_digest: str
+    report_digest: str
+    evidence_status: str
+    residual_counts: dict[str, int]
+    coverage_percent: int
+    utility_checks: list[dict[str, Any]]
+
+class QualificationCreate(StrictModel):
+    evaluation_id: str = Field(min_length=1, max_length=80)
+    max_evaluation_age_seconds: int = Field(default=3600, ge=1, le=2_678_400)
+
+class QualificationView(BaseModel):
+    id: str
+    run_id: str
+    outcome: str
+    reasons: list[str]
+    digest: str
 
 def now():
     return datetime.now(UTC)
@@ -348,15 +380,74 @@ def rights_view(record: dict[str, Any]) -> RightsProfileView:
 def run_view(record: dict[str, Any]) -> ProcessingRunView:
     try:
         payload = record["payload"]
-        if (payload["state"] != "REGISTERED" or type(payload["attempts"]) is not int
-                or not isinstance(payload["events"], list) or len(payload["events"]) != 1):
+        if (payload["state"] not in {"REGISTERED", "RUNNING", "CANDIDATE", "QUARANTINED", "FAILED"}
+                or type(payload["attempts"]) is not int or not 0 <= payload["attempts"] <= 3
+                or not isinstance(payload["events"], list) or not 1 <= len(payload["events"]) <= 16):
             raise ValueError
         return ProcessingRunView(id=record["id"], dataset_id=payload["dataset_id"], state=payload["state"],
                                  attempts=payload["attempts"], request_digest=payload["request_digest"],
                                  policy_digest=payload["policy_digest"], rights_digest=payload["rights_digest"],
-                                 recipient=payload["recipient"], purpose=payload["purpose"], events=copy.deepcopy(payload["events"]))
+                                 recipient=payload["recipient"], purpose=payload["purpose"], events=copy.deepcopy(payload["events"]),
+                                 candidate=copy.deepcopy(payload.get("candidate")))
     except (KeyError, TypeError, ValueError):
         raise HTTPException(503, "Control integrity verification failed") from None
+
+def residual_view(record: dict[str, Any]) -> ResidualEvaluationView:
+    try:
+        payload = record["payload"]
+        report = payload["report"]
+        if (payload["run_id"] != report["run_id"] or type(report["residual_counts"]) is not dict
+                or report["evidence_status"] not in {"INSUFFICIENT_EVIDENCE", "FAILS_PROFILE"}):
+            raise ValueError
+        return ResidualEvaluationView(id=record["id"], run_id=payload["run_id"],
+                                      candidate_digest=report["candidate_digest"], report_digest=report["digest"],
+                                      evidence_status=report["evidence_status"],
+                                      residual_counts=copy.deepcopy(report["residual_counts"]),
+                                      coverage_percent=report["coverage_percent"],
+                                      utility_checks=copy.deepcopy(report["utility_checks"]))
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(503, "Control integrity verification failed") from None
+
+def qualification_view(record: dict[str, Any]) -> QualificationView:
+    try:
+        payload = record["payload"]
+        if payload["outcome"] not in {"QUARANTINED", "INSUFFICIENT_EVIDENCE"} or not isinstance(payload["reasons"], list):
+            raise ValueError
+        return QualificationView(id=record["id"], run_id=payload["run_id"], outcome=payload["outcome"],
+                                 reasons=copy.deepcopy(payload["reasons"]), digest=payload["digest"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(503, "Control integrity verification failed") from None
+
+def _residual_detector(candidate: str | list[dict[str, Any]]) -> DetectorResult:
+    """Independent-pass adapter: returns aggregate family counts only."""
+    counts = {category: 0 for category in ("PII", "PAYMENT", "CREDENTIAL")}
+    def inspect(value: Any, observed: set[str]):
+        if type(value) is str:
+            for finding in detect_text(value):
+                family = "CREDENTIAL" if finding.entity_type == "CREDENTIAL" else "PAYMENT" if finding.entity_type in {"PAN", "CARD"} else "PII"
+                observed.add(family)
+        elif type(value) is dict:
+            for child in value.values():
+                inspect(child, observed)
+        elif type(value) is list:
+            for child in value:
+                inspect(child, observed)
+    units = [candidate] if type(candidate) is str else candidate
+    for unit in units:
+        observed: set[str] = set()
+        inspect(unit, observed)
+        for family in observed:
+            counts[family] += 1
+    return DetectorResult(residual_counts=counts, scanned_units=len(units))
+
+def _candidate_ledger(result) -> tuple[TransformLedgerEntry, ...]:
+    totals: dict[str, int] = {}
+    for finding in result.findings:
+        if finding.count > 0:
+            totals[finding.entity_type] = totals.get(finding.entity_type, 0) + finding.count
+    entries = [TransformLedgerEntry(entity_type, LedgerAction.REDACT, LedgerReason.DETECTOR_FINDING, count)
+               for entity_type, count in totals.items()]
+    return tuple(sorted(entries, key=lambda item: (item.entity_type, item.action.value, item.reason.value)))
 
 def create_app() -> FastAPI:
     @asynccontextmanager
@@ -386,6 +477,9 @@ def create_app() -> FastAPI:
     @app.exception_handler(PolicyError)
     @app.exception_handler(RightsError)
     @app.exception_handler(RunError)
+    @app.exception_handler(CandidateError)
+    @app.exception_handler(EvaluationError)
+    @app.exception_handler(QualificationError)
     async def invalid_control(request: Request, exc):
         return JSONResponse({"detail": "Control validation failed"}, status_code=422)
 
@@ -502,6 +596,8 @@ def create_app() -> FastAPI:
                    "dataset_id": request.dataset_id, "rights_profile_id": request.rights_profile_id,
                    "policy_snapshot_id": request.policy_snapshot_id, "state": registered.state.value,
                    "attempts": registered.attempts, "policy_digest": snapshot.digest,
+                   "source_digest": plan.source_digest,
+                   "mode": request.release_mode,
                    "rights_digest": profile.digest, "recipient": request.recipient,
                    "purpose": request.purpose,
                    "events": [{"sequence": event.sequence, "state": event.state.value, "action": event.action,
@@ -523,6 +619,97 @@ def create_app() -> FastAPI:
     @app.get("/processing-runs", response_model=list[ProcessingRunView])
     def list_processing_runs(principal: Principal = Depends(require_roles("processor", "reviewer"))):
         return [run_view(record) for record in app.state.store.list_controls("processing_run", principal.tenant)]
+
+    @app.post("/processing-runs/{run_id}/execute", response_model=ProcessingRunView)
+    def execute_processing_run(run_id: str, principal: Principal = Depends(require_roles("processor"))):
+        """Run the local development worker without returning source/output bytes."""
+        claimed, dataset = app.state.store.claim_processing_run(run_id, principal.tenant, principal.subject)
+        try:
+            source = dataset["content"] if dataset["content"] is not None else dataset["records"]
+            payload_kind = PayloadKind.TEXT if dataset["content"] is not None else PayloadKind.STRUCTURED
+            schema = SchemaContract.from_value(source, kind=payload_kind, allow_scalar_nulls=payload_kind is PayloadKind.STRUCTURED)
+            result = process_payload(content=dataset["content"], records=dataset["records"], mode=claimed["payload"]["mode"])
+            artifact = CandidateArtifact.create(run_id=run_id, input_digest=claimed["payload"]["source_digest"],
+                                                 policy_digest=claimed["payload"]["policy_digest"], transformed=result.output,
+                                                 schema=schema, ledger=_candidate_ledger(result))
+            metadata = artifact.metadata
+            private_payload = {"run_id": metadata.run_id, "input_digest": metadata.input_digest,
+                               "policy_digest": metadata.policy_digest, "artifact_digest": metadata.artifact_digest,
+                               "schema_digest": metadata.schema_digest, "payload_kind": metadata.payload_kind.value,
+                               "schema_descriptor": schema.private_descriptor,
+                               "evaluation_schema_digest": candidate_schema_digest(result.output),
+                               "media_type": metadata.media_type, "byte_count": metadata.byte_count,
+                               "ledger": [{"entity_type": item.entity_type, "action": item.action.value,
+                                           "reason": item.reason.value, "count": item.count} for item in metadata.ledger],
+                               "body": artifact.materialize_for_private_worker()}
+            record = control_record(kind="private_candidate", identifier=str(uuid4()), tenant=principal.tenant,
+                                    payload=private_payload, expires_at=dataset["expires_at"])
+            return run_view(app.state.store.complete_processing_run(run_id, principal.tenant, record, principal.subject))
+        except (CandidateError, PayloadError, ValueError):
+            # Never return or persist an exception message: it can carry source values.
+            return run_view(app.state.store.fail_processing_run(run_id, principal.tenant, "PROCESSING_FAILURE", principal.subject))
+        except HTTPException:
+            # A quota/race error after a claim must not leave a permanent RUNNING
+            # run that neither retry nor review can resolve.
+            return run_view(app.state.store.fail_processing_run(run_id, principal.tenant, "STORAGE_FAILURE", principal.subject))
+
+    @app.post("/processing-runs/{run_id}/residual-evaluations", response_model=ResidualEvaluationView, status_code=201)
+    def create_residual_evaluation(run_id: str, principal: Principal = Depends(require_roles("reviewer"))):
+        candidate, run = app.state.store.private_candidate_for_run(run_id, principal.tenant)
+        private = candidate["payload"]
+        body = private["body"]
+        profile = EvaluationProfile.create(profile_id="m3-residual", version="rules-v1",
+                                           required_categories=("PII", "HEALTH_SENSITIVE", "PAYMENT", "CREDENTIAL", "BUSINESS_CONFIDENTIAL", "QUASI_IDENTIFIER"))
+        detector = DetectorIdentity(detector_id="m3-rules-residual", config_digest="sha256:" + hashlib.sha256(b"m3-rules-residual-v1").hexdigest())
+        metadata = ResidualCandidateMetadata(artifact_digest=private["artifact_digest"], media_type=private["media_type"],
+                                              expected_record_count=1 if type(body) is str else len(body),
+                                              expected_schema_digest=None if type(body) is str else private["evaluation_schema_digest"])
+        report = evaluate_candidate(body, metadata=metadata, detector=_residual_detector,
+                                    detector_identity=detector, profile=profile)
+        report_record = report.to_record()
+        report_record.update(run_id=run_id, policy_digest=run["payload"]["policy_digest"], rights_digest=run["payload"]["rights_digest"],
+                             evaluated_at=now().isoformat().replace("+00:00", "Z"))
+        record = control_record(kind="evaluation_report", identifier=str(uuid4()), tenant=principal.tenant,
+                                payload={"run_id": run_id, "candidate_digest": report.candidate_digest,
+                                         "policy_digest": run["payload"]["policy_digest"], "rights_digest": run["payload"]["rights_digest"],
+                                         "report": report_record}, expires_at=candidate["expires_at"])
+        persisted, _ = app.state.store.record_evaluation(run_id, principal.tenant, record, principal.subject)
+        return residual_view(persisted)
+
+    @app.post("/processing-runs/{run_id}/qualifications", response_model=QualificationView, status_code=201)
+    def create_qualification(run_id: str, request: QualificationCreate,
+                             principal: Principal = Depends(require_roles("reviewer"))):
+        candidate, run = app.state.store.private_candidate_for_run(run_id, principal.tenant)
+        evaluation = app.state.store.get_control("evaluation_report", request.evaluation_id, principal.tenant)
+        report = evaluation["payload"].get("report", {})
+        if evaluation["payload"].get("run_id") != run_id:
+            raise HTTPException(409, "Evaluation does not belong to the processing run")
+        try:
+            evaluated_at = parse_timestamp(report["evaluated_at"])
+            expiry = datetime.fromtimestamp(candidate["expires_at"], UTC)
+            candidate_binding = CandidateBinding(candidate["payload"]["artifact_digest"], run["payload"]["policy_digest"],
+                                                 run["payload"]["rights_digest"], run["payload"]["recipient"],
+                                                 run["payload"]["purpose"], expiry)
+            counts = report["residual_counts"]
+            # A missing family is absence of coverage, never zero residuals.
+            # The local rules adapter only claims the categories it reports.
+            measured = tuple(CategoryMeasurement(category, counts[category], report["total_units"])
+                             for category in sorted(TAXONOMY_CATEGORIES) if category in {"PII", "PAYMENT", "CREDENTIAL"})
+            qualification_report = QualificationReport(report["digest"], report["candidate_digest"],
+                                                        run["payload"]["policy_digest"], run["payload"]["rights_digest"],
+                                                        run["payload"]["recipient"], run["payload"]["purpose"], evaluated_at, measured)
+            criteria = QualificationCriteria(tuple(CategoryThreshold(category, 0) for category in TAXONOMY_CATEGORIES),
+                                             request.max_evaluation_age_seconds)
+            decision = qualify(qualification_id=str(uuid4()), candidate=candidate_binding,
+                               report=qualification_report, criteria=criteria, at=now())
+        except (KeyError, TypeError, ValueError, QualificationError):
+            raise HTTPException(503, "Control integrity verification failed") from None
+        payload = dict(decision.snapshot())
+        payload.update(run_id=run_id, reasons=list(payload.pop("reasons")))
+        record = control_record(kind="qualification", identifier=decision.qualification_id, tenant=principal.tenant,
+                                payload=payload, expires_at=candidate["expires_at"])
+        persisted, _ = app.state.store.record_qualification(run_id, principal.tenant, record, request.evaluation_id, principal.subject)
+        return qualification_view(persisted)
 
     @app.get("/datasets", response_model=list[DatasetSummary])
     def list_datasets(principal: Principal = Depends(require_roles("processor"))):

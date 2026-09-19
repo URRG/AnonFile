@@ -16,6 +16,8 @@ from datetime import UTC, datetime
 from threading import RLock
 
 from fastapi import HTTPException
+from app.candidate import (CandidateError, LedgerAction, LedgerReason, PayloadKind,
+                           SchemaContract, TransformLedgerEntry)
 
 
 def unavailable():
@@ -43,7 +45,11 @@ class DevelopmentStore:
     MAX_CONTROLS = 1_000
     MAX_CONTROLS_PER_TENANT = 250
     MAX_CONTROL_BYTES = 2_000_000
-    CONTROL_KINDS = frozenset({"rights_profile", "policy_snapshot", "processing_run", "authorization_request"})
+    # ``private_candidate`` is deliberately a private worker artifact, never a
+    # public control-plane resource.  It shares the encrypted durable-record
+    # envelope so plaintext never reaches SQLite, but has no GET/list route.
+    CONTROL_KINDS = frozenset({"rights_profile", "policy_snapshot", "processing_run", "authorization_request",
+                               "private_candidate", "evaluation_report", "qualification"})
     TTL_SECONDS = 3600
 
     def __init__(self):
@@ -89,10 +95,19 @@ class DevelopmentStore:
         entries = self._audit.get(tenant, [])
         # Reserve the final 20% for review/deletion/expiry. Once admission stops,
         # bounded live dataset/release quotas leave ample lifecycle capacity.
-        admission = action in {"dataset.created", "release.created"}
+        admission = action.endswith(".created")
         tenant_limit = int(self.MAX_AUDIT_EVENTS_PER_TENANT * .8) if admission else self.MAX_AUDIT_EVENTS_PER_TENANT
         global_limit = int(self.MAX_AUDIT_EVENTS * .8) if admission else self.MAX_AUDIT_EVENTS
-        if len(entries) >= tenant_limit or sum(map(len, self._audit.values())) >= global_limit:
+        # Claimed M3 runs persist slots for their terminal evidence.  Account
+        # for those reservations for every unrelated lifecycle event so another
+        # tenant/thread cannot exhaust history and strand a run in RUNNING.
+        reserved_tenant = sum(record["payload"].get("audit_reservation", 0)
+                              for record in self.controls["processing_run"].values()
+                              if record["tenant"] == tenant)
+        reserved_global = sum(record["payload"].get("audit_reservation", 0)
+                              for record in self.controls["processing_run"].values())
+        if (len(entries) + reserved_tenant >= tenant_limit
+                or sum(map(len, self._audit.values())) + reserved_global >= global_limit):
             raise HTTPException(429, "Development audit capacity exceeded")
         event = {"actor": actor, "action": action, "object_id": object_id,
                  "time": event_time or datetime.now(UTC).isoformat(), "seq": len(entries) + 1}
@@ -103,6 +118,19 @@ class DevelopmentStore:
         parent = record.get("dataset_id") if record is not None else None
         signature = hmac.new(self._audit_key, encoded([tenant, previous, event, commitment, parent]), hashlib.sha256).hexdigest()
         self._audit.setdefault(tenant, []).append({"event": event, "mac": signature, "record_commitment": commitment, "parent_id": parent})
+
+    def _reserve_audit_slots(self, tenant, slots):
+        """Refuse a claim unless its success/failure terminal evidence fits."""
+        if type(slots) is not int or slots < 1:
+            raise unavailable()
+        reserved_tenant = sum(record["payload"].get("audit_reservation", 0)
+                              for record in self.controls["processing_run"].values()
+                              if record["tenant"] == tenant)
+        reserved_global = sum(record["payload"].get("audit_reservation", 0)
+                              for record in self.controls["processing_run"].values())
+        if (len(self._audit.get(tenant, [])) + reserved_tenant + slots > self.MAX_AUDIT_EVENTS_PER_TENANT
+                or sum(map(len, self._audit.values())) + reserved_global + slots > self.MAX_AUDIT_EVENTS):
+            raise HTTPException(429, "Development audit capacity exceeded")
 
     def _purge(self):
         expired = [d for d in self.datasets.values() if d["expires_at"] <= time.time()]
@@ -137,10 +165,15 @@ class DevelopmentStore:
         self._invalidate_runs(tenant, "dataset_id", identifier)
 
     def _invalidate_runs(self, tenant, dependency_key, identifier):
-        """Tombstone registered metadata when a bound prerequisite disappears."""
+        """Tombstone runs and their private evidence when a prerequisite disappears."""
         for run_id, record in list(self.controls["processing_run"].items()):
             if record["tenant"] != tenant or record["payload"].get(dependency_key) != identifier:
                 continue
+            for kind in ("qualification", "evaluation_report", "private_candidate"):
+                for evidence_id, evidence in list(self.controls[kind].items()):
+                    if evidence["tenant"] == tenant and evidence["payload"].get("run_id") == run_id:
+                        self._append_event(tenant, kind + ".invalidated", evidence_id, "system")
+                        del self.controls[kind][evidence_id]
             self._append_event(tenant, "processing_run.invalidated", run_id, "system")
             del self.controls["processing_run"][run_id]
 
@@ -268,6 +301,269 @@ class DevelopmentStore:
         if (payload.get("rights_digest") != rights["payload"].get("digest")
                 or payload.get("policy_digest") != policy["payload"].get("digest")):
             raise HTTPException(409, "Run dependency is unavailable")
+
+    @staticmethod
+    def _run_event(payload, *, state, action, attempt, error_code=None):
+        events = payload.get("events")
+        if not isinstance(events, list) or not 1 <= len(events) < 16:
+            raise unavailable()
+        if state not in {"RUNNING", "CANDIDATE", "QUARANTINED", "FAILED"}:
+            raise unavailable()
+        if type(attempt) is not int or not 0 <= attempt <= 3:
+            raise unavailable()
+        event = {"sequence": len(events) + 1, "state": state, "action": action,
+                 "occurred_at": datetime.now(UTC).isoformat(), "attempt": attempt}
+        if error_code is not None:
+            if type(error_code) is not str or not error_code.isupper() or len(error_code) > 64:
+                raise unavailable()
+            event["error_code"] = error_code
+        events.append(event)
+
+    def claim_processing_run(self, identifier, tenant, actor):
+        """Atomically claim a registered run, rechecking live prerequisites.
+
+        The returned dataset is a detached, private in-process value.  Callers
+        must complete with a second atomic dependency check; it must never be
+        included in an HTTP response, event or exception.
+        """
+        with self._transaction():
+            self._purge()
+            self._purge_controls()
+            current = self._control("processing_run", identifier, tenant)
+            self._validate_run_dependencies(current)
+            if current["payload"].get("state") != "REGISTERED":
+                raise HTTPException(409, "Processing run is not available for execution")
+            # STARTED plus either CANDIDATE_CREATED/update or FAILED/update.
+            # Do this before changing state so an audit-full store cannot strand
+            # a run in RUNNING without a terminal lifecycle record.
+            self._reserve_audit_slots(tenant, 3)
+            revised = detached(current)
+            payload = revised["payload"]
+            attempts = payload.get("attempts")
+            if type(attempts) is not int or not 0 <= attempts < 3:
+                raise unavailable()
+            payload["state"] = "RUNNING"
+            payload["attempts"] = attempts + 1
+            payload["audit_reservation"] = 2
+            self._run_event(payload, state="RUNNING", action="STARTED", attempt=payload["attempts"])
+            revised["size_bytes"] = 0
+            self._validate_control(revised)
+            # Make the reservation visible to _append_event before it admits
+            # STARTED; transaction rollback restores the old snapshot on error.
+            self.controls["processing_run"][identifier] = revised
+            self._append_event(tenant, "processing_run.updated", identifier, actor, record=revised)
+            self.controls["processing_run"][identifier] = revised
+            dataset = detached(self._dataset(payload["dataset_id"], tenant))
+            return detached(revised), dataset
+
+    def complete_processing_run(self, identifier, tenant, candidate, actor):
+        """Persist an encrypted private candidate and metadata-only run state."""
+        candidate_data = detached(candidate)
+        with self._transaction():
+            self._purge()
+            self._purge_controls()
+            current = self._control("processing_run", identifier, tenant)
+            self._validate_run_dependencies(current)
+            if current["payload"].get("state") != "RUNNING":
+                raise HTTPException(409, "Processing run is not awaiting completion")
+            self._validate_control(candidate_data)
+            if candidate_data["kind"] != "private_candidate" or candidate_data["tenant"] != tenant:
+                raise unavailable()
+            candidate_payload = candidate_data["payload"]
+            if (candidate_payload.get("run_id") != identifier
+                    or candidate_payload.get("policy_digest") != current["payload"].get("policy_digest")
+                    or candidate_payload.get("input_digest") != current["payload"].get("source_digest")):
+                raise unavailable()
+            self._validate_private_candidate(candidate_payload)
+            if candidate_data["id"] in self.controls["private_candidate"] or self._used_identifier(candidate_data["id"], "private_candidate"):
+                raise HTTPException(409, "Object already exists")
+            if (sum(len(values) for values in self.controls.values()) >= self.MAX_CONTROLS
+                    or sum(item["tenant"] == tenant for values in self.controls.values() for item in values.values()) >= self.MAX_CONTROLS_PER_TENANT):
+                raise HTTPException(429, "Development control capacity exceeded")
+            revised = detached(current)
+            payload = revised["payload"]
+            payload["state"] = "CANDIDATE"
+            payload["audit_reservation"] = 1
+            payload["candidate"] = {key: candidate_payload[key] for key in ("artifact_digest", "byte_count", "media_type", "schema_digest", "payload_kind", "ledger")}
+            self._run_event(payload, state="CANDIDATE", action="CANDIDATE_CREATED", attempt=payload["attempts"])
+            revised["size_bytes"] = 0
+            self._validate_control(revised)
+            self.controls["processing_run"][identifier] = revised
+            self._append_event(tenant, "private_candidate.created", candidate_data["id"], actor, record=candidate_data)
+            self.controls["private_candidate"][candidate_data["id"]] = candidate_data
+            payload["audit_reservation"] = 0
+            revised["size_bytes"] = 0
+            self._validate_control(revised)
+            self.controls["processing_run"][identifier] = revised
+            self._append_event(tenant, "processing_run.updated", identifier, actor, record=revised)
+            self.controls["processing_run"][identifier] = revised
+            return detached(revised)
+
+    @staticmethod
+    def _validate_private_candidate(payload):
+        """Check private bytes against metadata before they enter encrypted storage."""
+        body = payload.get("body")
+        media_type, byte_count, digest = payload.get("media_type"), payload.get("byte_count"), payload.get("artifact_digest")
+        if media_type == "text/plain" and type(body) is str:
+            try:
+                raw = body.encode("utf-8")
+            except UnicodeError:
+                raise unavailable() from None
+        elif media_type == "application/json" and type(body) in (list, dict):
+            try:
+                raw = encoded(body)
+            except (TypeError, ValueError, UnicodeError):
+                raise unavailable() from None
+        else:
+            raise unavailable()
+        calculated = "sha256:" + hashlib.sha256(raw).hexdigest()
+        evaluation_schema = payload.get("evaluation_schema_digest")
+        def digest_value(value):
+            return (type(value) is str and len(value) == 71 and value.startswith("sha256:")
+                    and all(char in "0123456789abcdef" for char in value[7:]))
+        if (type(byte_count) is not int or byte_count != len(raw) or digest != calculated
+                or not digest_value(payload.get("schema_digest"))
+                or (media_type == "application/json" and not digest_value(evaluation_schema))
+                or (media_type == "text/plain" and evaluation_schema is not None)):
+            raise unavailable()
+        try:
+            kind = PayloadKind(payload.get("payload_kind"))
+            if media_type != ("text/plain" if kind is PayloadKind.TEXT else "application/json"):
+                raise CandidateError()
+            schema = SchemaContract.from_private_descriptor(kind=kind, digest=payload["schema_digest"],
+                                                             descriptor=payload.get("schema_descriptor"))
+            if not schema.accepts(body):
+                raise CandidateError()
+            ledger = payload.get("ledger")
+            if type(ledger) is not list:
+                raise CandidateError()
+            entries = tuple(TransformLedgerEntry(item["entity_type"], LedgerAction(item["action"]),
+                                                  LedgerReason(item["reason"]), item["count"])
+                            for item in ledger)
+            if (len(entries) != len(ledger)
+                    or tuple(sorted(entries, key=lambda item: (item.entity_type, item.action.value, item.reason.value))) != entries
+                    or len({(item.entity_type, item.action, item.reason) for item in entries}) != len(entries)):
+                raise CandidateError()
+        except (CandidateError, KeyError, TypeError, ValueError):
+            raise unavailable() from None
+
+    def fail_processing_run(self, identifier, tenant, code, actor):
+        """Record a fixed-code local worker failure without serializing errors."""
+        with self._transaction():
+            self._purge()
+            self._purge_controls()
+            current = self._control("processing_run", identifier, tenant)
+            if current["payload"].get("state") != "RUNNING":
+                raise HTTPException(409, "Processing run is not awaiting completion")
+            revised = detached(current)
+            payload = revised["payload"]
+            payload["state"] = "FAILED"
+            payload["audit_reservation"] = 0
+            self._run_event(payload, state="FAILED", action="FAILED", attempt=payload["attempts"], error_code=code)
+            revised["size_bytes"] = 0
+            self._validate_control(revised)
+            self.controls["processing_run"][identifier] = revised
+            self._append_event(tenant, "processing_run.updated", identifier, actor, record=revised)
+            self.controls["processing_run"][identifier] = revised
+            return detached(revised)
+
+    def private_candidate_for_run(self, identifier, tenant):
+        """Trusted internal accessor; deliberately not mapped to an API route."""
+        with self._transaction():
+            self._purge()
+            self._purge_controls()
+            run = self._control("processing_run", identifier, tenant)
+            if run["payload"].get("state") not in {"CANDIDATE", "QUARANTINED"}:
+                raise HTTPException(409, "Processing run has no candidate")
+            candidates = [record for record in self.controls["private_candidate"].values()
+                          if record["tenant"] == tenant and record["payload"].get("run_id") == identifier]
+            if len(candidates) != 1:
+                raise unavailable()
+            return detached(candidates[0]), detached(run)
+
+    def record_evaluation(self, identifier, tenant, evaluation, actor):
+        """Atomically bind aggregate residual evidence to the exact candidate."""
+        data = detached(evaluation)
+        with self._transaction():
+            self._purge()
+            self._purge_controls()
+            run = self._control("processing_run", identifier, tenant)
+            if run["payload"].get("state") != "CANDIDATE":
+                raise HTTPException(409, "Processing run is not available for evaluation")
+            candidates = [record for record in self.controls["private_candidate"].values()
+                          if record["tenant"] == tenant and record["payload"].get("run_id") == identifier]
+            if len(candidates) != 1:
+                raise unavailable()
+            self._validate_control(data)
+            payload = data["payload"]
+            if (data["kind"] != "evaluation_report" or data["tenant"] != tenant or payload.get("run_id") != identifier
+                    or payload.get("candidate_digest") != candidates[0]["payload"].get("artifact_digest")
+                    or payload.get("policy_digest") != run["payload"].get("policy_digest")
+                    or payload.get("rights_digest") != run["payload"].get("rights_digest")):
+                raise unavailable()
+            if data["id"] in self.controls["evaluation_report"] or self._used_identifier(data["id"], "evaluation_report"):
+                raise HTTPException(409, "Object already exists")
+            if (sum(len(values) for values in self.controls.values()) >= self.MAX_CONTROLS
+                    or sum(item["tenant"] == tenant for values in self.controls.values() for item in values.values()) >= self.MAX_CONTROLS_PER_TENANT):
+                raise HTTPException(429, "Development control capacity exceeded")
+            self._append_event(tenant, "evaluation_report.created", data["id"], actor, record=data)
+            self.controls["evaluation_report"][data["id"]] = data
+            if payload.get("evidence_status") == "FAILS_PROFILE":
+                revised = detached(run)
+                revised_payload = revised["payload"]
+                revised_payload["state"] = "QUARANTINED"
+                self._run_event(revised_payload, state="QUARANTINED", action="QUARANTINED",
+                                attempt=revised_payload["attempts"], error_code="RESIDUAL_FINDINGS")
+                revised["size_bytes"] = 0
+                self._validate_control(revised)
+                self._append_event(tenant, "processing_run.updated", identifier, actor, record=revised)
+                self.controls["processing_run"][identifier] = revised
+                run = revised
+            return detached(data), detached(run)
+
+    def record_qualification(self, identifier, tenant, qualification, evaluation_id, actor):
+        """Persist only a candidate/evidence-bound, non-authorizing decision."""
+        data = detached(qualification)
+        with self._transaction():
+            self._purge()
+            self._purge_controls()
+            run = self._control("processing_run", identifier, tenant)
+            if run["payload"].get("state") not in {"CANDIDATE", "QUARANTINED"}:
+                raise HTTPException(409, "Processing run is not available for qualification")
+            evaluation = self._control("evaluation_report", evaluation_id, tenant)
+            candidates = [record for record in self.controls["private_candidate"].values()
+                          if record["tenant"] == tenant and record["payload"].get("run_id") == identifier]
+            if len(candidates) != 1 or evaluation["payload"].get("run_id") != identifier:
+                raise unavailable()
+            self._validate_control(data)
+            payload = data["payload"]
+            if (data["kind"] != "qualification" or data["tenant"] != tenant or payload.get("run_id") != identifier
+                    or payload.get("candidate_artifact_digest") != candidates[0]["payload"].get("artifact_digest")
+                    or payload.get("evaluation_report_digest") != evaluation["payload"].get("report", {}).get("digest")
+                    or payload.get("policy_digest") != run["payload"].get("policy_digest")
+                    or payload.get("rights_digest") != run["payload"].get("rights_digest")
+                    or payload.get("buyer") != run["payload"].get("recipient")
+                    or payload.get("purpose") != run["payload"].get("purpose")):
+                raise unavailable()
+            if data["id"] in self.controls["qualification"] or self._used_identifier(data["id"], "qualification"):
+                raise HTTPException(409, "Object already exists")
+            if (sum(len(values) for values in self.controls.values()) >= self.MAX_CONTROLS
+                    or sum(item["tenant"] == tenant for values in self.controls.values() for item in values.values()) >= self.MAX_CONTROLS_PER_TENANT):
+                raise HTTPException(429, "Development control capacity exceeded")
+            self._append_event(tenant, "qualification.created", data["id"], actor, record=data)
+            self.controls["qualification"][data["id"]] = data
+            if payload.get("outcome") == "QUARANTINED" and run["payload"].get("state") == "CANDIDATE":
+                revised = detached(run)
+                revised_payload = revised["payload"]
+                revised_payload["state"] = "QUARANTINED"
+                self._run_event(revised_payload, state="QUARANTINED", action="QUARANTINED",
+                                attempt=revised_payload["attempts"], error_code="QUALIFICATION_FAILURE")
+                revised["size_bytes"] = 0
+                self._validate_control(revised)
+                self._append_event(tenant, "processing_run.updated", identifier, actor, record=revised)
+                self.controls["processing_run"][identifier] = revised
+                run = revised
+            return detached(data), detached(run)
 
     def _release(self, identifier, tenant):
         result = self.releases.get(identifier)
