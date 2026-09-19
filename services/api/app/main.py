@@ -1,56 +1,111 @@
-"""Demo API for an auditable anonymisation release workflow.
-
-This module intentionally keeps persistence and recognisers replaceable. Raw inputs are
-kept only in process memory; production deployments must use encrypted storage and KMS.
-"""
+"""Fail-closed development API. Synthetic data only; no release qualification."""
 from __future__ import annotations
-
-import hashlib
-import hmac
+import copy
 import json
-import re
-import secrets
+import math
 import os
-from collections import Counter
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 from uuid import uuid4
-
-from fastapi import FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, field_validator
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from app.contracts import PayloadError
+from app.processing import process_payload
+from app.repository import DevelopmentStore
+from app.security import Principal, load_principals, require_roles
 
+MAX_BODY_BYTES = 2_100_000
+MAX_PAYLOAD_BYTES = 2_000_000
+
+class BodyLimitMiddleware:
+    """Bound Content-Length and chunked bodies before JSON parsing/buffering."""
+    def __init__(self, app, max_bytes=MAX_BODY_BYTES):
+        self.app, self.max_bytes = app, max_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        headers = dict(scope.get("headers", []))
+        try:
+            length = int(headers.get(b"content-length", b"0"))
+            if length < 0:
+                raise ValueError
+        except ValueError:
+            return await JSONResponse({"detail": "Invalid request"}, status_code=400)(scope, receive, send)
+        if length > self.max_bytes:
+            return await JSONResponse({"detail": "Request body too large"}, status_code=413)(scope, receive, send)
+        body = bytearray()
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            chunk = message.get("body", b"")
+            if len(body) + len(chunk) > self.max_bytes:
+                return await JSONResponse({"detail": "Request body too large"}, status_code=413)(scope, receive, send)
+            body.extend(chunk)
+            if not message.get("more_body", False):
+                break
+        delivered = False
+        async def bounded_receive():
+            nonlocal delivered
+            if not delivered:
+                delivered = True
+                return {"type": "http.request", "body": bytes(body), "more_body": False}
+            return await receive()
+        await self.app(scope, bounded_receive, send)
 
 class ReleaseMode(str, Enum):
     EXTERNAL_ANONYMIZED = "external_anonymized"
     RESTRICTED_PSEUDONYMIZED = "restricted_pseudonymized"
 
-
 class Eligibility(str, Enum):
     BLOCKED = "BLOCKED"
     REVIEW_REQUIRED = "REVIEW_REQUIRED"
-    APPROVED_RESTRICTED = "APPROVED_RESTRICTED"
-    APPROVED_ANONYMIZED = "APPROVED_ANONYMIZED"
 
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
 
-class DatasetCreate(BaseModel):
+class DatasetCreate(StrictModel):
     name: str = Field(min_length=1, max_length=160)
-    content: str | None = Field(default=None, max_length=2_000_000)
-    records: list[dict[str, Any]] | None = Field(default=None, max_length=10_000)
+    content: str | None = Field(default=None, min_length=1, max_length=MAX_PAYLOAD_BYTES)
+    records: list[dict[str, Any]] | None = Field(default=None, min_length=1, max_length=10_000)
     owner: str = Field(default="unknown", max_length=160)
     jurisdiction: str = Field(default="unspecified", max_length=80)
-    intended_use: str = Field(default="analytics", max_length=160)
-    recipient: str = Field(default="internal", max_length=160)
-    retention_days: int = Field(default=30, ge=1, le=3650)
+    intended_use: str = Field(default="evaluation", max_length=160)
+    recipient: str = Field(default="unspecified", max_length=160)
+    retention_days: int = Field(default=1, ge=1, le=3650)
 
-    @field_validator("records")
-    @classmethod
-    def require_payload(cls, value: list[dict[str, Any]] | None, info: Any) -> list[dict[str, Any]] | None:
-        if not value and not info.data.get("content"):
-            raise ValueError("provide content or records")
-        return value
-
+    @model_validator(mode="after")
+    def payload_contract(self):
+        if (self.content is None) == (self.records is None):
+            raise ValueError("Exactly one payload required")
+        nodes, stack = 0, [(self.content if self.content is not None else self.records, 0)]
+        while stack:
+            value, depth = stack.pop()
+            nodes += 1
+            if depth > 32 or nodes > 100_000:
+                raise ValueError("Unsupported payload structure")
+            if isinstance(value, dict):
+                stack.extend((v, depth + 1) for v in value.values())
+                nodes += len(value)
+            elif isinstance(value, list):
+                stack.extend((v, depth + 1) for v in value)
+            elif isinstance(value, float) and not math.isfinite(value):
+                raise ValueError("Unsupported numeric value")
+        try:
+            # Metadata and object keys also must be encodable; do not let them
+            # raise source-bearing internal errors after validation succeeds.
+            json.dumps(self.model_dump(), ensure_ascii=False, allow_nan=False).encode("utf-8")
+            encoded = json.dumps(self.records, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8") if self.records is not None else self.content.encode("utf-8")
+        except (ValueError, UnicodeError, RecursionError):
+            raise ValueError("Unsupported payload") from None
+        if len(encoded) > MAX_PAYLOAD_BYTES or self.content is not None and not self.content.strip():
+            raise ValueError("Unsupported payload")
+        return self
 
 class DatasetSummary(BaseModel):
     id: str
@@ -60,217 +115,148 @@ class DatasetSummary(BaseModel):
     owner: str
     intended_use: str
 
-
-class ReleaseCreate(BaseModel):
-    dataset_id: str
-    release_mode: ReleaseMode = ReleaseMode.EXTERNAL_ANONYMIZED
+class ReleaseCreate(StrictModel):
+    dataset_id: str = Field(min_length=1, max_length=80)
+    release_mode: str = "external_anonymized"
     policy_version: str = Field(default="baseline-v1", max_length=80)
     allow_review: bool = True
 
+    @model_validator(mode="after")
+    def coherent_policy(self):
+        profiles = {"baseline-v1": {m.value for m in ReleaseMode},
+                    "external-release-v1": {"external_anonymized"},
+                    "restricted-pseudonymized-v1": {"restricted_pseudonymized"}}
+        if self.release_mode not in profiles.get(self.policy_version, set()):
+            raise ValueError("Unsupported policy or release mode")
+        return self
 
-class ReviewDecision(BaseModel):
+class ReviewDecision(StrictModel):
     decision: str = Field(pattern="^(approve|reject)$")
-    reviewer: str = Field(min_length=1, max_length=160)
+    # Accepted for legacy UI compatibility, never trusted or echoed.
+    reviewer: str | None = Field(default=None, max_length=160)
     note: str = Field(default="", max_length=1000)
-
-
-class Finding(BaseModel):
-    entity_type: str
-    severity: str
-    count: int
-    confidence: float
-
-
-class ScoreCard(BaseModel):
-    privacy_risk: int = Field(ge=0, le=100)
-    utility_legibility: int = Field(ge=0, le=100)
-    subjectivity: int = Field(ge=0, le=100)
-    sensitivity: str
-    confidence: int = Field(ge=0, le=100)
-
 
 class ReleaseCard(BaseModel):
     release_id: str
     dataset_id: str
     generated_at: datetime
     policy_version: str
-    release_mode: ReleaseMode
+    release_mode: str
     eligibility: Eligibility
-    scores: ScoreCard
-    findings: list[Finding]
+    findings: list[dict[str, Any]]
     gates: list[str]
-    controls: list[str]
-    output_sha256: str
-    signature: str
-    disclaimer: str
-
+    limitations: list[str]
+    evidence_status: str = "INSUFFICIENT_EVIDENCE"
+    scores: None = None
+    revision: int = 1
 
 class ReleaseView(BaseModel):
     id: str
     dataset_id: str
-    status: str
+    status: str = "evaluation_incomplete"
     eligibility: Eligibility
-    output: str | list[dict[str, Any]]
+    output: None = None
     card: ReleaseCard
     review: dict[str, Any] | None = None
 
-
-DATASETS: dict[str, dict[str, Any]] = {}
-RELEASES: dict[str, dict[str, Any]] = {}
-SIGNING_KEY = secrets.token_bytes(32)
-
-# A conservative first pass: production must replace this with versioned recognisers.
-PATTERNS: dict[str, tuple[re.Pattern[str], str, str]] = {
-    "CREDENTIAL": (re.compile(r"(?i)\b(?:api[_ -]?key|password|secret|token)\s*[:=]\s*['\"]?[^\s,'\"]+"), "critical", "[REDACTED_CREDENTIAL]"),
-    "EMAIL": (re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"), "high", "EMAIL"),
-    "PHONE": (re.compile(r"(?<!\w)(?:\+?\d{1,3}[ -]?)?(?:\(?\d{2,4}\)?[ -]?)?\d{3,5}[ -]\d{4}(?!\w)"), "high", "PHONE"),
-    "AADHAAR": (re.compile(r"(?<!\d)\d{4}[ -]?\d{4}[ -]?\d{4}(?!\d)"), "critical", "[REDACTED_AADHAAR]"),
-    "PAN": (re.compile(r"\b[A-Z]{5}\d{4}[A-Z]\b"), "high", "[REDACTED_PAN]"),
-    "CARD": (re.compile(r"(?<!\d)(?:\d[ -]?){13,16}(?!\d)"), "critical", "[REDACTED_CARD]"),
-    "IP_ADDRESS": (re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), "medium", "IP_ADDRESS"),
-}
-SUBJECTIVE = re.compile(r"(?i)\b(?:i think|i believe|in my opinion|probably|perhaps|should|best|worst|great|terrible)\b")
-
-
-def now() -> datetime:
+def now():
     return datetime.now(UTC)
 
+def release_view(record):
+    return ReleaseView(id=record["id"], dataset_id=record["dataset_id"], eligibility=record["card"].eligibility,
+                       card=record["card"].model_copy(deep=True), review=copy.deepcopy(record["review"]))
 
-def serialise_records(records: list[dict[str, Any]] | None, content: str | None) -> str:
-    return content if content is not None else json.dumps(records or [], sort_keys=True, ensure_ascii=False)
+def create_app() -> FastAPI:
+    app = FastAPI(title="AnonFlow development API", version="0.2.0", docs_url=None, redoc_url=None, openapi_url=None)
+    app.state.principals = load_principals()
+    app.state.store = DevelopmentStore()
+    app.add_middleware(BodyLimitMiddleware)
+    origins = [v.strip() for v in os.getenv("WEB_ORIGIN", "http://localhost:3000,http://localhost:5173").split(",") if v.strip()]
+    app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=False,
+                       allow_methods=["GET", "POST"], allow_headers=["Content-Type", "Authorization"])
 
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request: Request, exc):
+        return JSONResponse({"detail": "Request validation failed"}, status_code=422)
 
-def anonymize(text: str, mode: ReleaseMode) -> tuple[str, list[Finding], list[str]]:
-    findings: list[Finding] = []
-    gates: list[str] = []
-    counters: Counter[str] = Counter()
-    replacements: dict[str, str] = {}
+    @app.exception_handler(PayloadError)
+    async def invalid_payload(request: Request, exc):
+        return JSONResponse({"detail": "Unsupported payload"}, status_code=422)
 
-    for kind, (pattern, severity, default) in PATTERNS.items():
-        def replace(match: re.Match[str], kind: str = kind, default: str = default) -> str:
-            value = match.group(0)
-            counters[kind] += 1
-            if kind == "CREDENTIAL":
-                gates.append("credential detected and suppressed; external release blocked")
-                return default
-            if mode == ReleaseMode.EXTERNAL_ANONYMIZED:
-                # Deliberately not stable across documents/releases.
-                return f"[{default}]"
-            key = f"{kind}:{value.lower()}"
-            if key not in replacements:
-                replacements[key] = f"{default}_{len(replacements) + 1:04d}"
-            return f"[{replacements[key]}]"
-        text = pattern.sub(replace, text)
+    @app.middleware("http")
+    async def response_protection(request: Request, call_next):
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
 
-    for kind, (_, severity, _) in PATTERNS.items():
-        if counters[kind]:
-            findings.append(Finding(entity_type=kind, severity=severity, count=counters[kind], confidence=0.92 if kind != "IP_ADDRESS" else 0.80))
-    return text, findings, list(dict.fromkeys(gates))
+    @app.get("/health")
+    def health():
+        return {"status": "ok", "service": "anonflow-api", "mode": "development", "production_ready": False}
 
+    @app.post("/datasets", response_model=DatasetSummary, status_code=201)
+    def create_dataset(request: DatasetCreate, principal: Principal = Depends(require_roles("processor"))):
+        identifier = str(uuid4())
+        data = request.model_dump()
+        data.update(id=identifier, tenant=principal.tenant, owner=principal.subject, created_at=now())
+        data["size_bytes"] = len(json.dumps(data, default=str, ensure_ascii=False).encode("utf-8"))
+        app.state.store.add_dataset(data)
+        return DatasetSummary(**{k: data[k] for k in ("id", "name", "created_at", "owner", "intended_use")}, record_count=len(request.records) if request.records is not None else 1)
 
-def build_card(release_id: str, dataset_id: str, output: str, findings: list[Finding], gates: list[str], request: ReleaseCreate) -> ReleaseCard:
-    severity = {"critical": 30, "high": 14, "medium": 6}
-    detected_risk = min(85, sum(severity[f.severity] * f.count for f in findings))
-    credential = any(f.entity_type == "CREDENTIAL" for f in findings)
-    sensitivity = "Restricted" if any(f.severity == "critical" for f in findings) else "Confidential" if findings else "Internal"
-    utility = max(35, 100 - min(55, sum(f.count for f in findings) * 3))
-    subjectivity = min(100, len(SUBJECTIVE.findall(output)) * 15)
-    confidence = 88 if findings else 70
-    if credential:
-        eligibility = Eligibility.BLOCKED
-    elif request.release_mode == ReleaseMode.RESTRICTED_PSEUDONYMIZED:
-        eligibility = Eligibility.APPROVED_RESTRICTED
-        gates.append("pseudonymized output requires named-recipient restricted controls")
-    elif detected_risk > 60:
-        eligibility = Eligibility.REVIEW_REQUIRED if request.allow_review else Eligibility.BLOCKED
-        gates.append("high sensitivity requires human review")
-    else:
-        eligibility = Eligibility.APPROVED_ANONYMIZED
-        gates.append("residual scan passed baseline policy")
-    encoded = output.encode()
-    digest = hashlib.sha256(encoded).hexdigest()
-    payload = f"{release_id}:{dataset_id}:{digest}:{request.policy_version}".encode()
-    signature = hmac.new(SIGNING_KEY, payload, hashlib.sha256).hexdigest()
-    return ReleaseCard(release_id=release_id, dataset_id=dataset_id, generated_at=now(), policy_version=request.policy_version,
-        release_mode=request.release_mode, eligibility=eligibility,
-        scores=ScoreCard(privacy_risk=detected_risk, utility_legibility=utility, subjectivity=subjectivity, sensitivity=sensitivity, confidence=confidence),
-        findings=findings, gates=list(dict.fromkeys(gates)),
-        controls=["policy-versioned", "independent-release-card", "raw-data-not-logged"] + (["named-recipient", "expiry-required"] if request.release_mode == ReleaseMode.RESTRICTED_PSEUDONYMIZED else ["no-mapping-retained"]),
-        output_sha256=digest, signature=signature,
-        disclaimer="A score is evidence for review, not a legal determination of anonymity or compliance.")
+    @app.get("/datasets", response_model=list[DatasetSummary])
+    def list_datasets(principal: Principal = Depends(require_roles("processor"))):
+        store = app.state.store
+        with store.lock:
+            store.purge()
+            return [DatasetSummary(**{k: d[k] for k in ("id", "name", "created_at", "owner", "intended_use")}, record_count=len(d["records"]) if d["records"] is not None else 1)
+                    for d in store.datasets.values() if d["tenant"] == principal.tenant]
 
+    @app.post("/releases", response_model=ReleaseView, status_code=201)
+    def create_release(request: ReleaseCreate, principal: Principal = Depends(require_roles("processor"))):
+        store = app.state.store
+        with store.lock:
+            dataset = store.get_dataset(request.dataset_id, principal.tenant)
+            store.check_release_capacity(principal.tenant)
+            result = process_payload(content=dataset["content"], records=dataset["records"], mode=request.release_mode)
+            identifier = str(uuid4())
+            eligibility = Eligibility.BLOCKED if result.critical_detected or not request.allow_review else Eligibility.REVIEW_REQUIRED
+            card = ReleaseCard(release_id=identifier, dataset_id=request.dataset_id, generated_at=now(), policy_version=request.policy_version,
+                               release_mode=request.release_mode, eligibility=eligibility,
+                               findings=[{"entity_type": f.entity_type, "severity": f.severity, "count": f.count} for f in result.findings],
+                               gates=["EXPORT_DISABLED", "QUALIFICATION_REQUIRED"] + (["CRITICAL_FINDING"] if result.critical_detected else []) + (["REVIEW_DISABLED"] if not request.allow_review else []),
+                               limitations=list(dict.fromkeys([*result.limitations, "No independent privacy or utility qualification has been performed.", "Development-only: process-local storage expires after at most one hour on access; no secure erasure guarantee.", "No buyer delivery, anonymity guarantee or production authorization is supported."])))
+            record = {"id": identifier, "dataset_id": request.dataset_id, "tenant": principal.tenant, "creator": principal.subject,
+                      "card": card, "review": None, "events": [{"revision": 1, "card": card.model_copy(deep=True)}]}
+            # Candidate output deliberately is neither retained nor returned.
+            store.releases[identifier] = record
+            return release_view(record)
 
-app = FastAPI(title="AnonFlow API", version="0.1.0", description="Policy-driven anonymisation demo API")
-allowed_origins = [origin.strip() for origin in os.getenv("WEB_ORIGIN", "http://localhost:3000,http://localhost:5173").split(",") if origin.strip()]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_credentials=False,
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type", "Authorization"],
-)
+    @app.get("/releases/{release_id}", response_model=ReleaseView)
+    def get_release(release_id: str, principal: Principal = Depends(require_roles("processor", "reviewer"))):
+        with app.state.store.lock:
+            return release_view(app.state.store.get_release(release_id, principal.tenant))
 
+    @app.get("/releases/{release_id}/card", response_model=ReleaseCard)
+    def get_card(release_id: str, principal: Principal = Depends(require_roles("processor", "reviewer"))):
+        with app.state.store.lock:
+            return app.state.store.get_release(release_id, principal.tenant)["card"].model_copy(deep=True)
 
-@app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok", "service": "anonflow-api"}
+    @app.post("/reviews/{release_id}/decision", response_model=ReleaseView)
+    def review(release_id: str, request: ReviewDecision, principal: Principal = Depends(require_roles("reviewer"))):
+        with app.state.store.lock:
+            record = app.state.store.get_release(release_id, principal.tenant)
+            if record["creator"] == principal.subject:
+                raise HTTPException(403, "Independent reviewer required")
+            if request.decision == "approve":
+                raise HTTPException(409, "Insufficient evidence; approval is disabled")
+            card = record["card"]
+            if card.eligibility != Eligibility.REVIEW_REQUIRED:
+                raise HTTPException(409, "Release is not awaiting review")
+            record["card"] = card.model_copy(deep=True, update={"eligibility": Eligibility.BLOCKED, "revision": card.revision + 1, "generated_at": now(), "gates": [*card.gates, "REVIEW_REJECTED"]})
+            record["review"] = {"decision": "reject", "reviewer": principal.subject, "decided_at": now().isoformat()}
+            record["events"].append({"revision": record["card"].revision, "card": record["card"].model_copy(deep=True), "review": copy.deepcopy(record["review"])})
+            return release_view(record)
 
+    return app
 
-@app.post("/datasets", response_model=DatasetSummary, status_code=status.HTTP_201_CREATED)
-def create_dataset(request: DatasetCreate) -> DatasetSummary:
-    dataset_id = str(uuid4())
-    DATASETS[dataset_id] = {"id": dataset_id, **request.model_dump(), "created_at": now()}
-    return DatasetSummary(id=dataset_id, name=request.name, created_at=DATASETS[dataset_id]["created_at"], record_count=len(request.records or []), owner=request.owner, intended_use=request.intended_use)
-
-
-@app.get("/datasets", response_model=list[DatasetSummary])
-def list_datasets() -> list[DatasetSummary]:
-    return [DatasetSummary(id=d["id"], name=d["name"], created_at=d["created_at"], record_count=len(d["records"] or []), owner=d["owner"], intended_use=d["intended_use"]) for d in DATASETS.values()]
-
-
-@app.post("/releases", response_model=ReleaseView, status_code=status.HTTP_201_CREATED)
-def create_release(request: ReleaseCreate) -> ReleaseView:
-    dataset = DATASETS.get(request.dataset_id)
-    if not dataset:
-        raise HTTPException(404, "dataset not found")
-    source = serialise_records(dataset["records"], dataset["content"])
-    output, findings, gates = anonymize(source, request.release_mode)
-    release_id = str(uuid4())
-    card = build_card(release_id, request.dataset_id, output, findings, gates, request)
-    record = {"id": release_id, "dataset_id": request.dataset_id, "output": output, "card": card, "review": None}
-    RELEASES[release_id] = record
-    return ReleaseView(id=release_id, dataset_id=request.dataset_id, status="completed", eligibility=card.eligibility, output=output, card=card)
-
-
-@app.get("/releases/{release_id}", response_model=ReleaseView)
-def get_release(release_id: str) -> ReleaseView:
-    record = RELEASES.get(release_id)
-    if not record:
-        raise HTTPException(404, "release not found")
-    card: ReleaseCard = record["card"]
-    return ReleaseView(id=release_id, dataset_id=record["dataset_id"], status="completed", eligibility=card.eligibility, output=record["output"], card=card, review=record["review"])
-
-
-@app.get("/releases/{release_id}/card", response_model=ReleaseCard)
-def get_release_card(release_id: str) -> ReleaseCard:
-    if release_id not in RELEASES:
-        raise HTTPException(404, "release not found")
-    return RELEASES[release_id]["card"]
-
-
-@app.post("/reviews/{release_id}/decision", response_model=ReleaseView)
-def review_release(release_id: str, request: ReviewDecision) -> ReleaseView:
-    record = RELEASES.get(release_id)
-    if not record:
-        raise HTTPException(404, "release not found")
-    card: ReleaseCard = record["card"]
-    if card.eligibility != Eligibility.REVIEW_REQUIRED:
-        raise HTTPException(409, "release is not awaiting review")
-    if request.decision == "approve":
-        card.eligibility = Eligibility.APPROVED_RESTRICTED
-        card.gates.append("human reviewer approved restricted delivery")
-    else:
-        card.eligibility = Eligibility.BLOCKED
-        card.gates.append("human reviewer rejected release")
-    record["review"] = {**request.model_dump(), "decided_at": now().isoformat()}
-    return ReleaseView(id=release_id, dataset_id=record["dataset_id"], status="completed", eligibility=card.eligibility, output=record["output"], card=card, review=record["review"])
+app = create_app()
