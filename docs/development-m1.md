@@ -30,6 +30,8 @@ From `services/api`: `python -m pytest -q`. From `apps/web`: `npm test` and `npm
 
 ## Independent gold-label evaluation
 
+Repository-level deployment regression checks use `npm run test:deployment` from `apps/web`. They require the full checkout and run separately in CI; `make web-test` intentionally runs only the web unit tests inside its web-only image. Static configuration checks are not a substitute for building and running Docker images.
+
 From `services/api`:
 
 ```text
