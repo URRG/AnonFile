@@ -47,9 +47,9 @@ def test_rejection_new_snapshot_server_actor_no_note_echo(client):
     assert changed["card"]["revision"] == 2
     assert changed["review"]["reviewer"] == "reviewer"
     assert "sensitive-note" not in response.text and "forged" not in response.text
-    assert old_card.eligibility == "REVIEW_REQUIRED"
+    assert old_card["eligibility"] == "REVIEW_REQUIRED"
     events = client.app.state.store.releases[item["id"]]["events"]
-    assert len(events) == 2 and events[0]["card"].eligibility == "REVIEW_REQUIRED"
+    assert len(events) == 2 and events[0]["card"]["eligibility"] == "REVIEW_REQUIRED"
     assert client.post(f"/reviews/{item['id']}/decision", headers=auth("reviewer"), json={"decision": "reject"}).status_code == 409
 
 @pytest.mark.parametrize("payload", [{"policy_version": "made-up"}, {"release_mode": "raw"}, {"release_mode": "restricted_pseudonymized", "policy_version": "external-release-v1"}, {"release_mode": "external_anonymized", "policy_version": "restricted-pseudonymized-v1"}])

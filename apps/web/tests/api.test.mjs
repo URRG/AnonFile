@@ -34,6 +34,22 @@ test('release failure after intake is still failure', async t => {
   t.mock.method(globalThis, 'fetch', async () => ++calls === 1 ? Response.json({ id: 'dataset-1' }) : new Response('secret', { status: 500 }))
   await assert.rejects(requestRelease(request), /No release was authorized/)
 })
+
+for (const format of ['text', 'json', 'jsonl', 'csv']) {
+  test(`source format ${format} uses strict server intake`, async t => {
+    let count = 0
+    const mock = t.mock.method(globalThis, 'fetch', async () => Response.json(++count === 1 ? { id: 'dataset-1' } : safe()))
+    await requestRelease({ ...request, format })
+    assert.equal(mock.mock.calls[0].arguments[0], 'http://localhost:8000/ingestions')
+    assert.equal(JSON.parse(mock.mock.calls[0].arguments[1].body).format, format)
+  })
+}
+
+test('unknown source format never reaches transport', async t => {
+  const mock = t.mock.method(globalThis, 'fetch', async () => { throw new Error('must not run') })
+  await assert.rejects(requestRelease({ ...request, format: 'xml' }), /Unsupported source format/)
+  assert.equal(mock.mock.calls.length, 0)
+})
 test('unsafe response fields rejected', () => {
   for (const change of [x => x.output = 'secret', x => delete x.output, x => x.eligibility = 'APPROVED_ANONYMIZED', x => x.card.scores = { privacy: 99 }, x => x.card.evidence_status = 'PASSED', x => x.card.findings = [{ count: -1 }]]) {
     const value = safe(); change(value); assert.throws(() => validateRelease(value), /unsafe response/)

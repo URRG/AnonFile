@@ -25,7 +25,7 @@ test('real HTTP intake, withholding, independent review and isolation', { timeou
   ]
   const child = spawn(process.env.ANONFLOW_TEST_PYTHON || 'python', ['-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', String(port), '--no-access-log'], {
     cwd: fileURLToPath(new URL('../../../services/api/', import.meta.url)),
-    env: { ...process.env, ANONFLOW_ENV: 'development', ANONFLOW_DEV_PRINCIPALS: JSON.stringify(principals), PYTHONDONTWRITEBYTECODE: '1' },
+    env: { ...process.env, ANONFLOW_ENV: 'development', ANONFLOW_AUTH_MODE: 'dev-token', ANONFLOW_STORAGE_MODE: 'memory', ANONFLOW_DEV_PRINCIPALS: JSON.stringify(principals), PYTHONDONTWRITEBYTECODE: '1' },
     stdio: 'ignore', windowsHide: true,
   })
   let launchError = false
@@ -60,6 +60,18 @@ test('real HTTP intake, withholding, independent review and isolation', { timeou
     const critical = await requestRelease({ apiBase: base, token: processor, content: 'password="synthetic-only-secret"', mode: 'restricted_pseudonymized', recipient: 'synthetic-buyer' })
     assert.equal(critical.eligibility, 'BLOCKED')
     assert.equal(critical.output, null)
+    for (const [format, content] of [['csv', 'contact,code\nsynthetic@example.test,001'], ['json', '[{"contact":"synthetic@example.test"}]'], ['jsonl', '{"contact":"synthetic@example.test"}\n']]) {
+      const parsed = await requestRelease({ apiBase: base, token: processor, content, format, mode: 'external_anonymized', recipient: 'synthetic-buyer' })
+      assert.equal(parsed.output, null)
+      const manifest = await call(`/datasets/${parsed.dataset_id}/manifest`, reviewer)
+      assert.equal(manifest.status, 200)
+      assert.equal((await manifest.json()).manifest.format, format)
+      assert.equal((await fetch(`${base}/datasets/${parsed.dataset_id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${processor}` } })).status, 204)
+      assert.equal((await call(`/releases/${parsed.id}`, processor)).status, 404)
+    }
+    const audit = await call('/audit', reviewer)
+    assert.equal(audit.status, 200)
+    assert.ok((await audit.json()).events.some(event => event.action === 'dataset.deleted'))
   } finally {
     if (child.exitCode === null && !launchError) {
       const closed = new Promise(resolve => child.once('close', resolve))

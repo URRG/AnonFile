@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { requestRelease, type Mode, type ReleaseView } from './api'
+import { requestRelease, type Mode, type ReleaseView, type SourceFormat } from './api'
 import './styles.css'
 
 function App() {
@@ -8,6 +8,7 @@ function App() {
   const [content, setContent] = useState('Synthetic example only: contact alex@example.com about booking DEMO-123.')
   const [recipient, setRecipient] = useState('synthetic-recipient')
   const [mode, setMode] = useState<Mode>('external_anonymized')
+  const [format, setFormat] = useState<SourceFormat>('text')
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<ReleaseView | null>(null)
   const [error, setError] = useState('')
@@ -23,7 +24,7 @@ function App() {
     activeRequest.current = controller
     clear(); setBusy(true)
     try {
-      const release = await requestRelease({ apiBase: import.meta.env.VITE_API_URL || 'http://localhost:8000', token, content, recipient, mode, signal: controller.signal })
+      const release = await requestRelease({ apiBase: import.meta.env.VITE_API_URL || 'http://localhost:8000', token, content, recipient, mode, format, signal: controller.signal })
       if (activeRequest.current === controller && !controller.signal.aborted) setResult(release)
     } catch (cause) {
       if (activeRequest.current === controller) setError(cause instanceof Error ? cause.message : 'Processing failed. No release was authorized.')
@@ -37,11 +38,15 @@ function App() {
     <p>Rules can miss names, context, health information, confidential business data and identifying relationships. No result from this workbench qualifies a dataset for sale.</p>
     <form onSubmit={event => { event.preventDefault(); void run() }}>
       <fieldset disabled={busy}>
-        <label>Development processor token<input type="password" value={token} autoComplete="off" spellCheck={false} required onChange={e => { clear(); setToken(e.target.value) }} /></label>
+        <label>Processor access token<input type="password" value={token} autoComplete="off" spellCheck={false} required onChange={e => { clear(); setToken(e.target.value) }} /></label>
         <label>Intended recipient<input value={recipient} required maxLength={160} onChange={e => { clear(); setRecipient(e.target.value) }} /></label>
         <label>Requested mode<select value={mode} onChange={e => { clear(); setMode(e.target.value as Mode) }}>
           <option value="external_anonymized">External anonymized candidate (unqualified)</option>
           <option value="restricted_pseudonymized">Restricted pseudonymized candidate (unqualified)</option>
+        </select></label>
+        <label>Source format<select value={format} onChange={e => { clear(); setFormat(e.target.value as SourceFormat) }}>
+          <option value="text">Plain text</option><option value="json">JSON array of objects</option>
+          <option value="jsonl">JSON Lines (objects)</option><option value="csv">CSV with headers</option>
         </select></label>
         <label>Synthetic input<textarea value={content} required rows={9} onChange={e => { clear(); setContent(e.target.value) }} /></label>
         <button type="submit">{busy ? 'Processing…' : 'Run synthetic evaluation'}</button>
