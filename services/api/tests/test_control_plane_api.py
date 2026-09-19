@@ -66,6 +66,14 @@ def ingested_dataset(client):
     return response.json()["id"]
 
 
+def test_processing_run_preflight_allows_idempotency_key(client):
+    response = client.options("/processing-runs", headers={"Origin": "http://localhost:3000",
+                                                             "Access-Control-Request-Method": "POST",
+                                                             "Access-Control-Request-Headers": "Idempotency-Key"})
+    assert response.status_code == 200
+    assert "idempotency-key" in response.headers["access-control-allow-headers"].lower()
+
+
 def run_request(dataset_id, policy_id, rights_id, **changes):
     result = {"dataset_id": dataset_id, "policy_snapshot_id": policy_id, "rights_profile_id": rights_id,
               "recipient": "buyer-a", "purpose": "model-training", "release_mode": "external_anonymized",

@@ -178,6 +178,8 @@ class ProcessingPlan:
             parsed = json.loads(self.options.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             _fail("Invalid processing run request.")
+        if type(parsed) is not dict:
+            _fail("Invalid processing run request.")
         if canonical_json(parsed) != self.options:
             _fail("Invalid processing run request.")
 

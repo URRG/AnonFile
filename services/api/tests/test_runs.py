@@ -37,6 +37,13 @@ def test_request_digest_is_stable_across_object_order_and_plan_is_immutable():
     assert first.options == canonical_json({"a": {"enabled": True}, "z": [3, 2]})
 
 
+@pytest.mark.parametrize("options", [b"null", b"[]"])
+def test_direct_plan_construction_keeps_mapping_options_contract(options):
+    with pytest.raises(RunError):
+        ProcessingPlan(dataset_id="dataset-1", source_digest=SOURCE, policy_id="baseline", policy_version="v1",
+                       method_id="rules-v1", mode="external_anonymized", options=options)
+
+
 def test_register_is_idempotent_for_identical_request_and_conflicts_for_different_request():
     store = registry()
     created, reused = register(store)

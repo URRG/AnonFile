@@ -38,12 +38,17 @@ SUPPORTED_FORMATS = frozenset({"text", "json", "jsonl", "csv"})
 SUPPORTED_ACTIONS = frozenset({"suppress", "generalize", "tokenize", "review", "block"})
 SUPPORTED_RELEASE_MODES = frozenset({"external_anonymized", "restricted_pseudonymized"})
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}\Z")
+_SNAPSHOT_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}\Z")
 _LANGUAGE = re.compile(r"(?:und|[a-z]{2,3}(?:-[A-Z]{2})?)\Z")
 _MAX_RULES = 64
 
 
 def _valid_identifier(value: object) -> bool:
     return isinstance(value, str) and bool(_IDENTIFIER.fullmatch(value))
+
+
+def _valid_snapshot_key(value: object) -> bool:
+    return isinstance(value, str) and bool(_SNAPSHOT_KEY.fullmatch(value))
 
 
 def _validate_language(value: object) -> str:
@@ -100,7 +105,11 @@ class PolicyProfile:
     @property
     def key(self) -> str:
         """Stable client-facing policy/version reference (for example ``baseline-v1``)."""
-        return f"{self.policy_id}-{self.version}"
+        # ``-`` is valid in both components, so concatenation with that
+        # delimiter is ambiguous (``a-b``/``c`` versus ``a``/``b-c``).
+        # ``:`` is excluded by the identifier grammar and makes this key
+        # injective without relying on a parser's split heuristic.
+        return f"{self.policy_id}::{self.version}"
 
     def canonical(self) -> dict[str, object]:
         # Sort all unordered policy choices.  The digest therefore does not
@@ -217,7 +226,7 @@ class PolicyRegistry:
         return snapshot
 
     def resolve(self, key: str) -> PolicySnapshot:
-        if not _valid_identifier(key):
+        if not _valid_snapshot_key(key):
             raise PolicyError()
         snapshot = self._snapshots.get(key)
         if snapshot is None:

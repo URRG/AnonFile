@@ -372,7 +372,7 @@ def create_app() -> FastAPI:
     app.add_middleware(BodyLimitMiddleware)
     origins = [v.strip() for v in os.getenv("WEB_ORIGIN", "http://localhost:3000,http://localhost:5173").split(",") if v.strip()]
     app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=False,
-                       allow_methods=["GET", "POST", "DELETE"], allow_headers=["Content-Type", "Authorization"])
+                       allow_methods=["GET", "POST", "DELETE"], allow_headers=["Content-Type", "Authorization", "Idempotency-Key"])
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request: Request, exc):
