@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { requestRelease, type Mode, type ReleaseView } from './api'
 import './styles.css'
@@ -11,17 +11,29 @@ function App() {
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<ReleaseView | null>(null)
   const [error, setError] = useState('')
+  const activeRequest = useRef<AbortController | null>(null)
+  useEffect(() => () => {
+    activeRequest.current?.abort()
+    activeRequest.current = null
+  }, [])
   const clear = () => { setResult(null); setError('') }
   async function run() {
+    if (activeRequest.current) return
+    const controller = new AbortController()
+    activeRequest.current = controller
     clear(); setBusy(true)
     try {
-      setResult(await requestRelease({ apiBase: import.meta.env.VITE_API_URL || 'http://localhost:8000', token, content, recipient, mode }))
-    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Processing failed. No release was authorized.') }
-    finally { setBusy(false) }
+      const release = await requestRelease({ apiBase: import.meta.env.VITE_API_URL || 'http://localhost:8000', token, content, recipient, mode, signal: controller.signal })
+      if (activeRequest.current === controller && !controller.signal.aborted) setResult(release)
+    } catch (cause) {
+      if (activeRequest.current === controller) setError(cause instanceof Error ? cause.message : 'Processing failed. No release was authorized.')
+    } finally {
+      if (activeRequest.current === controller) { activeRequest.current = null; setBusy(false) }
+    }
   }
   return <main className="workbench">
     <h1>AnonFlow · secure processing foundation</h1>
-    <p role="note"><strong>Synthetic data only.</strong> Development milestone, not a production anonymization service. Customer data admission and buyer export are disabled.</p>
+    <p role="note"><strong>Synthetic data only.</strong> Do not submit customer data. This development service accepts and temporarily stores submitted text; it cannot verify that data is synthetic. Buyer export is disabled.</p>
     <p>Rules can miss names, context, health information, confidential business data and identifying relationships. No result from this workbench qualifies a dataset for sale.</p>
     <form onSubmit={event => { event.preventDefault(); void run() }}>
       <fieldset disabled={busy}>
@@ -34,7 +46,9 @@ function App() {
         <label>Synthetic input<textarea value={content} required rows={9} onChange={e => { clear(); setContent(e.target.value) }} /></label>
         <button type="submit">{busy ? 'Processing…' : 'Run synthetic evaluation'}</button>
       </fieldset>
+      {busy && <p><button type="button" onClick={() => activeRequest.current?.abort()}>Cancel request</button></p>}
     </form>
+    <p>Requests time out after 30 seconds. Cancelling stops this browser request, not server-side processing or retention of data already received.</p>
     {error && <p role="alert">{error}</p>}
     {result && <section aria-label="Processing evidence" aria-live="polite">
       <h2>{result.eligibility.replaceAll('_', ' ')}</h2>

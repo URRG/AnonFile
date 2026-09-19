@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { createServer } from 'node:net'
+import { createServer as createHTTPServer } from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { readFileSync } from 'node:fs'
 import ts from 'typescript'
@@ -67,3 +68,35 @@ test('real HTTP intake, withholding, independent review and isolation', { timeou
     }
   }
 })
+
+for (const phase of ['headers', 'body']) {
+  test(`actual HTTP cancellation closes a stalled ${phase} connection`, { timeout: 5000 }, async () => {
+    let observe, disconnected
+    const observed = new Promise(resolve => { observe = resolve })
+    const closed = new Promise(resolve => { disconnected = resolve })
+    const server = createHTTPServer((incoming, response) => {
+      incoming.socket.once('close', disconnected)
+      if (phase === 'body') {
+        response.writeHead(200, { 'Content-Type': 'application/json' })
+        response.write('{')
+      }
+      observe()
+    })
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    const controller = new AbortController()
+    try {
+      const source = readFileSync(new URL('../src/api.ts', import.meta.url), 'utf8')
+      const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText
+      const { requestRelease } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
+      const result = requestRelease({ apiBase: `http://127.0.0.1:${server.address().port}`, token: 'synthetic-only-test-token', content: 'synthetic', recipient: 'synthetic', mode: 'external_anonymized', signal: controller.signal })
+      await observed
+      controller.abort()
+      await assert.rejects(result, /Request cancelled.*No release was authorized/)
+      await closed
+    } finally {
+      controller.abort()
+      server.closeAllConnections()
+      await new Promise(resolve => server.close(resolve))
+    }
+  })
+}
