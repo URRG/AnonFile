@@ -126,6 +126,10 @@ def test_detector_result_and_profile_reject_bad_categories_duplicates_and_boolea
         EvaluationProfile.create(profile_id="p", version="v1", required_categories=["PII", "PII"])
     with pytest.raises(EvaluationError):
         EvaluationProfile.create(profile_id="p", version="v1", required_categories="PII")
+    with pytest.raises(EvaluationError):
+        EvaluationProfile(profile_id="p", version="v1", required_categories="PII")
+    with pytest.raises(EvaluationError):
+        EvaluationProfile(profile_id="p", version="v1", required_categories=("PII", "PII"))
 
 
 def test_report_digest_changes_on_detector_config_but_contains_no_values():

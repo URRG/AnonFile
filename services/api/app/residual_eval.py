@@ -248,8 +248,14 @@ class EvaluationProfile:
     def __post_init__(self) -> None:
         _identity(self.profile_id)
         _identity(self.version)
-        categories = tuple(self.required_categories)
-        if not categories or len(categories) > MAX_CATEGORIES:
+        if isinstance(self.required_categories, (str, bytes)):
+            _error()
+        try:
+            categories = tuple(self.required_categories)
+        except TypeError:
+            _error()
+        if (not categories or len(categories) > MAX_CATEGORIES
+                or len(categories) != len(set(categories))):
             _error()
         object.__setattr__(self, "required_categories", frozenset(_category(value) for value in categories))
         for value, low, high in ((self.minimum_coverage_percent, 0, 100), (self.maximum_abstentions, 0, MAX_RECORDS), (self.maximum_residuals, 0, MAX_NODES)):

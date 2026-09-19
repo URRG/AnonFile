@@ -16,6 +16,8 @@ from datetime import UTC, datetime
 from threading import RLock
 
 from fastapi import HTTPException
+from app.candidate import (CandidateError, LedgerAction, LedgerReason, PayloadKind,
+                           SchemaContract, TransformLedgerEntry)
 
 
 def unavailable():
@@ -424,6 +426,26 @@ class DevelopmentStore:
                 or (media_type == "application/json" and not digest_value(evaluation_schema))
                 or (media_type == "text/plain" and evaluation_schema is not None)):
             raise unavailable()
+        try:
+            kind = PayloadKind(payload.get("payload_kind"))
+            if media_type != ("text/plain" if kind is PayloadKind.TEXT else "application/json"):
+                raise CandidateError()
+            schema = SchemaContract.from_private_descriptor(kind=kind, digest=payload["schema_digest"],
+                                                             descriptor=payload.get("schema_descriptor"))
+            if not schema.accepts(body):
+                raise CandidateError()
+            ledger = payload.get("ledger")
+            if type(ledger) is not list:
+                raise CandidateError()
+            entries = tuple(TransformLedgerEntry(item["entity_type"], LedgerAction(item["action"]),
+                                                  LedgerReason(item["reason"]), item["count"])
+                            for item in ledger)
+            if (len(entries) != len(ledger)
+                    or tuple(sorted(entries, key=lambda item: (item.entity_type, item.action.value, item.reason.value))) != entries
+                    or len({(item.entity_type, item.action, item.reason) for item in entries}) != len(entries)):
+                raise CandidateError()
+        except (CandidateError, KeyError, TypeError, ValueError):
+            raise unavailable() from None
 
     def fail_processing_run(self, identifier, tenant, code, actor):
         """Record a fixed-code local worker failure without serializing errors."""

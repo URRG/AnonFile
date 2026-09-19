@@ -636,6 +636,7 @@ def create_app() -> FastAPI:
             private_payload = {"run_id": metadata.run_id, "input_digest": metadata.input_digest,
                                "policy_digest": metadata.policy_digest, "artifact_digest": metadata.artifact_digest,
                                "schema_digest": metadata.schema_digest, "payload_kind": metadata.payload_kind.value,
+                               "schema_descriptor": schema.private_descriptor,
                                "evaluation_schema_digest": candidate_schema_digest(result.output),
                                "media_type": metadata.media_type, "byte_count": metadata.byte_count,
                                "ledger": [{"entity_type": item.entity_type, "action": item.action.value,

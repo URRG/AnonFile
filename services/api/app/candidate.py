@@ -255,6 +255,19 @@ class SchemaContract:
         if canonical_json(descriptor) != self._descriptor or self.digest != _hash(self._descriptor):
             _fail()
 
+    @classmethod
+    def from_private_descriptor(cls, *, kind: PayloadKind, digest: str, descriptor: Any) -> "SchemaContract":
+        """Restore a schema only from an encrypted private artifact record."""
+        return cls(kind=kind, digest=digest, _descriptor=canonical_json(descriptor))
+
+    @property
+    def private_descriptor(self) -> Any:
+        """Detached field/type shape for encrypted persistence; never API data."""
+        try:
+            return json.loads(self._descriptor.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            _fail()
+
     def accepts(self, value: str | dict[str, Any] | list[Any]) -> bool:
         try:
             if self.kind is PayloadKind.TEXT:

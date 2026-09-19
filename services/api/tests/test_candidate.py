@@ -120,6 +120,14 @@ def test_schema_contract_direct_tampering_fails_and_canonical_json_is_determinis
     assert "source" not in repr(contract)
 
 
+def test_private_schema_descriptor_round_trips_without_exposing_values():
+    contract = SchemaContract.from_value({"email": "source@example.test", "count": 1}, kind=PayloadKind.STRUCTURED)
+    restored = SchemaContract.from_private_descriptor(kind=contract.kind, digest=contract.digest,
+                                                      descriptor=contract.private_descriptor)
+    assert restored.accepts({"email": "[REDACTED_EMAIL]", "count": 1})
+    assert "source@example.test" not in repr(restored)
+
+
 def test_candidate_has_no_authorization_or_export_capability():
     artifact = CandidateArtifact.create(run_id="run-1", input_digest=INPUT, policy_digest=POLICY,
                                          transformed="private candidate", schema=text_schema())
