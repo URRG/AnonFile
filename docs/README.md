@@ -1,5 +1,7 @@
 # AnonFlow
 
+> Historical design reference, not implemented controls. M1 is synthetic-only, rules-based and withholds all release output. Scores, independent validation, infrastructure and approval described below are not current capabilities. Use [current development guide](development-m1.md) for runnable instructions.
+
 AnonFlow is a self-hosted, policy-driven system for preparing enterprise data for analytics, evaluation, and controlled external release. It detects sensitive content, applies policy-specific transformations, independently validates output, and creates an auditable Release Card.
 
 **Status:** early development. Policies and scores are engineering evidence, not legal advice or a compliance certification.

@@ -1,5 +1,7 @@
 # Sensitive-data taxonomy and transformations
 
+> Historical design reference, not implemented controls. M1 is synthetic-only, rules-based and withholds all release output. Scores, independent validation, infrastructure and approval described below are not current capabilities. Use [current development guide](development-m1.md) for runnable instructions.
+
 ## Baseline taxonomy
 
 The baseline target is 74 entity types. Detection confidence, source context, and policy—not a label alone—determine treatment. Customer-specific recognizers may add types for proprietary identifiers and terminology.

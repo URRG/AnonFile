@@ -1,5 +1,7 @@
 # Threat model
 
+> Historical design reference, not implemented controls. M1 is synthetic-only, rules-based and withholds all release output. Scores, independent validation, infrastructure and approval described below are not current capabilities. Use [current development guide](development-m1.md) for runnable instructions.
+
 ## Assets and trust boundaries
 
 Protected assets include source records, mapping material, customer-specific recognizers, release artifacts, encryption/signing keys, provenance, reviewer decisions, and audit records. The principal boundaries are tenant-to-tenant, raw-to-working/release zones, worker-to-control plane, privileged reviewer-to-standard user, and customer VPC-to-external services.

@@ -1,27 +1,9 @@
-# AnonFlow API
+# Development API
 
-The demo control plane for a policy-driven anonymisation release workflow. It deliberately uses in-memory persistence so it is safe to run locally and easy to replace with production repositories later.
+Synthetic data only. Run a single worker. See [development guide](../../docs/development-m1.md) for configuration and evaluation.
 
-## Run
+From this directory: `python -m pip install -r requirements-dev.txt`, `python -m pytest`, `python -m uvicorn app.main:app --host 127.0.0.1 --port 8000`.
 
-```bash
-python -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
-```
+`ANONFLOW_DEV_PRINCIPALS` must be an explicit JSON array of token/subject/tenant/roles. Tokens require at least 32 characters. Empty configuration closes protected routes with 503. No default credential exists. `ANONFLOW_ENV=development` is the only supported environment. Never substitute this mechanism for production authentication.
 
-Open `http://localhost:8000/docs` for the interactive API.
-
-## Workflow
-
-1. `POST /datasets` with text or records and declared release context.
-2. `POST /releases` with its dataset ID and a `release_mode`.
-3. Inspect `GET /releases/{id}` and its signed-style release card at `/releases/{id}/card`.
-4. For `REVIEW_REQUIRED`, submit `POST /reviews/{id}/decision`.
-
-`external_anonymized` performs irreversible, document-local labels. `restricted_pseudonymized` uses deterministic tokens scoped to a release; this is **not** anonymous data and is deliberately marked restricted.
-
-## Design decisions
-
-See the repository-level `docs/DECISIONS.md` for production decisions. This service demonstrates the API contract and safety gates, not legal compliance. It has no database, KMS, authentication, malware scanning, OCR, or production-grade entity recognition. Those boundaries are exposed by the models and should be backed by dedicated adapters before handling customer data.
+Dataset intake/listing requires processor role. Release/card reads require processor or reviewer in the same tenant. Review rejection requires an independent reviewer. Approval always returns 409. Buyers have no data routes. Responses contain no processing output. Storage and review snapshots are bounded process memory, not a durable audit ledger.

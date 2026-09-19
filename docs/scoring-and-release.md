@@ -1,5 +1,7 @@
 # Scoring, Release Cards, and decisions
 
+> Historical design reference, not implemented controls. M1 is synthetic-only, rules-based and withholds all release output. Scores, independent validation, infrastructure and approval described below are not current capabilities. Use [current development guide](development-m1.md) for runnable instructions.
+
 ## Principles
 
 Scores summarize evidence; they do not decide legality, erase residual risk, or override hard policy gates. Every score reports its inputs, version, confidence, and missing evidence. A missing required measurement routes the release to review or block.
