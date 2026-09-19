@@ -1,0 +1,4 @@
+{"id":"synthetic-email","text":"Contact ada@example.com.","annotations":[{"start":8,"end":23,"entity_type":"EMAIL"}],"group_id":"synthetic-a","split":"fixture"}
+{"id":"synthetic-person","text":"Guest Ada Example.","annotations":[{"start":6,"end":17,"entity_type":"PERSON_NAME"}],"group_id":"synthetic-b","split":"fixture"}
+{"id":"synthetic-clean","text":"Nothing sensitive here.","annotations":[],"group_id":"synthetic-c","split":"fixture"}
+{"id":"synthetic-unicode","text":"🙂 ada@example.com","annotations":[{"start":2,"end":17,"entity_type":"EMAIL"}],"group_id":"synthetic-d","split":"fixture"}
