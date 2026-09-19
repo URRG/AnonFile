@@ -1,6 +1,7 @@
 """Local synthetic repository contracts, tampering and cross-instance transactions."""
 import copy
 import sqlite3
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -24,6 +25,29 @@ def candidate(identifier="r1", dataset_id="d1", tenant="tenant-a"):
             "revision": 1, "gates": ["EXPORT_DISABLED"], "generated_at": TIME}
     return {"id": identifier, "dataset_id": dataset_id, "tenant": tenant, "creator": "processor",
             "card": card, "review": None, "events": [{"revision": 1, "card": copy.deepcopy(card)}]}
+
+
+def control(kind="rights_profile", identifier="control-1", tenant="tenant-a", *, key="safe-key-0001", digest="sha256:" + "a" * 64):
+    return {"id": identifier, "kind": kind, "tenant": tenant, "created_at": TIME,
+            "expires_at": time.time() + 1000, "size_bytes": 0,
+            "payload": {"idempotency_key": key, "request_digest": digest,
+                        "private_business_label": "buyer-sensitive-synthetic"}}
+
+
+def run_dependencies(store, *, rights_expiry=None):
+    store.add_dataset(source())
+    rights = control("rights_profile", "rights-1")
+    if rights_expiry is not None:
+        rights["expires_at"] = rights_expiry
+    rights["payload"] = {"digest": "r" * 64}
+    policy = control("policy_snapshot", "policy-1")
+    policy["payload"] = {"digest": "sha256:" + "p" * 64}
+    store.add_control(rights, "operator")
+    store.add_control(policy, "operator")
+    run = control("processing_run", "run-1")
+    run["payload"].update({"dataset_id": "d1", "rights_profile_id": "rights-1", "policy_snapshot_id": "policy-1",
+                           "rights_digest": "r" * 64, "policy_digest": "sha256:" + "p" * 64})
+    return run, rights, policy
 
 
 @pytest.fixture(params=["memory", "sqlite"])
@@ -404,3 +428,108 @@ def test_subkey_separation_and_fresh_encryption_nonces(tmp_path):
     assert first[:12] != second[:12]
     assert store._open(first, aad, 4096) == store._open(second, aad, 4096) == record
     store.close()
+
+
+def test_control_records_are_detached_tenant_scoped_and_idempotent(store):
+    original = control()
+    stored = store.add_control(original, "operator")
+    original["payload"]["private_business_label"] = "changed"
+    assert store.get_control("rights_profile", "control-1", "tenant-a")["payload"]["private_business_label"] == "buyer-sensitive-synthetic"
+    stored["payload"]["private_business_label"] = "changed-again"
+    assert store.list_controls("rights_profile", "tenant-a")[0]["payload"]["private_business_label"] == "buyer-sensitive-synthetic"
+    fails(404, store.get_control, "rights_profile", "control-1", "tenant-b")
+    fails(409, store.add_control, control(), "operator")
+    run, _, _ = run_dependencies(store)
+    first, reused = store.register_run_control(run, "operator")
+    assert not reused and first["id"] == "run-1"
+    replay = copy.deepcopy(run)
+    replay["id"] = "run-other"
+    second, reused = store.register_run_control(replay, "operator")
+    assert reused and second["id"] == "run-1"
+    conflict = copy.deepcopy(run)
+    conflict["id"] = "run-conflict"
+    conflict["payload"]["request_digest"] = "sha256:" + "b" * 64
+    fails(409, store.register_run_control, conflict, "operator")
+
+
+def test_durable_controls_restart_encrypt_and_detect_silent_deletion(tmp_path):
+    path = tmp_path / "source.db"
+    store = DurableStore(str(path), KEY)
+    store.add_control(control(), "operator")
+    run, _, _ = run_dependencies(store)
+    store.register_run_control(run, "operator")
+    store.close()
+    raw = b"".join(p.read_bytes() for p in tmp_path.iterdir() if p.is_file())
+    assert b"buyer-sensitive-synthetic" not in raw and b"safe-key-0001" not in raw
+    reopened = DurableStore(str(path), KEY)
+    assert reopened.get_control("rights_profile", "control-1", "tenant-a")["id"] == "control-1"
+    with sqlite3.connect(path) as connection:
+        connection.execute("DELETE FROM records WHERE kind='processing_run'")
+    fails(503, reopened.verify_audit, "tenant-a")
+    reopened.close()
+
+
+def test_cross_instance_run_idempotency_is_atomic(tmp_path):
+    path = tmp_path / "source.db"
+    first, second = DurableStore(str(path), KEY), DurableStore(str(path), KEY)
+    try:
+        first_run, _, _ = run_dependencies(first)
+        second_run = copy.deepcopy(first_run)
+        second_run["id"] = "run-2"
+        def register(store, record):
+            try:
+                return store.register_run_control(record, "operator")[1]
+            except HTTPException as error:
+                return error.status_code
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            result = list(pool.map(lambda args: register(*args), [(first, first_run), (second, second_run)]))
+        assert sorted(result) == [False, True]
+        assert first.list_controls("processing_run", "tenant-a")[0]["id"] in {"run-1", "run-2"}
+    finally:
+        first.close()
+        second.close()
+
+
+def test_expired_durable_control_has_authenticated_tombstone_and_restarts(tmp_path, monkeypatch):
+    path = tmp_path / "source.db"
+    store = DurableStore(str(path), KEY)
+    expiring = control()
+    expiring["expires_at"] = time.time() + 1
+    store.add_control(expiring, "operator")
+    monkeypatch.setattr("app.repository.time.time", lambda: expiring["expires_at"] + 1)
+    assert store.purge() == 1
+    assert store.audit_events("tenant-a")[-1]["action"] == "rights_profile.expired"
+    store.close()
+    reopened = DurableStore(str(path), KEY)
+    try:
+        assert reopened.verify_audit("tenant-a")
+        fails(404, reopened.get_control, "rights_profile", "control-1", "tenant-a")
+    finally:
+        reopened.close()
+
+
+def test_run_registration_rechecks_live_dependencies_and_deletion_invalidates(store):
+    run, rights, _ = run_dependencies(store)
+    created, reused = store.register_run_control(run, "operator")
+    assert not reused and created["id"] == "run-1"
+    store.delete_dataset("d1", "tenant-a", "deleter")
+    fails(404, store.get_control, "processing_run", "run-1", "tenant-a")
+    assert store.audit_events("tenant-a")[-1]["action"] == "processing_run.invalidated"
+    fails(404, store.register_run_control, run, "operator")
+    assert store.get_control("rights_profile", "rights-1", "tenant-a")["id"] == rights["id"]
+
+
+def test_rights_expiry_invalidates_dependent_run_before_restart(tmp_path, monkeypatch):
+    path = tmp_path / "source.db"
+    store = DurableStore(str(path), KEY)
+    run, rights, _ = run_dependencies(store, rights_expiry=time.time() + 1)
+    store.register_run_control(run, "operator")
+    monkeypatch.setattr("app.repository.time.time", lambda: rights["expires_at"] + 1)
+    assert store.purge() == 1
+    fails(404, store.get_control, "processing_run", "run-1", "tenant-a")
+    store.close()
+    reopened = DurableStore(str(path), KEY)
+    try:
+        assert reopened.verify_audit("tenant-a")
+    finally:
+        reopened.close()

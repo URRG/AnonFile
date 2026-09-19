@@ -62,7 +62,7 @@ class DurableStore(DevelopmentStore):
                 self._check_meta()
             self._load()
             self._connection.execute("COMMIT")
-            self.datasets, self.releases, self._audit = {}, {}, {}
+            self.datasets, self.releases, self.controls, self._audit = {}, {}, {kind: {} for kind in self.CONTROL_KINDS}, {}
         except Exception:
             if self._connection is not None:
                 try:
@@ -97,17 +97,17 @@ class DurableStore(DevelopmentStore):
 
     def _load(self):
         self._check_meta()
-        self.datasets, self.releases, self._audit = {}, {}, {}
+        self.datasets, self.releases, self.controls, self._audit = {}, {}, {kind: {} for kind in self.CONTROL_KINDS}, {}
         # Upper physical limits are fixed independently of per-instance lowered
         # quota settings used by callers/tests. SELECT limits avoid unbounded load.
         count = self._connection.execute("SELECT COUNT(*) FROM (SELECT 1 FROM records LIMIT ?)",
-                                         (DevelopmentStore.MAX_DATASETS + DevelopmentStore.MAX_RELEASES + 1,)).fetchone()[0]
-        if count > DevelopmentStore.MAX_DATASETS + DevelopmentStore.MAX_RELEASES:
+                                         (DevelopmentStore.MAX_DATASETS + DevelopmentStore.MAX_RELEASES + DevelopmentStore.MAX_CONTROLS + 1,)).fetchone()[0]
+        if count > DevelopmentStore.MAX_DATASETS + DevelopmentStore.MAX_RELEASES + DevelopmentStore.MAX_CONTROLS:
             raise unavailable()
         # Read SQLite metadata before any BLOB payload. A corrupted database can
         # otherwise force Python to materialize an unbounded value during load.
         for kind, identifier, tenant, size, expiry, blob_length in self._connection.execute("SELECT kind,id,tenant,size_bytes,expires_at,length(blob) FROM records"):
-            if kind not in {"dataset", "release"}:
+            if kind not in {"dataset", "release", *self.CONTROL_KINDS}:
                 raise unavailable()
             if type(blob_length) is not int or not 28 <= blob_length <= self.MAX_RECORD_BLOB:
                 raise unavailable()
@@ -115,11 +115,22 @@ class DurableStore(DevelopmentStore):
             record = self._open(blob, [tenant, kind, identifier], self.MAX_RECORD_BLOB)
             if record["id"] != identifier or record["tenant"] != tenant or record["size_bytes"] != size or record["expires_at"] != expiry:
                 raise unavailable()
-            target = self.datasets if kind == "dataset" else self.releases
+            if kind in self.CONTROL_KINDS:
+                try:
+                    self._validate_control(record)
+                except HTTPException:
+                    raise unavailable() from None
+                if record["kind"] != kind:
+                    raise unavailable()
+            target = self.datasets if kind == "dataset" else self.releases if kind == "release" else self.controls[kind]
             target[identifier] = record
         if len(self.datasets) > DevelopmentStore.MAX_DATASETS or len(self.releases) > DevelopmentStore.MAX_RELEASES:
             raise unavailable()
         if sum(record["size_bytes"] for record in self.datasets.values()) > DevelopmentStore.MAX_SOURCE_BYTES:
+            raise unavailable()
+        if (sum(len(values) for values in self.controls.values()) > DevelopmentStore.MAX_CONTROLS
+                or any(sum(record["tenant"] == tenant for values in self.controls.values() for record in values.values()) > DevelopmentStore.MAX_CONTROLS_PER_TENANT
+                       for tenant in {record["tenant"] for values in self.controls.values() for record in values.values()})):
             raise unavailable()
         for record in self.releases.values():
             parent = self.datasets.get(record["dataset_id"])
@@ -151,10 +162,12 @@ class DurableStore(DevelopmentStore):
         for tenant, entries in self._audit.items():
             for entry in entries:
                 action = entry["event"]["action"]
-                kind = "dataset" if action.startswith("dataset.") else "release"
+                kind = "release" if action.startswith("review.") else action.split(".", 1)[0]
+                if kind not in {"dataset", "release", *self.CONTROL_KINDS}:
+                    raise unavailable()
                 latest[(tenant, kind, entry["event"]["object_id"])] = entry
         live = {(record["tenant"], kind, identifier): record for kind, records in
-                (("dataset", self.datasets), ("release", self.releases)) for identifier, record in records.items()}
+                (("dataset", self.datasets), ("release", self.releases), *self.controls.items()) for identifier, record in records.items()}
         for identity, record in live.items():
             entry = latest.get(identity)
             if entry is None or entry["record_commitment"] is None:
@@ -170,8 +183,9 @@ class DurableStore(DevelopmentStore):
                 raise unavailable()
 
     def _save(self, before):
-        old_datasets, old_releases, old_audit = before
-        for kind, old, current in (("dataset", old_datasets, self.datasets), ("release", old_releases, self.releases)):
+        old_datasets, old_releases, old_controls, old_audit = before
+        for kind, old, current in (("dataset", old_datasets, self.datasets), ("release", old_releases, self.releases),
+                                   *((kind, old_controls[kind], self.controls[kind]) for kind in self.CONTROL_KINDS)):
             for identifier in old.keys() - current.keys():
                 self._connection.execute("DELETE FROM records WHERE kind=? AND id=?", (kind, identifier))
             for identifier, record in current.items():
@@ -198,7 +212,7 @@ class DurableStore(DevelopmentStore):
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
                 self._load()
-                before = copy.deepcopy((self.datasets, self.releases, self._audit))
+                before = copy.deepcopy((self.datasets, self.releases, self.controls, self._audit))
                 yield
                 self._save(before)
                 self._connection.execute("COMMIT")
@@ -213,7 +227,7 @@ class DurableStore(DevelopmentStore):
                 raise
             finally:
                 # Avoid a long-lived decrypted cache spanning tenants/requests.
-                self.datasets, self.releases, self._audit = {}, {}, {}
+                self.datasets, self.releases, self.controls, self._audit = {}, {}, {kind: {} for kind in self.CONTROL_KINDS}, {}
 
     def _rollback(self):
         try:
@@ -226,4 +240,4 @@ class DurableStore(DevelopmentStore):
             if self._connection is not None:
                 self._connection.close()
                 self._connection = None
-            self.datasets, self.releases, self._audit = {}, {}, {}
+            self.datasets, self.releases, self.controls, self._audit = {}, {}, {kind: {} for kind in self.CONTROL_KINDS}, {}
