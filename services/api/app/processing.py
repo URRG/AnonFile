@@ -1,0 +1,271 @@
+"""Bounded rules-only candidate processing, NEVER an anonymity certification.
+
+Only text and JSON-compatible record objects are supported. Sensitive field values
+retain container shapes; sensitive numbers/booleans become null, strings become
+markers. Object keys containing detectable sensitive values are rejected, not
+renamed (which could collide). All detection offsets refer to original text.
+"""
+from __future__ import annotations
+
+from collections import Counter
+import json
+import math
+import re
+import unicodedata
+from typing import Any
+
+from app.contracts import Finding, PayloadError, ProcessingResult, Span
+
+MAX_BYTES = 2_000_000
+MAX_RECORDS = 10_000
+MAX_DEPTH = 32
+MAX_NODES = 100_000
+MODES = frozenset({"external_anonymized", "restricted_pseudonymized"})
+LIMITATIONS = (
+    "Rules-only coverage is incomplete; no privacy qualification or release approval.",
+    "Free-text names, addresses, health context, business confidentiality and indirect identification are not comprehensively detected.",
+    "Only text and JSON records are supported; language, semantic, document, media and linkage coverage are unqualified.",
+    "Pattern matches are candidates, not validated identity or payment identifiers; false positives and false negatives remain.",
+)
+SEVERITY = {"medium": 1, "high": 2, "critical": 3}
+PRIORITY = {"CREDENTIAL": 9, "PAYMENT_SECRET": 8, "CARD": 7, "AADHAAR": 6,
+            "SENSITIVE_NUMBER": 5, "PAN": 4, "EMAIL": 3, "PHONE": 2, "IP_ADDRESS": 1}
+
+# Quoted alternatives consume spaces/escaped quotes inside secret values. A
+# malformed/unterminated quoted value is suppressed through the end of its line.
+_CREDENTIAL = re.compile(
+    r'''(?ix)\b(?:api[_\s-]?key|password|passwd|secret|access[_\s-]?token|token|authorization)\b
+        ["']?\s*[:=]\s*(?:"(?:[^"\\\r\n]|\\.)*(?:"|$)|'(?:[^'\\\r\n]|\\.)*(?:'|$)|[^\s,;}\]]+)''',
+    re.MULTILINE,
+)
+_AUTH_TOKEN = re.compile(r"(?i)\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+")
+_EMAIL = re.compile(r"(?<![\w.!#$%&'*+/=?^`{|}~-])[\w.!#$%&'*+/=?^`{|}~-]+@[\w-]+(?:\.[\w-]+)+", re.UNICODE)
+_PAN = re.compile(r"(?<!\w)[A-Z]{5}[0-9]{4}[A-Z](?!\w)", re.IGNORECASE)
+_IP = re.compile(r"(?<![\w.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![\w.])")
+_NUMBER = re.compile(r"(?<!\w)\+?[0-9](?:[0-9 ()-]*[0-9])?(?!\w)")
+_FIELD_TYPES: dict[str, tuple[str, str]] = {}
+for _names, _kind, _severity in (
+    (("password", "passwd", "secret", "apikey", "token", "accesstoken", "refreshtoken", "authorization", "privatekey"), "CREDENTIAL", "critical"),
+    (("cvv", "cvc", "pin", "cardsecuritycode"), "PAYMENT_SECRET", "critical"),
+    (("cardnumber", "creditcard", "creditcardnumber", "debitcardnumber", "paymentcard"), "CARD", "critical"),
+    (("aadhaar", "aadhar", "aadhaarnumber", "aadharnumber", "governmentid", "ssn", "socialsecuritynumber"), "GOVERNMENT_ID", "critical"),
+    (("pan", "pannumber", "passport", "passportnumber", "driverslicense"), "GOVERNMENT_ID", "high"),
+    (("name", "firstname", "lastname", "fullname", "customername", "passengername", "patientname"), "PERSON_NAME", "high"),
+    (("address", "street", "streetaddress", "homeaddress", "billingaddress", "shippingaddress"), "ADDRESS", "high"),
+    (("email", "emailaddress"), "EMAIL", "high"),
+    (("phone", "phonenumber", "mobile", "mobilenumber", "telephone"), "PHONE", "high"),
+    (("dob", "dateofbirth", "birthdate"), "DATE_OF_BIRTH", "high"),
+):
+    for _name in _names:
+        _FIELD_TYPES[_name] = (_kind, _severity)
+
+
+def _normalized(text: str) -> tuple[str, list[int]]:
+    """Compatibility/case-independent detectors without losing original offsets."""
+    chars: list[str] = []
+    offsets: list[int] = []
+    for index, char in enumerate(text):
+        if unicodedata.category(char) == "Cf":
+            continue
+        for normalized_char in unicodedata.normalize("NFKC", char):
+            chars.append(normalized_char)
+            offsets.append(index)
+    return "".join(chars), offsets
+
+
+def detect_text(text: str) -> tuple[Span, ...]:
+    """Detect against immutable original text and merge every overlapping interval.
+
+    Overlap unions take their most sensitive label. Counts describe transformed
+    spans, not independently validated entities. No matched values are returned.
+    """
+    if type(text) is not str:
+        raise PayloadError("Text must be a string.")
+    try:
+        if len(text.encode("utf-8")) > MAX_BYTES:
+            raise PayloadError("Payload exceeds the byte limit.")
+    except UnicodeError:
+        raise PayloadError("Payload contains invalid Unicode.") from None
+    normalized, offsets = _normalized(text)
+    candidates: list[Span] = []
+
+    def add(start: int, end: int, kind: str, severity: str) -> None:
+        candidates.append(Span(offsets[start], offsets[end - 1] + 1, kind, severity))
+
+    for pattern, kind, severity in ((_CREDENTIAL, "CREDENTIAL", "critical"),
+                                    (_AUTH_TOKEN, "CREDENTIAL", "critical"),
+                                    (_EMAIL, "EMAIL", "high"), (_PAN, "PAN", "high")):
+        for match in pattern.finditer(normalized):
+            add(match.start(), match.end(), kind, severity)
+    for match in _IP.finditer(normalized):
+        if all(int(part) <= 255 for part in match.group().split(".")):
+            add(match.start(), match.end(), "IP_ADDRESS", "medium")
+    for match in _NUMBER.finditer(normalized):
+        value = match.group()
+        digits = sum(char.isdecimal() for char in value)
+        if digits < 10:
+            continue
+        if value.startswith("+") and 10 <= digits <= 12:
+            kind, severity = "PHONE", "high"
+        elif digits == 12:
+            kind, severity = "AADHAAR", "critical"
+        elif 13 <= digits <= 19:
+            kind, severity = "CARD", "critical"
+        elif digits <= 11:
+            kind, severity = "PHONE", "high"
+        else:
+            kind, severity = "SENSITIVE_NUMBER", "critical"
+        add(match.start(), match.end(), kind, severity)
+
+    merged: list[Span] = []
+    for candidate in sorted(candidates, key=lambda span: (span.start, span.end)):
+        if merged and candidate.start < merged[-1].end:
+            prior = merged.pop()
+            strongest = max((prior, candidate), key=lambda span: (SEVERITY[span.severity], PRIORITY[span.entity_type]))
+            merged.append(Span(prior.start, max(prior.end, candidate.end), strongest.entity_type, strongest.severity))
+        else:
+            merged.append(candidate)
+    return tuple(merged)
+
+
+def _field_type(key: str) -> tuple[str, str] | None:
+    normalized, _ = _normalized(key)
+    return _FIELD_TYPES.get("".join(char for char in normalized.lower() if char.isalnum()))
+
+
+def _validate_records(records: Any) -> None:
+    if type(records) is not list or not records or len(records) > MAX_RECORDS:
+        raise PayloadError("Records must be a nonempty bounded list of objects.")
+    if any(type(record) is not dict for record in records):
+        raise PayloadError("Records must be a nonempty bounded list of objects.")
+    nodes = 0
+    # Includes JSON punctuation/escaping, while enforcing limits before encoding a
+    # whole possibly enormous graph. The enter/exit stack catches cycles but permits
+    # repeated references (which JSON serialization copies).
+    active: set[int] = set()
+    stack: list[tuple[Any, int, bool]] = [(records, 0, False)]
+    byte_count = 0
+    while stack:
+        value, depth, exiting = stack.pop()
+        if exiting:
+            active.remove(id(value))
+            continue
+        nodes += 1
+        if nodes > MAX_NODES or depth > MAX_DEPTH:
+            raise PayloadError("Payload exceeds structural limits.")
+        kind = type(value)
+        if kind in (dict, list):
+            if len(value) > MAX_NODES:
+                raise PayloadError("Payload exceeds structural limits.")
+            if id(value) in active:
+                raise PayloadError("Payload must contain only finite JSON values.")
+            active.add(id(value))
+            stack.append((value, depth, True))
+            byte_count += 2 + max(0, len(value) - 1)
+            if kind is dict:
+                for key, child in value.items():
+                    if type(key) is not str:
+                        raise PayloadError("Object keys must be strings.")
+                    if len(key) > MAX_BYTES:
+                        raise PayloadError("Payload exceeds the byte limit.")
+                    if detect_text(key):
+                        raise PayloadError("Sensitive object keys are unsupported.")
+                    stack.append((child, depth + 1, False))
+                    stack.append((key, depth + 1, False))
+                    byte_count += 1  # colon
+            else:
+                stack.extend((child, depth + 1, False) for child in value)
+        elif kind in (str, int, float, bool) or value is None:
+            if kind is float and not math.isfinite(value):
+                raise PayloadError("Payload must contain only finite JSON values.")
+            if kind is str and len(value) > MAX_BYTES:
+                raise PayloadError("Payload exceeds the byte limit.")
+            try:
+                byte_count += len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+            except (ValueError, OverflowError, UnicodeError):
+                raise PayloadError("Payload must contain only finite JSON values.") from None
+        else:
+            raise PayloadError("Payload must contain only finite JSON values.")
+        if byte_count > MAX_BYTES:
+            raise PayloadError("Payload exceeds the byte limit.")
+
+
+def process_payload(*, content: str | None = None, records: list[dict] | None = None,
+                    mode: str = "external_anonymized") -> ProcessingResult:
+    """Produce internal candidates. This function NEVER grants release permission."""
+    if not isinstance(mode, str) or mode not in MODES:
+        raise PayloadError("Unsupported processing mode.")
+    if (content is None) == (records is None):
+        raise PayloadError("Provide exactly one content or records payload.")
+    if content is not None and (type(content) is not str or not content.strip()):
+        raise PayloadError("Content must be a nonempty string.")
+    if records is not None:
+        _validate_records(records)
+    counts: Counter[tuple[str, str]] = Counter()
+    aliases: dict[tuple[str, str], str] = {}
+    changed_spans = 0
+    redacted_fields = 0
+
+    def marker(kind: str, original: str) -> str:
+        if mode == "external_anonymized" or kind in {"CREDENTIAL", "PAYMENT_SECRET"}:
+            return f"[REDACTED_{kind}]"
+        key = (kind, original)  # exact original; never case-fold identities
+        if key not in aliases:
+            aliases[key] = f"[{kind}_{len(aliases) + 1:04d}]"
+        return aliases[key]
+
+    def transform_text(text: str) -> str:
+        nonlocal changed_spans
+        spans = detect_text(text)
+        pieces: list[str] = []
+        position = 0
+        for span in spans:
+            pieces.extend((text[position:span.start], marker(span.entity_type, text[span.start:span.end])))
+            position = span.end
+            counts[(span.entity_type, span.severity)] += 1
+            changed_spans += 1
+        pieces.append(text[position:])
+        return "".join(pieces)
+
+    def transform(value: Any, sensitive: tuple[str, str] | None = None) -> Any:
+        nonlocal redacted_fields
+        if type(value) is dict:
+            result = {}
+            for key, child in value.items():
+                field = _field_type(key)
+                if sensitive is not None and (field is None or SEVERITY[sensitive[1]] >= SEVERITY[field[1]]):
+                    field = sensitive
+                result[key] = transform(child, field)
+            return result
+        if type(value) is list:
+            return [transform(child, sensitive) for child in value]
+        if sensitive is not None and value is not None:
+            kind, severity = sensitive
+            # Keep the strongest classification if a field contains a credential.
+            if type(value) is str:
+                for span in detect_text(value):
+                    if SEVERITY[span.severity] > SEVERITY[severity]:
+                        kind, severity = span.entity_type, span.severity
+            counts[(kind, severity)] += 1
+            redacted_fields += 1
+            return marker(kind, value) if type(value) is str else None
+        if type(value) is str:
+            return transform_text(value)
+        if type(value) in (int, float) and detect_text(str(value)):
+            spans = detect_text(str(value))
+            for span in spans:
+                counts[(span.entity_type, span.severity)] += 1
+            redacted_fields += 1
+            return None
+        return value
+
+    output = transform_text(content) if content is not None else transform(records)
+    limitations = list(LIMITATIONS)
+    if mode == "restricted_pseudonymized":
+        limitations.append("Restricted aliases are release-local ordinal labels, not cryptographic pseudonyms; they confer no anonymity or cross-release unlinkability guarantee.")
+    if redacted_fields:
+        limitations.append("Sensitive numeric and boolean scalar fields are replaced with null; downstream schema validation is required.")
+    findings = tuple(Finding(kind, severity, count) for (kind, severity), count in sorted(counts.items()))
+    return ProcessingResult(output=output, findings=findings, limitations=tuple(limitations),
+                            critical_detected=any(f.severity == "critical" for f in findings),
+                            changed_spans=changed_spans, redacted_fields=redacted_fields)

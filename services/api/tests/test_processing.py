@@ -1,0 +1,174 @@
+"""Synthetic module-level regression tests, not measured production accuracy."""
+import copy
+import json
+
+import pytest
+
+from app.contracts import PayloadError
+from app.processing import MAX_BYTES, MAX_RECORDS, detect_text, process_payload
+
+
+@pytest.mark.parametrize("secret", ["password=fictional-secret", '"password": "fictional secret with spaces"',
+    "'api_key': 'fictional secret'", 'password="fictional \\"quoted\\" value"',
+    "pass\u200bword=fictional-secret", "ｐａｓｓｗｏｒｄ=fictional-secret", "access-token: fictional-secret"])
+def test_credentials_are_critical_and_suppressed(secret):
+    result = process_payload(content=secret)
+    assert result.critical_detected
+    assert "fictional" not in result.output
+    assert any(f.entity_type == "CREDENTIAL" for f in result.findings)
+
+
+def test_original_unicode_offsets_and_no_values_in_findings():
+    text = "🙂東京 before pass\u200bword=synthetic after"
+    spans = detect_text(text)
+    assert len(spans) == 1
+    assert text[spans[0].start:spans[0].end] == "pass\u200bword=synthetic"
+    result = process_payload(content=text)
+    assert result.output == "🙂東京 before [REDACTED_CREDENTIAL] after"
+    assert "synthetic" not in repr(result.findings)
+
+
+@pytest.mark.parametrize(("text", "kind", "critical"), [
+    ("+91 98765 43210", "PHONE", False), ("9876543210", "PHONE", False),
+    ("1234 5678 9012", "AADHAAR", True), ("1234-5678-9012", "AADHAAR", True),
+    ("4111 1111 1111 1111", "CARD", True), ("4111-1111-1111-1111", "CARD", True),
+    ("4111111111111111111", "CARD", True), ("4111 1111 1111 1111 9999", "SENSITIVE_NUMBER", True),
+])
+def test_number_candidates_are_wholly_suppressed(text, kind, critical):
+    result = process_payload(content=text)
+    assert result.output == f"[REDACTED_{kind}]"
+    assert result.critical_detected == critical
+    assert not any(char.isdecimal() for char in result.output)
+    assert len(detect_text(text)) == 1
+
+
+def test_overlap_union_keeps_credential_severity_and_no_fragments():
+    text = 'password="4111 1111 1111 1111" and user@example.invalid'
+    spans = detect_text(text)
+    assert all(a.end <= b.start for a, b in zip(spans, spans[1:]))
+    result = process_payload(content=text)
+    assert result.output == '[REDACTED_CREDENTIAL] and [REDACTED_EMAIL]'
+    assert result.changed_spans == 2
+
+
+def test_authorization_bearer_value_wholly_suppressed():
+    result = process_payload(content="Authorization: Bearer synthetic.token_value-123")
+    assert result.output == "[REDACTED_CREDENTIAL]"
+    assert result.critical_detected
+
+
+def test_plus_prefixed_card_not_downgraded_to_phone():
+    result = process_payload(content="+4111 1111 1111 111")
+    assert result.output == "[REDACTED_CARD]"
+    assert result.critical_detected
+
+
+def test_nested_typed_records_preserve_non_sensitive_types_and_input():
+    records = [{"password": "fictional secret", "profile": {"name": "Example Person", "address": {"street": "Imaginary Avenue", "number": 12}},
+                "government_id": 123456789012, "enabled": True, "count": 4, "ratio": 1.25,
+                "items": [None, {"message": "user@example.invalid"}], "empty": ""}]
+    before = copy.deepcopy(records)
+    result = process_payload(records=records)
+    assert records == before
+    assert isinstance(result.output, list)
+    assert result.output[0]["government_id"] is None
+    assert result.output[0]["profile"]["address"]["number"] is None
+    assert result.output[0]["enabled"] is True
+    assert result.output[0]["count"] == 4
+    assert result.output[0]["ratio"] == 1.25
+    assert result.output[0]["empty"] == ""
+    assert result.output[0]["items"][0] is None
+    assert "fictional secret" not in json.dumps(result.output)
+    assert json.loads(json.dumps(result.output, allow_nan=False)) == result.output
+
+
+def test_sensitive_parent_classification_not_downgraded_by_child_name():
+    result = process_payload(records=[{"password": {"name": "synthetic"}}])
+    assert result.critical_detected
+    assert result.output == [{"password": {"name": "[REDACTED_CREDENTIAL]"}}]
+
+
+def test_numeric_value_in_unknown_field_is_null_not_bare_marker():
+    result = process_payload(records=[{"identifier": 123456789012}])
+    assert result.output == [{"identifier": None}]
+
+
+def test_hidden_and_compatibility_sensitive_field_names():
+    result = process_payload(records=[{"pass\u200bword": "synthetic", "ＥＭＡＩＬ": "arbitrary"}])
+    assert result.critical_detected
+    assert all(value.startswith("[REDACTED_") for value in result.output[0].values())
+
+
+@pytest.mark.parametrize("key", ["a@example.invalid", "password=synthetic", "4111 1111 1111 1111"])
+def test_sensitive_keys_rejected_without_renaming_or_echo(key):
+    with pytest.raises(PayloadError) as caught:
+        process_payload(records=[{key: "value", "[REDACTED_EMAIL]": "existing"}])
+    assert str(caught.value) == "Sensitive object keys are unsupported."
+    assert key not in str(caught.value)
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"content": ""}, {"content": " \n\t"}, {"records": []},
+    {"content": "text", "records": [{}]}, {"content": 123}, {"records": ["text"]},
+    {"records": {"a": "b"}}, {"records": [{1: "value"}]},
+    {"content": "text", "mode": "approve"}, {"content": "text", "mode": []}])
+def test_invalid_payload_contract(kwargs):
+    with pytest.raises(PayloadError):
+        process_payload(**kwargs)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf"), b"bytes", {1, 2}, (1, 2), object()])
+def test_non_json_rejected(value):
+    with pytest.raises(PayloadError):
+        process_payload(records=[{"value": value}])
+
+
+def test_cycles_rejected_but_shared_references_are_allowed():
+    cycle = {}
+    cycle["cycle"] = cycle
+    with pytest.raises(PayloadError):
+        process_payload(records=[cycle])
+    common = {"safe": 7}
+    assert process_payload(records=[common, common]).output == [common, common]
+
+
+def test_bounds_bytes_utf8_records_depth_nodes():
+    with pytest.raises(PayloadError):
+        process_payload(content="é" * (MAX_BYTES // 2 + 1))
+    with pytest.raises(PayloadError):
+        process_payload(records=[{"value": "é" * (MAX_BYTES // 2)}])
+    with pytest.raises(PayloadError):
+        process_payload(records=[{}] * (MAX_RECORDS + 1))
+    nested = 1
+    for _ in range(33):
+        nested = [nested]
+    with pytest.raises(PayloadError):
+        process_payload(records=[{"value": nested}])
+    with pytest.raises(PayloadError):
+        process_payload(records=[{"value": [None] * 100_001}])
+
+
+def test_lone_surrogate_rejected_safely():
+    for kwargs in ({"content": "\ud800"}, {"records": [{"value": "\ud800"}]}):
+        with pytest.raises(PayloadError):
+            process_payload(**kwargs)
+
+
+def test_restricted_aliases_exact_case_and_release_local():
+    result = process_payload(content="A@example.invalid a@example.invalid A@example.invalid", mode="restricted_pseudonymized")
+    assert result.output == "[EMAIL_0001] [EMAIL_0002] [EMAIL_0001]"
+    assert "cryptographic" in " ".join(result.limitations)
+    assert process_payload(content="a@example.invalid", mode="restricted_pseudonymized").output == "[EMAIL_0001]"
+    assert process_payload(content="password=synthetic", mode="restricted_pseudonymized").output == "[REDACTED_CREDENTIAL]"
+
+
+def test_unqualified_text_always_carries_explicit_limitations():
+    result = process_payload(content="Example Person lives on Imaginary Avenue and has a condition.")
+    assert not result.findings
+    assert result.limitations
+    assert "no privacy qualification" in " ".join(result.limitations)
+    assert "health" in " ".join(result.limitations)
+
+
+def test_ip_validation_and_pan_candidate():
+    assert detect_text("300.400.500.600") == ()
+    assert [s.entity_type for s in detect_text("192.0.2.1 ABCDE1234F")] == ["IP_ADDRESS", "PAN"]
