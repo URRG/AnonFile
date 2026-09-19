@@ -238,6 +238,16 @@ def test_ciphertexts_cannot_be_swapped_between_records(tmp_path):
     store.close()
 
 
+def test_oversized_sqlite_blobs_are_rejected_before_materialization(tmp_path):
+    path = tmp_path / "source.db"
+    store = DurableStore(str(path), KEY)
+    store.add_dataset(source())
+    store.close()
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE records SET blob=zeroblob(?) WHERE kind='dataset'", (DurableStore.MAX_RECORD_BLOB + 1,))
+    fails(503, DurableStore, str(path), KEY)
+
+
 def test_cross_instance_quota_and_review_races(tmp_path):
     path = tmp_path / "source.db"
     first, second = DurableStore(str(path), KEY), DurableStore(str(path), KEY)
