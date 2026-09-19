@@ -26,7 +26,7 @@ api-test:
 	docker compose run --rm api pytest
 
 web-test:
-	docker compose run --rm web npm test -- --run
+	docker compose --profile test run --build --rm web-test
 
 clean:
 	docker compose down --remove-orphans

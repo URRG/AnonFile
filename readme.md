@@ -1,52 +1,30 @@
 # AnonFlow
 
-Self-hosted, policy-driven anonymization and release governance for enterprise data.
+Secure processing foundation for a future data-intermediary release-assurance product.
+The target workflow is enterprise source data → intermediary processing and qualification → explicitly approved buyer delivery.
 
-AnonFlow detects sensitive information, applies a release-specific transformation,
-validates the output, and emits a signed Release Card containing privacy risk,
-utility/legibility, subjectivity, sensitivity, and eligibility evidence.
+## Current status: M1, synthetic development only
 
-## Quick start
+This is **not production-ready** and must not receive customer data. The current rules do not establish anonymity or data-sale rights. There is no approved release, candidate-output API, buyer download, signature assurance or invented privacy/utility score. All release output is withheld; approval requests fail closed.
 
-```sh
-cp .env.example .env
-make up
-```
+Implemented: bounded typed text/JSON processing, Unicode-aware original-offset spans, sensitive-field suppression, explicit development authentication, tenant/role checks, independent-review restrictions, safe error responses, and a gold-label detection evaluation CLI. The browser displays metadata only and has no offline success fallback.
 
-Open the dashboard at `http://localhost:3000` and the API documentation at
-`http://localhost:8000/docs`.
+Process-local storage loses state on restart and is single-worker only. Expiry is enforced on access after at most one hour; it is not secure deletion. Static development tokens are not OIDC. Set `ANONFLOW_ENV` to anything other than `development` and startup is refused. Synthetic-use restrictions are an operational prerequisite, not a classifier that can recognize real data.
 
-For local development without Docker:
+## Local setup
 
-```sh
-python3 -m venv .venv
-.venv/bin/python -m pip install -r services/api/requirements-dev.txt
-PYTHONPATH=services/api .venv/bin/uvicorn app.main:app --reload
+Use Python 3.12 and Node 22. Copy `.env.example` to an ignored `.env` and configure locally generated random tokens. No credentials are supplied. See [development guide](docs/development-m1.md) for configuration, tests and evaluation.
 
-cd apps/web
-npm install
-npm run dev
-```
+With Docker Compose installed, `docker compose up --build` serves localhost ports 3000 (web) and 8000 (API). The default stack deliberately excludes the previous unintegrated database, storage and sleeping-worker scaffolding. No existing infrastructure volumes are deleted. Those capabilities remain future work.
 
-## Release modes
+Without Docker, run the API and Vite as described in the development guide. The API does not automatically load `.env`; explicitly export its variables for non-Compose execution.
 
-- **External anonymized release:** the default for external buyers; no retained
-  identifier mapping and strict fail-closed validation.
-- **Restricted pseudonymized processing:** preserves stable entities only within
-  one release, and requires named-recipient, access-control, expiry, and audit
-  controls.
+## Gates to a commercial product
 
-Scores are engineering evidence, never a legal certification of anonymity or
-regulatory compliance. Read the full [documentation](docs/README.md) before
-processing customer data.
+1. Real OIDC, durable isolated storage, managed keys, retention/deletion, tamper-evident audit, workload isolation and egress controls.
+2. Hardened parsers with byte/field/page provenance, domain and multilingual detectors, license-reviewed model inventory.
+3. Independent final-output scanning, re-identification/linkage attacks, source-specific privacy and utility qualification, expert-reviewed threshold policies.
+4. Rights and recipient/purpose controls, immutable approved artifacts, independent signed approval and recipient-bound delivery.
+5. Paid design-partner pilots, external security testing and measurable acceptance criteria.
 
-## Development checks
-
-```sh
-PYTHONPATH=services/api .venv/bin/python -m pytest -q services/api/tests
-cd apps/web && npm run build
-```
-
-## License
-
-Apache-2.0. See [LICENSE](LICENSE).
+Do not interpret historical architecture documents as implemented controls. [M1 contract and ownership](docs/implementation-m1.md) describes this milestone; [development guide](docs/development-m1.md) documents current behavior.

@@ -1,138 +1,26 @@
 name: anonflow
-
+# Synthetic-only, single-process development. No production service is provided.
 services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-anonflow}
-      POSTGRES_USER: ${POSTGRES_USER:-anonflow}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-
-  redis:
-    image: redis:7-alpine
-    command: redis-server --appendonly yes
-    volumes:
-      - redis-data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-
-  temporal:
-    image: temporalio/auto-setup:1.25.2
-    environment:
-      DB: postgresql12
-      DB_PORT: 5432
-      POSTGRES_SEEDS: postgres
-      POSTGRES_USER: ${POSTGRES_USER:-anonflow}
-      POSTGRES_PWD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
-      POSTGRES_DB: temporal
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  temporal-ui:
-    image: temporalio/ui:2.28.0
-    environment:
-      TEMPORAL_ADDRESS: temporal:7233
-    depends_on:
-      - temporal
-    ports:
-      - "8233:8080"
-
-  minio:
-    image: minio/minio:RELEASE.2024-10-13T13-34-11Z
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env}
-    volumes:
-      - minio-data:/data
-    ports:
-      - "9001:9001"
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-
   api:
     build:
       context: ./services/api
     environment:
-      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS:-temporal:7233}
-      S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
-      S3_ACCESS_KEY: ${S3_ACCESS_KEY:?Set S3_ACCESS_KEY in .env}
-      S3_SECRET_KEY: ${S3_SECRET_KEY:?Set S3_SECRET_KEY in .env}
-      S3_BUCKET_RAW: ${S3_BUCKET_RAW:-anonflow-raw}
-      S3_BUCKET_WORKING: ${S3_BUCKET_WORKING:-anonflow-working}
-      S3_BUCKET_QUARANTINE: ${S3_BUCKET_QUARANTINE:-anonflow-quarantine}
-      S3_BUCKET_RELEASE: ${S3_BUCKET_RELEASE:-anonflow-release}
-      ENVIRONMENT: ${ENVIRONMENT:-development}
-      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
-      JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:?Set JWT_SIGNING_KEY in .env}
-      RELEASE_SIGNING_KEY: ${RELEASE_SIGNING_KEY:?Set RELEASE_SIGNING_KEY in .env}
-      ALLOW_CLOUD_LLM: ${ALLOW_CLOUD_LLM:-false}
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
+      ANONFLOW_ENV: ${ANONFLOW_ENV:-development}
+      ANONFLOW_DEV_PRINCIPALS: ${ANONFLOW_DEV_PRINCIPALS:-}
+      WEB_ORIGIN: http://localhost:3000
     ports:
-      - "8000:8000"
-
-  worker:
-    build:
-      context: ./services/api
-    command: python -m app.worker
-    environment:
-      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS:-temporal:7233}
-      S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
-      S3_ACCESS_KEY: ${S3_ACCESS_KEY:?Set S3_ACCESS_KEY in .env}
-      S3_SECRET_KEY: ${S3_SECRET_KEY:?Set S3_SECRET_KEY in .env}
-      S3_BUCKET_RAW: ${S3_BUCKET_RAW:-anonflow-raw}
-      S3_BUCKET_WORKING: ${S3_BUCKET_WORKING:-anonflow-working}
-      S3_BUCKET_QUARANTINE: ${S3_BUCKET_QUARANTINE:-anonflow-quarantine}
-      S3_BUCKET_RELEASE: ${S3_BUCKET_RELEASE:-anonflow-release}
-      ENVIRONMENT: ${ENVIRONMENT:-development}
-      JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:?Set JWT_SIGNING_KEY in .env}
-      RELEASE_SIGNING_KEY: ${RELEASE_SIGNING_KEY:?Set RELEASE_SIGNING_KEY in .env}
-      ALLOW_CLOUD_LLM: ${ALLOW_CLOUD_LLM:-false}
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      temporal:
-        condition: service_started
-      minio:
-        condition: service_healthy
-
+      - "127.0.0.1:8000:8000"
   web:
     build:
       context: ./apps/web
-    environment:
-      VITE_API_BASE_URL: http://localhost:8000
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
     depends_on:
       - api
     ports:
-      - "3000:3000"
-
-volumes:
-  postgres-data:
-  redis-data:
-  minio-data:
+      - "127.0.0.1:3000:3000"
+  web-test:
+    profiles: [test]
+    build:
+      context: ./apps/web
+      target: test

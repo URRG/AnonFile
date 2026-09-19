@@ -1,5 +1,7 @@
 # Operations and deployment
 
+> Historical design reference, not implemented controls. M1 is synthetic-only, rules-based and withholds all release output. Scores, independent validation, infrastructure and approval described below are not current capabilities. Use [current development guide](development-m1.md) for runnable instructions.
+
 ## Local development
 
 Copy `.env.example` to `.env`, set unique local secrets, then run `make up`. `make down` stops the stack while preserving volumes; use Docker volume management deliberately if a full local data wipe is required. Do not use local defaults with customer data.

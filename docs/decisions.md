@@ -1,5 +1,7 @@
 # Architecture decisions
 
+> Historical design reference, not implemented controls. M1 is synthetic-only, rules-based and withholds all release output. Scores, independent validation, infrastructure and approval described below are not current capabilities. Use [current development guide](development-m1.md) for runnable instructions.
+
 This log fixes product defaults so implementation remains consistent. Changes require a new dated decision entry and policy/version migration where applicable.
 
 | ID | Decision | Rationale | Consequence |

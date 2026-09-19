@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test tests/*.test.mjs",
+    "test:integration": "node --test tests/workflow.integration.mjs",
+    "test:deployment": "node --test tests/deployment.check.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

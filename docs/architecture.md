@@ -1,5 +1,7 @@
 # Architecture
 
+> Historical design reference, not implemented controls. M1 is synthetic-only, rules-based and withholds all release output. Scores, independent validation, infrastructure and approval described below are not current capabilities. Use [current development guide](development-m1.md) for runnable instructions.
+
 ## Design objective
 
 AnonFlow is a release-governance pipeline, not a simple redaction tool. It makes data minimization, contextual privacy risk, downstream usefulness, and human accountability observable before data leaves a tenant boundary.

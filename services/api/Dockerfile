@@ -9,6 +9,7 @@ COPY requirements.txt ./
 COPY requirements-dev.txt ./
 RUN pip install --no-cache-dir -r requirements-dev.txt
 COPY app ./app
+COPY tests ./tests
 RUN useradd --create-home --uid 10001 anonflow && chown -R anonflow:anonflow /app
 USER anonflow
 EXPOSE 8000
