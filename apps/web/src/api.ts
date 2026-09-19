@@ -1,11 +1,12 @@
 export type Mode = 'external_anonymized' | 'restricted_pseudonymized'
+export type SourceFormat = 'text' | 'json' | 'jsonl' | 'csv'
 export type ReleaseView = {
   id: string; dataset_id: string; status: string;
   eligibility: 'BLOCKED' | 'REVIEW_REQUIRED'; output: null;
   card: { release_id: string; dataset_id: string; eligibility: 'BLOCKED' | 'REVIEW_REQUIRED'; policy_version: string; release_mode: Mode; evidence_status: 'INSUFFICIENT_EVIDENCE'; scores: null;
     findings: { entity_type: string; severity: string; count: number }[]; gates: string[]; limitations: string[] }
 }
-type Request = { apiBase: string; token: string; content: string; mode: Mode; recipient: string; signal?: AbortSignal }
+type Request = { apiBase: string; token: string; content: string; mode: Mode; recipient: string; format?: SourceFormat; signal?: AbortSignal }
 export const REQUEST_TIMEOUT_MS = 30_000
 // Bound the entire workflow, including response bodies and both POST requests.
 // Abort also wins if a transport ignores the signal or settles late.
@@ -53,6 +54,8 @@ async function post(base: string, path: string, token: string, body: unknown, si
 }
 export async function requestRelease(request: Request): Promise<ReleaseView> {
   const { apiBase, content, mode, recipient } = request
+  const format = request.format ?? 'text'
+  if (!['text', 'json', 'jsonl', 'csv'].includes(format)) throw new Error('Unsupported source format.')
   const token = request.token.trim()
   if (!token || !content.trim() || !recipient.trim() || !['external_anonymized', 'restricted_pseudonymized'].includes(mode)) throw new Error('A token, synthetic input, recipient and valid mode are required.')
   if (new TextEncoder().encode(content).length > 2_000_000) throw new Error('Input exceeds the processing limit. No release was authorized.')
@@ -68,7 +71,7 @@ export async function requestRelease(request: Request): Promise<ReleaseView> {
   try {
     return await abortable(async () => {
       const signal = controller.signal
-      const dataset = await post(apiBase, '/datasets', token, { name: 'synthetic-workbench', content, owner: 'development', jurisdiction: 'unspecified', intended_use: 'synthetic-evaluation-only', recipient: recipient.trim(), retention_days: 1 }, signal)
+      const dataset = await post(apiBase, '/ingestions', token, { format, name: 'synthetic-workbench', content, owner: 'development', jurisdiction: 'unspecified', intended_use: 'synthetic-evaluation-only', recipient: recipient.trim(), retention_days: 1 }, signal)
       if (!object(dataset) || typeof dataset.id !== 'string') throw invalid()
       const release = validateRelease(await post(apiBase, '/releases', token, { dataset_id: dataset.id, release_mode: mode, policy_version: policy, allow_review: true }, signal))
       if (release.dataset_id !== dataset.id || release.card.release_mode !== mode || release.card.policy_version !== policy) throw invalid()

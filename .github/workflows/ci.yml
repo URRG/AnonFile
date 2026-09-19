@@ -1,4 +1,4 @@
-name: M1 synthetic verification
+name: Synthetic foundation verification
 on: [push, pull_request]
 permissions:
   contents: read

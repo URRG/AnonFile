@@ -15,4 +15,7 @@ test('Docker source contexts exclude local dependency trees and credentials', ()
   for (const value of ['node_modules', 'dist', '.env', '.env.*']) assert.ok(web.includes(value))
   const api = read('../../../services/api/.dockerignore').split(/\r?\n/)
   for (const value of ['.venv', '.env', '.env.*', '**/__pycache__']) assert.ok(api.includes(value))
+  for (const value of ['**/*.db', '**/*.db-*', '**/*.sqlite', '**/*.sqlite-*', '**/*.sqlite3', '**/*.sqlite3-*', '**/*.pem', '**/*.key', '**/secrets']) {
+    assert.ok(api.includes(value)); assert.ok(web.includes(value))
+  }
 })

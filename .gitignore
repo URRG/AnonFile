@@ -12,6 +12,12 @@ secrets/
 data/
 artifacts/
 uploads/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
 releases/
 coverage/
 htmlcov/
@@ -20,6 +26,7 @@ htmlcov/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+pytest-cache-files-*/
 .mypy_cache/
 .ruff_cache/
 .venv/

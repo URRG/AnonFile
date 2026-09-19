@@ -12,6 +12,8 @@ def client(monkeypatch):
     entries = [{"token": TOKENS[name], "subject": name, "tenant": "tenant-b" if name == "other" else "tenant-a",
                 "roles": ["processor", "reviewer"] if name == "dual" else ["processor" if name == "other" else name]} for name in TOKENS]
     monkeypatch.setenv("ANONFLOW_ENV", "development")
+    monkeypatch.setenv("ANONFLOW_AUTH_MODE", "dev-token")
+    monkeypatch.setenv("ANONFLOW_STORAGE_MODE", "memory")
     monkeypatch.setenv("ANONFLOW_DEV_PRINCIPALS", json.dumps(entries))
     with TestClient(create_app()) as result:
         yield result
