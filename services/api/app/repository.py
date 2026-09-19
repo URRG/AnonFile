@@ -40,12 +40,17 @@ class DevelopmentStore:
     MAX_AUDIT_EVENTS = 10_000
     MAX_AUDIT_EVENTS_PER_TENANT = 2_000
     MAX_RELEASE_BYTES = 1_000_000
+    MAX_CONTROLS = 1_000
+    MAX_CONTROLS_PER_TENANT = 250
+    MAX_CONTROL_BYTES = 2_000_000
+    CONTROL_KINDS = frozenset({"rights_profile", "policy_snapshot", "processing_run", "authorization_request"})
     TTL_SECONDS = 3600
 
     def __init__(self):
         self.lock = RLock()
         self.datasets = {}
         self.releases = {}
+        self.controls = {kind: {} for kind in self.CONTROL_KINDS}
         self._audit = {}
         self._audit_key = secrets.token_bytes(32)
 
@@ -53,11 +58,11 @@ class DevelopmentStore:
     def _transaction(self):
         with self.lock:
             self._verify_all()
-            before = copy.deepcopy((self.datasets, self.releases, self._audit))
+            before = copy.deepcopy((self.datasets, self.releases, self.controls, self._audit))
             try:
                 yield
             except BaseException:
-                self.datasets, self.releases, self._audit = before
+                self.datasets, self.releases, self.controls, self._audit = before
                 raise
 
     def _verify_all(self):
@@ -106,15 +111,38 @@ class DevelopmentStore:
             self._delete(record["id"], record["tenant"])
         return len(expired)
 
+    def _purge_controls(self):
+        expired = [(kind, identifier, record) for kind, values in self.controls.items()
+                   for identifier, record in values.items() if record["expires_at"] <= time.time()]
+        for kind, identifier, record in expired:
+            # A dependent rights/policy expiry can invalidate a run that was
+            # also present in this precomputed expiry list.
+            if identifier not in self.controls[kind]:
+                continue
+            self._append_event(record["tenant"], kind + ".expired", identifier, "system")
+            del self.controls[kind][identifier]
+            if kind in {"rights_profile", "policy_snapshot"}:
+                self._invalidate_runs(record["tenant"], kind + "_id", identifier)
+        return len(expired)
+
     def purge(self):
         with self._transaction():
-            return self._purge()
+            return self._purge() + self._purge_controls()
 
     def _delete(self, identifier, tenant):
         del self.datasets[identifier]
         for key in list(self.releases):
             if self.releases[key]["dataset_id"] == identifier and self.releases[key]["tenant"] == tenant:
                 del self.releases[key]
+        self._invalidate_runs(tenant, "dataset_id", identifier)
+
+    def _invalidate_runs(self, tenant, dependency_key, identifier):
+        """Tombstone registered metadata when a bound prerequisite disappears."""
+        for run_id, record in list(self.controls["processing_run"].items()):
+            if record["tenant"] != tenant or record["payload"].get(dependency_key) != identifier:
+                continue
+            self._append_event(tenant, "processing_run.invalidated", run_id, "system")
+            del self.controls["processing_run"][run_id]
 
     def _dataset(self, identifier, tenant):
         result = self.datasets.get(identifier)
@@ -126,6 +154,120 @@ class DevelopmentStore:
         return any(entry["event"]["object_id"] == identifier
                    and entry["event"]["action"] == kind + ".created"
                    for entries in self._audit.values() for entry in entries)
+
+    def _control(self, kind, identifier, tenant):
+        if kind not in self.CONTROL_KINDS:
+            raise unavailable()
+        result = self.controls[kind].get(identifier)
+        if result is None or result["tenant"] != tenant:
+            raise HTTPException(404, "Control record not found")
+        return result
+
+    def _validate_control(self, data):
+        if not isinstance(data, dict) or set(data) != {"id", "kind", "tenant", "created_at", "expires_at", "size_bytes", "payload"}:
+            raise unavailable()
+        if data["kind"] not in self.CONTROL_KINDS:
+            raise unavailable()
+        if any(type(data[key]) is not str or not data[key] or len(data[key]) > 256
+               for key in ("id", "kind", "tenant", "created_at")):
+            raise unavailable()
+        if type(data["expires_at"]) not in (int, float) or isinstance(data["expires_at"], bool) or data["expires_at"] <= 0:
+            raise unavailable()
+        if not isinstance(data["payload"], dict):
+            raise unavailable()
+        supplied_size = data["size_bytes"]
+        if type(supplied_size) is not int or isinstance(supplied_size, bool) or supplied_size < 0:
+            raise unavailable()
+        # The indexed size is part of the authenticated record. Iterate to a
+        # fixed point so an extra digit in the decimal representation cannot
+        # make a restarted durable store see a different record commitment.
+        data["size_bytes"] = 0
+        for _ in range(4):
+            calculated = len(encoded(data))
+            if calculated == data["size_bytes"]:
+                break
+            data["size_bytes"] = calculated
+        else:
+            raise unavailable()
+        if supplied_size not in {0, data["size_bytes"]}:
+            raise unavailable()
+        if data["size_bytes"] > self.MAX_CONTROL_BYTES:
+            raise HTTPException(429, "Development control capacity exceeded")
+
+    def add_control(self, record, actor):
+        data = detached(record)
+        with self._transaction():
+            self._purge()
+            self._purge_controls()
+            self._validate_control(data)
+            kind = data["kind"]
+            if data["id"] in self.controls[kind] or self._used_identifier(data["id"], kind):
+                raise HTTPException(409, "Object already exists")
+            if (sum(len(values) for values in self.controls.values()) >= self.MAX_CONTROLS
+                    or sum(item["tenant"] == data["tenant"] for values in self.controls.values() for item in values.values()) >= self.MAX_CONTROLS_PER_TENANT):
+                raise HTTPException(429, "Development control capacity exceeded")
+            self._append_event(data["tenant"], kind + ".created", data["id"], actor, record=data)
+            self.controls[kind][data["id"]] = data
+            return detached(data)
+
+    def get_control(self, kind, identifier, tenant):
+        self.purge()
+        with self._transaction():
+            result = self._control(kind, identifier, tenant)
+            if result["expires_at"] <= time.time():
+                raise HTTPException(404, "Control record not found")
+            return detached(result)
+
+    def list_controls(self, kind, tenant):
+        if kind not in self.CONTROL_KINDS:
+            raise unavailable()
+        with self._transaction():
+            self._purge()
+            self._purge_controls()
+            return detached([record for record in self.controls[kind].values() if record["tenant"] == tenant])
+
+    def register_run_control(self, record, actor):
+        """Atomically implement tenant-scoped idempotency for registered runs."""
+        data = detached(record)
+        with self._transaction():
+            self._purge()
+            self._purge_controls()
+            self._validate_control(data)
+            if data["kind"] != "processing_run":
+                raise unavailable()
+            payload = data["payload"]
+            key, digest = payload.get("idempotency_key"), payload.get("request_digest")
+            if type(key) is not str or type(digest) is not str:
+                raise unavailable()
+            for existing in self.controls["processing_run"].values():
+                if existing["tenant"] != data["tenant"] or existing["payload"].get("idempotency_key") != key:
+                    continue
+                if existing["payload"].get("request_digest") != digest:
+                    raise HTTPException(409, "Idempotency key conflicts with a different request")
+                return detached(existing), True
+            self._validate_run_dependencies(data)
+            if data["id"] in self.controls["processing_run"] or self._used_identifier(data["id"], "processing_run"):
+                raise HTTPException(409, "Object already exists")
+            if (sum(len(values) for values in self.controls.values()) >= self.MAX_CONTROLS
+                    or sum(item["tenant"] == data["tenant"] for values in self.controls.values() for item in values.values()) >= self.MAX_CONTROLS_PER_TENANT):
+                raise HTTPException(429, "Development control capacity exceeded")
+            self._append_event(data["tenant"], "processing_run.created", data["id"], actor, record=data)
+            self.controls["processing_run"][data["id"]] = data
+            return detached(data), False
+
+    def _validate_run_dependencies(self, data):
+        payload = data["payload"]
+        dependency_ids = {key: payload.get(key) for key in ("dataset_id", "rights_profile_id", "policy_snapshot_id")}
+        if any(type(value) is not str or not value for value in dependency_ids.values()):
+            raise unavailable()
+        dataset = self._dataset(dependency_ids["dataset_id"], data["tenant"])
+        rights = self._control("rights_profile", dependency_ids["rights_profile_id"], data["tenant"])
+        policy = self._control("policy_snapshot", dependency_ids["policy_snapshot_id"], data["tenant"])
+        if any(record["expires_at"] <= time.time() for record in (dataset, rights, policy)):
+            raise HTTPException(409, "Run dependency is unavailable")
+        if (payload.get("rights_digest") != rights["payload"].get("digest")
+                or payload.get("policy_digest") != policy["payload"].get("digest")):
+            raise HTTPException(409, "Run dependency is unavailable")
 
     def _release(self, identifier, tenant):
         result = self.releases.get(identifier)
