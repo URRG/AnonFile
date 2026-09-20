@@ -21,6 +21,7 @@ from app.candidate import (CandidateError, LedgerAction, LedgerReason, PayloadKi
 from app.evaluation_harness import EvaluationHarnessError, ScoredEvaluation
 from app.evaluator_authority import EvaluatorAuthority, EvaluatorAuthorityError
 from app.utility_evidence import DataUtilityReport, UtilityEvidenceError
+from app.utility_evidence_authority import UtilityEvidenceAuthorityError, UtilityEvidenceControlAuthority
 
 
 def unavailable():
@@ -697,7 +698,7 @@ class DevelopmentStore:
             self.controls["detector_evaluation_evidence"][data["id"]] = data
             return detached(data), False
 
-    def record_utility_evidence(self, identifier, tenant, evidence, actor):
+    def record_utility_evidence(self, identifier, tenant, evidence, actor, authority):
         """Persist trusted-worker structural evidence without lifecycle authority.
 
         The caller has already performed the private comparison locally.  This
@@ -718,7 +719,8 @@ class DevelopmentStore:
             payload = data["payload"]
             expected = {"run_id", "processing_request_digest", "candidate_artifact_digest", "policy_digest",
                         "rights_digest", "method_id", "method_version", "method_config_digest",
-                        "taxonomy_mapping_digest", "idempotency_key", "utility_authority_id", "report"}
+                        "taxonomy_mapping_digest", "idempotency_key", "utility_authority_id",
+                        "attestation_signature", "report"}
             if (data["kind"] != "utility_evidence" or data["tenant"] != tenant or set(payload) != expected
                     or payload.get("run_id") != identifier
                     or payload.get("processing_request_digest") != run["payload"].get("request_digest")
@@ -753,6 +755,21 @@ class DevelopmentStore:
                 # a retained partial metric record.  A healthy worker can only
                 # persist a completed comparison.
                 raise unavailable()
+            try:
+                if (not isinstance(authority, UtilityEvidenceControlAuthority) or not authority.is_active()
+                        or authority.tenant != tenant or authority.authority_id != payload["utility_authority_id"]
+                        or not authority.verify(
+                            signature=payload["attestation_signature"], tenant=tenant, run_id=identifier,
+                            processing_request_digest=payload["processing_request_digest"],
+                            candidate_artifact_digest=payload["candidate_artifact_digest"],
+                            policy_digest=payload["policy_digest"], rights_digest=payload["rights_digest"],
+                            method_id=payload["method_id"], method_version=payload["method_version"],
+                            method_config_digest=payload["method_config_digest"],
+                            taxonomy_mapping_digest=payload["taxonomy_mapping_digest"],
+                            idempotency_key=payload["idempotency_key"], report=report)):
+                    raise UtilityEvidenceAuthorityError()
+            except UtilityEvidenceAuthorityError:
+                raise unavailable() from None
             for existing in self.controls["utility_evidence"].values():
                 existing_payload = existing["payload"]
                 if (existing["tenant"] == tenant and existing_payload.get("run_id") == identifier

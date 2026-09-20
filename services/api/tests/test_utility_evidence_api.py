@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import json
+import base64
+from dataclasses import replace
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from app.main import create_app, utility_evidence_view
+from app.main import control_record, create_app, utility_evidence_view
+from app.utility_evidence import DataUtilityReport
 from test_access import auth
 from test_control_plane_api import client, controls, ingested_dataset, run_request, setup
 
@@ -54,9 +57,10 @@ def test_trusted_worker_retains_only_source_safe_aggregate_evidence_without_life
     assert set(stored["payload"]) == {
         "run_id", "processing_request_digest", "candidate_artifact_digest", "policy_digest", "rights_digest",
         "method_id", "method_version", "method_config_digest", "taxonomy_mapping_digest", "idempotency_key",
-        "utility_authority_id", "report",
+        "utility_authority_id", "attestation_signature", "report",
     }
     assert "body" not in json.dumps(stored) and "source_digest" not in json.dumps(stored)
+    assert "utilsig:" not in response.text and "utilsig:" in json.dumps(stored)
     assert stored["expires_at"] <= client.app.state.store.get_control("processing_run", run["id"], "tenant-a")["expires_at"]
 
 
@@ -101,6 +105,15 @@ def test_absent_or_invalid_server_authority_fails_closed_without_report(monkeypa
     monkeypatch.setenv("ANONFLOW_UTILITY_EVIDENCE_AUTHORITIES", "[{]")
     with pytest.raises(RuntimeError):
         create_app()
+    setup(monkeypatch, tmp_path)
+    monkeypatch.setenv("ANONFLOW_UTILITY_EVIDENCE_AUTHORITIES", json.dumps([{
+        "tenant": "tenant-a", "key_id": "development-utility-a", "expires_at": "2020-01-01T00:00:00Z",
+        "key": base64.b64encode(b"u" * 32).decode(),
+    }]))
+    with TestClient(create_app()) as isolated:
+        run = executed_run(isolated)
+        assert assess(isolated, run["id"], key="m10-expired-authority").status_code == 409
+        assert not isolated.app.state.store.controls["utility_evidence"]
 
 
 def test_tampering_or_dependency_invalidation_makes_retained_evidence_unavailable(client):
@@ -109,7 +122,21 @@ def test_tampering_or_dependency_invalidation_makes_retained_evidence_unavailabl
     stored = client.app.state.store.get_control("utility_evidence", item["id"], "tenant-a")
     stored["payload"]["report"]["input_byte_count"] = 999
     with pytest.raises(HTTPException) as error:
-        utility_evidence_view(stored)
+        utility_evidence_view(stored, utility_evidence_authorities=client.app.state.utility_evidence_authorities)
+    assert error.value.status_code == 503
+    stored = client.app.state.store.get_control("utility_evidence", item["id"], "tenant-a")
+    stored["payload"]["attestation_signature"] = "utilsig:v1:" + "A" * 43
+    with pytest.raises(HTTPException) as error:
+        utility_evidence_view(stored, utility_evidence_authorities=client.app.state.utility_evidence_authorities)
+    assert error.value.status_code == 503
+    stored = client.app.state.store.get_control("utility_evidence", item["id"], "tenant-a")
+    with pytest.raises(HTTPException) as error:
+        utility_evidence_view(stored, utility_evidence_authorities=())
+    assert error.value.status_code == 503
+    stored = client.app.state.store.get_control("utility_evidence", item["id"], "tenant-a")
+    stored["payload"]["policy_digest"] = "sha256:" + "f" * 64
+    with pytest.raises(HTTPException) as error:
+        utility_evidence_view(stored, utility_evidence_authorities=client.app.state.utility_evidence_authorities)
     assert error.value.status_code == 503
     # Restore the test fixture through a fresh run, then prove parent deletion
     # tombstones its aggregate evidence with the run and private candidate.
@@ -117,3 +144,18 @@ def test_tampering_or_dependency_invalidation_makes_retained_evidence_unavailabl
     item = assess(client, run["id"], key="m10-utility-0002").json()
     assert client.delete(f"/datasets/{run['dataset_id']}", headers=auth()).status_code == 204
     assert client.get(f"/processing-runs/{run['id']}/utility-evidence/{item['id']}", headers=auth()).status_code == 404
+
+
+def test_repository_rejects_a_self_consistent_forged_report_without_worker_attestation(client):
+    run = executed_run(client)
+    item = assess(client, run["id"]).json()
+    stored = client.app.state.store.get_control("utility_evidence", item["id"], "tenant-a")
+    report = DataUtilityReport.from_record(stored["payload"]["report"])
+    forged = replace(report, input_byte_count=report.input_byte_count + 1)
+    payload = {**stored["payload"], "idempotency_key": "m10-forged-0001", "report": forged.to_record()}
+    record = control_record(kind="utility_evidence", identifier="m10-forged", tenant="tenant-a", payload=payload,
+                            expires_at=stored["expires_at"])
+    authority = client.app.state.utility_evidence_authorities[0]
+    with pytest.raises(HTTPException) as error:
+        client.app.state.store.record_utility_evidence(run["id"], "tenant-a", record, "processor", authority)
+    assert error.value.status_code == 503

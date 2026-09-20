@@ -32,6 +32,7 @@ def setup(monkeypatch, tmp_path, mode="memory"):
     }]))
     monkeypatch.setenv("ANONFLOW_UTILITY_EVIDENCE_AUTHORITIES", json.dumps([{
         "tenant": "tenant-a", "key_id": "development-utility-a",
+        "expires_at": "2030-01-01T00:00:00Z",
         "key": base64.b64encode(b"u" * 32).decode(),
     }]))
 

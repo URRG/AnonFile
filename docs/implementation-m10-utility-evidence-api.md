@@ -19,6 +19,11 @@ candidate data, a source commitment, a report, or authority/key material. The
 worker creates its own HMAC source commitment and persists only the existing
 M9 `DataUtilityReport`: opaque commitment, candidate/provenance digests and
 aggregate byte/unit/node/scalar counts with two value-free structural checks.
+It also HMAC-attests the full canonical source-safe report together with its
+tenant, run/request, candidate, method/version/config/taxonomy, policy, rights
+and idempotency bindings. The private signature and public authority identifier
+stay in the control wrapper; they are re-verified at persistence and retrieval.
+A self-consistent report hash alone is not admissible evidence.
 No source digest, record, field name, path, value, snippet, schema descriptor,
 candidate body, commitment secret, or raw key enters the retained record or
 HTTP response.
@@ -33,12 +38,16 @@ without computing or retaining evidence. Each tenant has exactly one entry:
   {
     "tenant": "tenant-a",
     "key_id": "utility-worker-key-2026-01",
+    "expires_at": "2030-01-01T00:00:00Z",
     "key": "base64-encoded-32-to-64-byte-secret"
   }
 ]
 ```
 
-Malformed, duplicate, or oversized configuration prevents app startup.
+Malformed, duplicate, or oversized configuration prevents app startup. An
+expired tenant authority fails closed without creating evidence; an expired,
+missing, wrong, or signature-incompatible current authority also prevents a
+stored report from rendering.
 Missing tenant authority, corrupt stored source/candidate, failed commitment,
 or non-assessed result returns a fixed failure and writes no utility record.
 The configuration's secret is repr-hidden, not persisted, and is not exposed

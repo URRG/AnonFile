@@ -523,18 +523,31 @@ def detector_evaluation_evidence_view(record: dict[str, Any], *, evaluator_autho
     except (KeyError, TypeError, ValueError, EvaluationHarnessError, EvaluatorAuthorityError):
         raise HTTPException(503, "Control integrity verification failed") from None
 
-def utility_evidence_view(record: dict[str, Any]) -> UtilityEvidenceView:
+def utility_evidence_view(record: dict[str, Any], *, utility_evidence_authorities) -> UtilityEvidenceView:
     """Render one independently reconstructed, aggregate-only utility report."""
     try:
         payload = record["payload"]
         expected = {"run_id", "processing_request_digest", "candidate_artifact_digest", "policy_digest",
                     "rights_digest", "method_id", "method_version", "method_config_digest",
-                    "taxonomy_mapping_digest", "idempotency_key", "utility_authority_id", "report"}
+                    "taxonomy_mapping_digest", "idempotency_key", "utility_authority_id",
+                    "attestation_signature", "report"}
         report = DataUtilityReport.from_record(payload["report"])
         if (set(payload) != expected or payload["report"]["digest"] != report.digest
                 or payload["candidate_artifact_digest"] != report.candidate_artifact_digest
                 or type(payload["run_id"]) is not str or type(payload["processing_request_digest"]) is not str
                 or type(payload["utility_authority_id"]) is not str):
+            raise ValueError
+        authority = authority_for_tenant(utility_evidence_authorities, tenant=record["tenant"])
+        if (authority.authority_id != payload["utility_authority_id"]
+                or not authority.verify(
+                    signature=payload["attestation_signature"], tenant=record["tenant"], run_id=payload["run_id"],
+                    processing_request_digest=payload["processing_request_digest"],
+                    candidate_artifact_digest=payload["candidate_artifact_digest"],
+                    policy_digest=payload["policy_digest"], rights_digest=payload["rights_digest"],
+                    method_id=payload["method_id"], method_version=payload["method_version"],
+                    method_config_digest=payload["method_config_digest"],
+                    taxonomy_mapping_digest=payload["taxonomy_mapping_digest"],
+                    idempotency_key=payload["idempotency_key"], report=report)):
             raise ValueError
         return UtilityEvidenceView(
             id=record["id"], run_id=payload["run_id"],
@@ -547,7 +560,7 @@ def utility_evidence_view(record: dict[str, Any]) -> UtilityEvidenceView:
                 "A server-owned in-process authority is not KMS-backed production secret custody.",
             ], report=report.to_record(),
         )
-    except (KeyError, TypeError, ValueError, UtilityEvidenceError):
+    except (KeyError, TypeError, ValueError, UtilityEvidenceError, UtilityEvidenceAuthorityError):
         raise HTTPException(503, "Control integrity verification failed") from None
 
 def private_candidate_artifact(private: dict[str, Any]) -> CandidateArtifact:
@@ -954,10 +967,24 @@ def create_app() -> FastAPI:
             "idempotency_key": keys[0], "utility_authority_id": authority.authority_id,
             "report": report.to_record(),
         }
+        try:
+            payload["attestation_signature"] = authority.sign_for_worker(
+                tenant=principal.tenant, run_id=run_id,
+                processing_request_digest=payload["processing_request_digest"],
+                candidate_artifact_digest=payload["candidate_artifact_digest"],
+                policy_digest=payload["policy_digest"], rights_digest=payload["rights_digest"],
+                method_id=payload["method_id"], method_version=payload["method_version"],
+                method_config_digest=payload["method_config_digest"],
+                taxonomy_mapping_digest=payload["taxonomy_mapping_digest"],
+                idempotency_key=payload["idempotency_key"], report=report,
+            )
+        except UtilityEvidenceAuthorityError:
+            raise HTTPException(503, "Utility evidence is unavailable") from None
         record = control_record(kind="utility_evidence", identifier=str(uuid4()), tenant=principal.tenant,
                                 payload=payload, expires_at=min(run["expires_at"], candidate_record["expires_at"]))
-        persisted, reused = app.state.store.record_utility_evidence(run_id, principal.tenant, record, principal.subject)
-        view = utility_evidence_view(persisted)
+        persisted, reused = app.state.store.record_utility_evidence(
+            run_id, principal.tenant, record, principal.subject, authority)
+        view = utility_evidence_view(persisted, utility_evidence_authorities=app.state.utility_evidence_authorities)
         if reused:
             return Response(view.model_dump_json(), status_code=200, media_type="application/json")
         return view
@@ -968,7 +995,7 @@ def create_app() -> FastAPI:
         record = app.state.store.get_control("utility_evidence", evidence_id, principal.tenant)
         if record["payload"].get("run_id") != run_id:
             raise HTTPException(404, "Control record not found")
-        return utility_evidence_view(record)
+        return utility_evidence_view(record, utility_evidence_authorities=app.state.utility_evidence_authorities)
 
     @app.post("/processing-runs/{run_id}/residual-evaluations", response_model=ResidualEvaluationView, status_code=201)
     def create_residual_evaluation(run_id: str, principal: Principal = Depends(require_roles("reviewer"))):
