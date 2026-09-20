@@ -1455,9 +1455,14 @@ def create_app() -> FastAPI:
         try:
             control=privacy_decision_control_for_tenant(app.state.privacy_decision_controls,tenant=principal.tenant,at=moment)
             case_id=raw["payload"]["case_id"]
+            stored=PrivacyDecision.from_record(raw["payload"]["decision"])
+            if stored.decision.outcome.value == "QUARANTINED":
+                # The case was deliberately invalidated to make quarantine
+                # sticky.  This retained record is audit-only and does not
+                # re-open any case, source, artifact, or delivery path.
+                return privacy_decision_view(app.state.store.get_privacy_decision(decision_id,principal.tenant,control.decision_authority,None))
             # Reassess live sources; a changed or invalid source must never be
             # rendered as a still-valid holding decision.
-            stored=PrivacyDecision.from_record(raw["payload"]["decision"])
             current, release_authority=assess_case_privacy(case_id,principal.tenant,moment,stored.decision_id)
             # ``decided_at`` is intentionally immutable, while reassessment
             # happens at read time.  Every substantive binding, policy result,

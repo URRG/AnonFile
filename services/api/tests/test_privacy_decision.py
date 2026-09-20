@@ -10,6 +10,7 @@ from app.privacy_decision import (PrivacyDecision, PrivacyDecisionControl,
                                   load_privacy_decision_controls)
 from app.privacy_evidence_authority import PrivacyEvidenceAttestationAuthority
 from app.privacy_evidence_policy import PrivacyEvidenceBinding, PrivacyEvidenceKind, assess_privacy_evidence
+from app.repository import DevelopmentStore
 
 D = "sha256:" + "a" * 64
 R = "b" * 64
@@ -58,3 +59,31 @@ def test_documented_m15_configuration_shape_loads_with_valid_disclosure_floor(mo
     loaded = load_privacy_decision_controls()
     assert len(loaded) == 1
     assert dict(loaded[0].thresholds)[PrivacyEvidenceKind.DISCLOSURE_RISK] == 1
+
+
+def test_quarantined_signed_tombstone_is_retrievable_without_a_live_release_case():
+    """A sticky hold retains its audit record but cannot revive a case handle."""
+    now = datetime.now(UTC).replace(microsecond=0)
+    expiry = now + timedelta(days=10)
+    key = lambda char: base64.b64encode(char.encode() * 32).decode()
+    signer = PrivacyDecisionAuthority("tenant-a", "decision-a", expiry, key("a"))
+    pairs = tuple((kind, PrivacyEvidenceAttestationAuthority("tenant-a", "issuer-" + kind.value.lower(), expiry, key(chr(98 + i))))
+                  for i, kind in enumerate(PrivacyEvidenceKind))
+    thresholds = ((PrivacyEvidenceKind.BENCHMARK, 1_000_000), (PrivacyEvidenceKind.DISCLOSURE_RISK, 1),
+                  (PrivacyEvidenceKind.LINKAGE, 0), (PrivacyEvidenceKind.RESIDUAL_SCAN, 0), (PrivacyEvidenceKind.UTILITY, 1_000_000))
+    control = PrivacyDecisionControl(signer, 60, thresholds, pairs)
+    binding = PrivacyEvidenceBinding(D, D, R, D, "purpose-a", D, now + timedelta(hours=1))
+    policy = control.policy(binding)
+    outcome = assess_privacy_evidence(decision_id="policy-a", binding=binding, policy=policy, evidence=(object(),),
+                                      authorities=tuple(item.policy_verifier for _, item in pairs), at=now)
+    item = signer.issue(decision_id=control.decision_identifier(case_id="case-a", idempotency_key="key-a"),
+                        case_id="case-a", case_digest=D, decision=outcome, evidence_references=(),
+                        expires_at=now + timedelta(minutes=30), at=now)
+    assert item.decision.outcome.value == "QUARANTINED"
+    store = DevelopmentStore()
+    store.controls["privacy_decision"][item.decision_id] = {
+        "id": item.decision_id, "kind": "privacy_decision", "tenant": "tenant-a", "created_at": now.isoformat(),
+        "expires_at": item.expires_at.timestamp(), "size_bytes": 0,
+        "payload": {"case_id": "case-a", "run_id": "run-a", "idempotency_key": "key-a", "decision": item.to_record()},
+    }
+    assert store.get_privacy_decision(item.decision_id, "tenant-a", signer, None)["id"] == item.decision_id

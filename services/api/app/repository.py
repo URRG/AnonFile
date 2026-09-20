@@ -228,14 +228,15 @@ class DevelopmentStore:
             self._append_event(tenant, "processing_run.invalidated", run_id, "system")
             del self.controls["processing_run"][run_id]
 
-    def _invalidate_release_cases_for_run(self, tenant, run_id):
+    def _invalidate_release_cases_for_run(self, tenant, run_id, *, retain_privacy_decision_id=None):
         """Tombstone non-authorizing cases when their candidate/run ceases to be current."""
         for case_id, record in list(self.controls["release_case"].items()):
             if record["tenant"] == tenant and record["payload"].get("run_id") == run_id:
                 self._append_event(tenant, "release_case.invalidated", case_id, "system")
                 del self.controls["release_case"][case_id]
                 for decision_id, decision in list(self.controls["privacy_decision"].items()):
-                    if decision["tenant"] == tenant and decision["payload"].get("case_id") == case_id:
+                    if (decision["tenant"] == tenant and decision["payload"].get("case_id") == case_id
+                            and decision_id != retain_privacy_decision_id):
                         self._append_event(tenant, "privacy_decision.invalidated", decision_id, "system")
                         del self.controls["privacy_decision"][decision_id]
 
@@ -1169,7 +1170,7 @@ class DevelopmentStore:
                 # revoke all case/decision handles and make the run sticky
                 # quarantined, without creating an approval or delivery state.
                 run = self._control("processing_run", run_id, tenant)
-                self._invalidate_release_cases_for_run(tenant, run_id)
+                self._invalidate_release_cases_for_run(tenant, run_id, retain_privacy_decision_id=data["id"])
                 if run["payload"].get("state") == "CANDIDATE":
                     revised = detached(run)
                     revised_payload = revised["payload"]
@@ -1188,19 +1189,23 @@ class DevelopmentStore:
             data = self._control("privacy_decision", decision_id, tenant)
             case_id = data.get("payload", {}).get("case_id")
             if type(case_id) is not str: raise unavailable()
-            # Reuse the complete atomic verifier by passing a fresh same record
-            # through it would append/idempotency-check.  Here we only verify
-            # live case scope and the signed envelope before a source-safe read.
+            try:
+                decision = PrivacyDecision.from_record(data["payload"]["decision"])
+                if decision.decision_id != decision_id or not decision_authority.verifies(decision, at=datetime.now(UTC).replace(microsecond=0)):
+                    raise ValueError
+            except (KeyError, TypeError, ValueError, PrivacyDecisionError): raise unavailable() from None
+            # A quarantined tombstone intentionally survives release-case
+            # invalidation so audit can explain the sticky hold.  It is not an
+            # actionable case or a release path; do not require the deleted
+            # case to be live merely to render this source-safe outcome.
+            if decision.decision.outcome.value == "QUARANTINED":
+                return detached(data)
             case_data = self._control("release_case", case_id, tenant)
             run_id = case_data.get("payload", {}).get("run_id")
             if type(run_id) is not str: raise unavailable()
             case = self._verify_release_case_scope(data=case_data, identifier=run_id, tenant=tenant, authority=release_authority,
                                                     moment=datetime.now(UTC).replace(microsecond=0))
-            try:
-                decision = PrivacyDecision.from_record(data["payload"]["decision"])
-                if (decision.decision_id != decision_id or decision.case_digest != case.digest
-                        or not decision_authority.verifies(decision, at=datetime.now(UTC).replace(microsecond=0))): raise ValueError
-            except (KeyError, TypeError, ValueError, PrivacyDecisionError): raise unavailable() from None
+            if decision.case_digest != case.digest: raise unavailable()
             return detached(data)
 
     def record_qualification(self, identifier, tenant, qualification, evaluation_id, actor):

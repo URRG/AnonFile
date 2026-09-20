@@ -16,6 +16,11 @@ commitment-derived binding. Write-time reassessment occurs under the store
 lock. Reads re-verify the case, envelope and a fresh server-side assessment;
 any drift, expiry, invalidation or source-attestation failure is unavailable.
 
+When the outcome is `QUARANTINED`, the associated release case is invalidated
+and the processing run is made sticky-quarantined. The signed decision itself
+is retained as a source-safe audit tombstone and can be read without reviving
+or revalidating the deleted case; its view remains explicitly non-actionable.
+
 Both possible outcomes are `QUARANTINED` and `INSUFFICIENT_EVIDENCE`, with
 `NO_RELEASE_AUTHORIZATION` permanently attached. This increment adds no
 approval, artifact bytes, export, delivery, or download route.
