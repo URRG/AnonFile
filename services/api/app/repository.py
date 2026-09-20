@@ -825,6 +825,8 @@ class DevelopmentStore:
                 verified = (isinstance(authority, DisclosureRiskControlAuthority) and authority.is_active()
                             and authority.tenant == tenant and authority.authority_id == payload["risk_authority_id"]
                             and authority.qid_config_revision == payload["qid_config_revision"]
+                            and report.quasi_identifier_commitment == authority.quasi_identifiers.public_commitment
+                            and report.quasi_identifier_count == authority.quasi_identifiers.field_count
                             and authority.verify(signature=payload["attestation_signature"], tenant=tenant, run_id=identifier,
                                 processing_request_digest=payload["processing_request_digest"], candidate_artifact_digest=payload["candidate_artifact_digest"],
                                 policy_digest=payload["policy_digest"], rights_digest=payload["rights_digest"], method_id=payload["method_id"],

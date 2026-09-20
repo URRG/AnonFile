@@ -587,7 +587,9 @@ def disclosure_risk_evidence_view(record: dict[str, Any], *, disclosure_risk_aut
         if set(payload) != expected or report.candidate_artifact_digest != payload["candidate_artifact_digest"]:
             raise ValueError
         authority = disclosure_risk_authority_for_tenant(disclosure_risk_authorities, tenant=record["tenant"])
-        if (authority.authority_id != payload["risk_authority_id"] or payload["qid_config_revision"] != authority.qid_config_revision or not authority.verify(
+        if (authority.authority_id != payload["risk_authority_id"] or payload["qid_config_revision"] != authority.qid_config_revision
+                or report.quasi_identifier_commitment != authority.quasi_identifiers.public_commitment
+                or report.quasi_identifier_count != authority.quasi_identifiers.field_count or not authority.verify(
                 signature=payload["attestation_signature"], tenant=record["tenant"], run_id=payload["run_id"],
                 processing_request_digest=payload["processing_request_digest"],
                 candidate_artifact_digest=payload["candidate_artifact_digest"], policy_digest=payload["policy_digest"],

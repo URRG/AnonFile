@@ -119,7 +119,9 @@ class DisclosureRiskControlAuthority:
         if (type(idempotency_key) is not str or not 1 <= len(idempotency_key) <= 200 or not idempotency_key.isascii()
                 or any(character.isspace() for character in idempotency_key)
                 or qid_config_revision != self.qid_config_revision
-                or report.candidate_artifact_digest != candidate_artifact_digest):
+                or report.candidate_artifact_digest != candidate_artifact_digest
+                or report.quasi_identifier_commitment != self._qid_config.public_commitment
+                or report.quasi_identifier_count != self._qid_config.field_count):
             _fail()
         return _canonical({"schema": "disclosure-risk-attestation-v1", "authority_id": self.authority_id,
                            "tenant": tenant, "run_id": run_id, "processing_request_digest": processing_request_digest,

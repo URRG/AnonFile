@@ -5,7 +5,8 @@ from dataclasses import replace
 import pytest
 from fastapi import HTTPException
 from app.main import disclosure_risk_evidence_view
-from app.disclosure_risk import QuasiIdentifierCommitmentAuthority
+from app.disclosure_risk import DisclosureRiskReport, QuasiIdentifierCommitmentAuthority
+from app.disclosure_risk_authority import DisclosureRiskAuthorityError
 from test_access import auth
 from test_control_plane_api import client, controls, ingested_dataset, run_request
 
@@ -69,3 +70,21 @@ def test_tampered_report_signature_or_authority_cannot_render_or_be_admitted(cli
         disclosure_risk_evidence_view(stored, disclosure_risk_authorities=(drifted,))
     assert client.delete(f"/datasets/{item['dataset_id']}", headers=auth()).status_code == 204
     assert client.get(f"/processing-runs/{item['id']}/disclosure-risk-evidence/{view['id']}", headers=auth()).status_code == 404
+
+
+def test_active_authority_refuses_a_structurally_valid_report_for_another_qid_selection(client):
+    item = run(client); view = submit(client, item["id"]).json()
+    stored = client.app.state.store.get_control("disclosure_risk_evidence", view["id"], "tenant-a")
+    report = DisclosureRiskReport.from_record(stored["payload"]["report"])
+    forged = replace(report, quasi_identifier_commitment="qidcfg:v1:" + "A" * 43)
+    authority = client.app.state.disclosure_risk_authorities[0]
+    with pytest.raises(DisclosureRiskAuthorityError):
+        authority.sign_for_worker(tenant="tenant-a", run_id=item["id"],
+            processing_request_digest=stored["payload"]["processing_request_digest"],
+            candidate_artifact_digest=stored["payload"]["candidate_artifact_digest"],
+            policy_digest=stored["payload"]["policy_digest"], rights_digest=stored["payload"]["rights_digest"],
+            method_id=stored["payload"]["method_id"], method_version=stored["payload"]["method_version"],
+            method_config_digest=stored["payload"]["method_config_digest"],
+            taxonomy_mapping_digest=stored["payload"]["taxonomy_mapping_digest"],
+            idempotency_key=stored["payload"]["idempotency_key"], qid_config_revision=authority.qid_config_revision,
+            report=forged)
