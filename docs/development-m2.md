@@ -10,7 +10,34 @@ Run backend tests using `python -m pytest -q` from `services/api`; frontend `npm
 
 ## Optional encrypted SQLite
 
-Set `ANONFLOW_STORAGE_MODE=sqlite`, `ANONFLOW_DB_PATH` to an explicit local database file in an existing private directory, and `ANONFLOW_STORAGE_KEY` to standard base64 encoding of32 cryptographically random bytes. Generate the key once locally, retain it outside the repository/database, and load it securely into the process environment. Example key-generation command: `python -c "import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())"`. Do not log/share the result. Restart with the same key/path to retain state. Missing/invalid keys, wrong keys and corrupted existing databases fail closed without reinitialization. Loss of key means loss of access; key rotation/migration is not implemented.
+Set `ANONFLOW_STORAGE_MODE=sqlite`, `ANONFLOW_DB_PATH` to an explicit local database file in an existing private directory, and `ANONFLOW_STORAGE_KEY` to standard base64 encoding of32 cryptographically random bytes. Generate the key once locally, retain it outside the repository/database, and load it securely into the process environment. Example key-generation command: `python -c "import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())"`. Do not log/share the result. Restart with the same key/path to retain state. Missing/invalid keys, wrong keys and corrupted existing databases fail closed without reinitialization. Loss of key means loss of access.
+
+### Offline local-key rotation
+
+Rotation is a trusted maintenance primitive, deliberately not an HTTP endpoint or
+an automatic startup action. Stop every process using the database, retain a
+tested encrypted backup and both keys in operator-controlled secret custody,
+then invoke `DurableStore.rotate_key(db_path, old_key, new_key,
+new_key_id="opaque-operator-label")` from a tightly controlled maintenance
+process. The label is ASCII `A-Z`/`a-z`/`0-9`/`.`/`_`/`-`, has no API exposure,
+and is sealed in the key-check sentinel only to help an operator identify the
+current rotation generation; it is not proof of key custody.
+
+The operation authenticates all current records and audit history using the old
+key, re-chains audit MACs under the new derived audit subkey, re-encrypts every
+logical record/audit/sentinel row inside one SQLite transaction, and reloads the
+entire store under the new key before committing. A wrong old key, malformed or
+tampered database, invalid rotation input, write failure, or process exception
+before commit leaves the old logical database usable; no plaintext migration
+artifact is written. After a successful commit, restart the service with the
+new storage key. Do not run concurrent service writers during this local
+maintenance operation.
+
+This remains a development adapter, not managed KMS key rotation. SQLite pages,
+WAL/journal remnants, backups, filesystem snapshots, RAM and crash dumps may
+retain ciphertext encrypted with the old key; physical secure erasure and key
+custody/revocation need platform controls. The adapter cannot detect a
+whole-database rollback without an external trusted anchor.
 
 Source, normalized records, original serialization, provenance, cards and audit metadata are encrypted with AES-GCM. Separate record/audit keys are derived with HKDF; random nonces and tenant/type/object-bound associated data protect context. Plain indexes expose opaque IDs, tenant labels, byte counts, expiry and audit sequence. Tenant labels must not contain personal information. Decrypted records exist in process memory while handled. OS permissions, disk/process security, backups, key custody and crash-dump controls remain operator responsibilities; this is not managed key infrastructure.
 
