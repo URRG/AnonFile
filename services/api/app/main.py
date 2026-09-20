@@ -25,8 +25,10 @@ from app.security import Principal, configure_auth, require_roles
 from app.policies import PolicyError, PolicyProfile, PolicyRule, PolicySnapshot
 from app.rights import RightsError, RightsProfile, evaluate_rights
 from app.runs import ProcessingPlan, RunError, RunRegistry
-from app.candidate import (CandidateArtifact, CandidateError, LedgerAction, LedgerReason,
-                           PayloadKind, SchemaContract, TransformLedgerEntry)
+from app.candidate import CandidateArtifact, CandidateError, LedgerAction, PayloadKind, SchemaContract
+from app.rules_policy_execution import (ActualOutputOperation as PolicyOutputOperation,
+                                        RULES_LABEL_TO_CATEGORY, RulesPolicyExecutionError,
+                                        execute_rules_policy)
 from app.residual_eval import (CandidateMetadata as ResidualCandidateMetadata, DetectorIdentity,
                                DetectorResult, EvaluationError, EvaluationProfile,
                                EvidenceStatus, candidate_schema_digest, evaluate_candidate)
@@ -281,6 +283,8 @@ class ProcessingRunView(BaseModel):
     state: str
     attempts: int
     request_digest: str
+    method_id: str
+    language: str
     policy_digest: str
     rights_digest: str
     recipient: str
@@ -296,6 +300,8 @@ class ResidualEvaluationView(BaseModel):
     evidence_status: str
     residual_counts: dict[str, int]
     coverage_percent: int
+    assessed_categories: list[str]
+    category_coverage_percent: int
     utility_checks: list[dict[str, Any]]
 
 class QualificationCreate(StrictModel):
@@ -380,12 +386,21 @@ def rights_view(record: dict[str, Any]) -> RightsProfileView:
 def run_view(record: dict[str, Any]) -> ProcessingRunView:
     try:
         payload = record["payload"]
+        method_id, language = payload.get("method_id"), payload.get("language")
+        # M5 execution provenance was not persisted in M2b/M3 records.  Keep
+        # those records inspectable but make their inability to run explicit;
+        # reconstructing an executor/language from an old request digest would
+        # fabricate evidence.
+        if method_id is None and language is None:
+            method_id, language = "legacy-unavailable", "und"
         if (payload["state"] not in {"REGISTERED", "RUNNING", "CANDIDATE", "QUARANTINED", "FAILED"}
                 or type(payload["attempts"]) is not int or not 0 <= payload["attempts"] <= 3
+                or method_id not in {"rules-v1", "legacy-unavailable"} or type(language) is not str
                 or not isinstance(payload["events"], list) or not 1 <= len(payload["events"]) <= 16):
             raise ValueError
         return ProcessingRunView(id=record["id"], dataset_id=payload["dataset_id"], state=payload["state"],
                                  attempts=payload["attempts"], request_digest=payload["request_digest"],
+                                 method_id=method_id, language=language,
                                  policy_digest=payload["policy_digest"], rights_digest=payload["rights_digest"],
                                  recipient=payload["recipient"], purpose=payload["purpose"], events=copy.deepcopy(payload["events"]),
                                  candidate=copy.deepcopy(payload.get("candidate")))
@@ -404,6 +419,8 @@ def residual_view(record: dict[str, Any]) -> ResidualEvaluationView:
                                       evidence_status=report["evidence_status"],
                                       residual_counts=copy.deepcopy(report["residual_counts"]),
                                       coverage_percent=report["coverage_percent"],
+                                      assessed_categories=copy.deepcopy(report["assessed_categories"]),
+                                      category_coverage_percent=report["category_coverage_percent"],
                                       utility_checks=copy.deepcopy(report["utility_checks"]))
     except (KeyError, TypeError, ValueError):
         raise HTTPException(503, "Control integrity verification failed") from None
@@ -424,8 +441,10 @@ def _residual_detector(candidate: str | list[dict[str, Any]]) -> DetectorResult:
     def inspect(value: Any, observed: set[str]):
         if type(value) is str:
             for finding in detect_text(value):
-                family = "CREDENTIAL" if finding.entity_type == "CREDENTIAL" else "PAYMENT" if finding.entity_type in {"PAN", "CARD"} else "PII"
-                observed.add(family)
+                category = RULES_LABEL_TO_CATEGORY.get(finding.entity_type)
+                if category is None:
+                    raise RulesPolicyExecutionError()
+                observed.add(category)
         elif type(value) is dict:
             for child in value.values():
                 inspect(child, observed)
@@ -440,14 +459,21 @@ def _residual_detector(candidate: str | list[dict[str, Any]]) -> DetectorResult:
             counts[family] += 1
     return DetectorResult(residual_counts=counts, scanned_units=len(units))
 
-def _candidate_ledger(result) -> tuple[TransformLedgerEntry, ...]:
-    totals: dict[str, int] = {}
-    for finding in result.findings:
-        if finding.count > 0:
-            totals[finding.entity_type] = totals.get(finding.entity_type, 0) + finding.count
-    entries = [TransformLedgerEntry(entity_type, LedgerAction.REDACT, LedgerReason.DETECTOR_FINDING, count)
-               for entity_type, count in totals.items()]
-    return tuple(sorted(entries, key=lambda item: (item.entity_type, item.action.value, item.reason.value)))
+def _policy_output_operations(result) -> tuple[PolicyOutputOperation, ...]:
+    """Aggregate operations recorded by the worker into policy families.
+
+    This deliberately never turns a detection into a claimed transformation.
+    The processing result must already contain a source-free actual operation.
+    """
+    totals: dict[tuple[str, LedgerAction], int] = {}
+    for operation in result.actual_operations:
+        category = RULES_LABEL_TO_CATEGORY.get(operation.entity_type)
+        if category is None:
+            raise RulesPolicyExecutionError()
+        key = (category, operation.action)
+        totals[key] = totals.get(key, 0) + operation.count
+    return tuple(PolicyOutputOperation(category, action, count)
+                 for (category, action), count in sorted(totals.items(), key=lambda item: (item[0][0], item[0][1].value)))
 
 def create_app() -> FastAPI:
     @asynccontextmanager
@@ -568,6 +594,8 @@ def create_app() -> FastAPI:
         if len(keys) != 1:
             raise HTTPException(422, "Request validation failed")
         key = keys[0]
+        if request.method_id != "rules-v1":
+            raise HTTPException(422, "Unsupported processing method")
         dataset = app.state.store.get_dataset(request.dataset_id, principal.tenant)
         if "ingestion_manifest" not in dataset:
             raise HTTPException(409, "Ingestion provenance is required")
@@ -597,7 +625,8 @@ def create_app() -> FastAPI:
                    "policy_snapshot_id": request.policy_snapshot_id, "state": registered.state.value,
                    "attempts": registered.attempts, "policy_digest": snapshot.digest,
                    "source_digest": plan.source_digest,
-                   "mode": request.release_mode,
+                   "mode": request.release_mode, "method_id": request.method_id,
+                   "language": request.language,
                    "rights_digest": profile.digest, "recipient": request.recipient,
                    "purpose": request.purpose,
                    "events": [{"sequence": event.sequence, "state": event.state.value, "action": event.action,
@@ -623,15 +652,28 @@ def create_app() -> FastAPI:
     @app.post("/processing-runs/{run_id}/execute", response_model=ProcessingRunView)
     def execute_processing_run(run_id: str, principal: Principal = Depends(require_roles("processor"))):
         """Run the local development worker without returning source/output bytes."""
+        registered = app.state.store.get_control("processing_run", run_id, principal.tenant)
+        if (registered["payload"].get("method_id") != "rules-v1"
+                or type(registered["payload"].get("language")) is not str):
+            raise HTTPException(409, "Legacy processing run lacks execution provenance")
         claimed, dataset = app.state.store.claim_processing_run(run_id, principal.tenant, principal.subject)
         try:
+            run_payload = claimed["payload"]
+            if run_payload.get("method_id") != "rules-v1":
+                raise RulesPolicyExecutionError()
+            policy = policy_from_control(app.state.store.get_control("policy_snapshot", run_payload["policy_snapshot_id"], principal.tenant))
+            policy.require_support(release_mode=run_payload["mode"],
+                                   format=dataset["ingestion_manifest"].get("format"),
+                                   language=run_payload["language"])
             source = dataset["content"] if dataset["content"] is not None else dataset["records"]
             payload_kind = PayloadKind.TEXT if dataset["content"] is not None else PayloadKind.STRUCTURED
             schema = SchemaContract.from_value(source, kind=payload_kind, allow_scalar_nulls=payload_kind is PayloadKind.STRUCTURED)
-            result = process_payload(content=dataset["content"], records=dataset["records"], mode=claimed["payload"]["mode"])
-            artifact = CandidateArtifact.create(run_id=run_id, input_digest=claimed["payload"]["source_digest"],
-                                                 policy_digest=claimed["payload"]["policy_digest"], transformed=result.output,
-                                                 schema=schema, ledger=_candidate_ledger(result))
+            result = process_payload(content=dataset["content"], records=dataset["records"], mode=run_payload["mode"])
+            policy_execution = execute_rules_policy(policy=policy, release_mode=run_payload["mode"], result=result,
+                                                     actual_operations=_policy_output_operations(result))
+            artifact = CandidateArtifact.create(run_id=run_id, input_digest=run_payload["source_digest"],
+                                                 policy_digest=run_payload["policy_digest"], transformed=result.output,
+                                                 schema=schema, ledger=policy_execution.actual_ledger)
             metadata = artifact.metadata
             private_payload = {"run_id": metadata.run_id, "input_digest": metadata.input_digest,
                                "policy_digest": metadata.policy_digest, "artifact_digest": metadata.artifact_digest,
@@ -641,10 +683,23 @@ def create_app() -> FastAPI:
                                "media_type": metadata.media_type, "byte_count": metadata.byte_count,
                                "ledger": [{"entity_type": item.entity_type, "action": item.action.value,
                                            "reason": item.reason.value, "count": item.count} for item in metadata.ledger],
+                               "policy_execution": {"plan_digest": policy_execution.plan.digest,
+                                                    "disposition": policy_execution.disposition.value,
+                                                    "obligations_satisfied": policy_execution.obligations_satisfied,
+                                                    "assessed_categories": sorted(RULES_LABEL_TO_CATEGORY.values()),
+                                                    "uncovered_categories": sorted(policy_execution.uncovered_categories)},
                                "body": artifact.materialize_for_private_worker()}
             record = control_record(kind="private_candidate", identifier=str(uuid4()), tenant=principal.tenant,
                                     payload=private_payload, expires_at=dataset["expires_at"])
-            return run_view(app.state.store.complete_processing_run(run_id, principal.tenant, record, principal.subject))
+            if policy_execution.can_create_private_candidate:
+                completed = app.state.store.complete_processing_run(run_id, principal.tenant, record, principal.subject)
+            else:
+                code = ("POLICY_BLOCKED" if policy_execution.plan.disposition.value == "QUARANTINE_REQUIRED" else
+                        "POLICY_REVIEW_REQUIRED" if policy_execution.plan.disposition.value == "REVIEW_REQUIRED" else
+                        "POLICY_UNCOVERED" if policy_execution.uncovered_categories else
+                        "POLICY_OBLIGATION_UNSATISFIED")
+                completed = app.state.store.quarantine_processing_run(run_id, principal.tenant, record, code, principal.subject)
+            return run_view(completed)
         except (CandidateError, PayloadError, ValueError):
             # Never return or persist an exception message: it can carry source values.
             return run_view(app.state.store.fail_processing_run(run_id, principal.tenant, "PROCESSING_FAILURE", principal.subject))
@@ -652,6 +707,11 @@ def create_app() -> FastAPI:
             # A quota/race error after a claim must not leave a permanent RUNNING
             # run that neither retry nor review can resolve.
             return run_view(app.state.store.fail_processing_run(run_id, principal.tenant, "STORAGE_FAILURE", principal.subject))
+
+    @app.post("/processing-runs/{run_id}/recover", response_model=ProcessingRunView)
+    def recover_processing_run(run_id: str, principal: Principal = Depends(require_roles("processor"))):
+        """Terminally recover a lease-expired local claim; it never requeues output."""
+        return run_view(app.state.store.recover_stale_processing_run(run_id, principal.tenant, principal.subject))
 
     @app.post("/processing-runs/{run_id}/residual-evaluations", response_model=ResidualEvaluationView, status_code=201)
     def create_residual_evaluation(run_id: str, principal: Principal = Depends(require_roles("reviewer"))):
@@ -672,6 +732,7 @@ def create_app() -> FastAPI:
         record = control_record(kind="evaluation_report", identifier=str(uuid4()), tenant=principal.tenant,
                                 payload={"run_id": run_id, "candidate_digest": report.candidate_digest,
                                          "policy_digest": run["payload"]["policy_digest"], "rights_digest": run["payload"]["rights_digest"],
+                                         "evidence_status": report.evidence_status.value,
                                          "report": report_record}, expires_at=candidate["expires_at"])
         persisted, _ = app.state.store.record_evaluation(run_id, principal.tenant, record, principal.subject)
         return residual_view(persisted)

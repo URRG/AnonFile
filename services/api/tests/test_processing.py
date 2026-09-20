@@ -16,6 +16,7 @@ def test_credentials_are_critical_and_suppressed(secret):
     assert result.critical_detected
     assert "fictional" not in result.output
     assert any(f.entity_type == "CREDENTIAL" for f in result.findings)
+    assert result.actual_operations[0].action.value == "REDACT"
 
 
 def test_original_unicode_offsets_and_no_values_in_findings():
@@ -166,6 +167,17 @@ def test_restricted_aliases_exact_case_and_release_local():
     assert "cryptographic" in " ".join(result.limitations)
     assert process_payload(content="a@example.invalid", mode="restricted_pseudonymized").output == "[EMAIL_0001]"
     assert process_payload(content="password=synthetic", mode="restricted_pseudonymized").output == "[REDACTED_CREDENTIAL]"
+
+
+def test_actual_operations_distinguish_redaction_pseudonymization_and_nullification():
+    external = process_payload(records=[{"email": "ada@example.test", "government_id": 123456789012}])
+    assert {(item.entity_type, item.action.value, item.count) for item in external.actual_operations} == {
+        ("EMAIL", "REDACT", 1), ("GOVERNMENT_ID", "NULLIFY", 1),
+    }
+    restricted = process_payload(content="ada@example.test", mode="restricted_pseudonymized")
+    assert [(item.entity_type, item.action.value, item.count) for item in restricted.actual_operations] == [
+        ("EMAIL", "PSEUDONYMIZE", 1),
+    ]
 
 
 @pytest.mark.parametrize("marker", ["[EMAIL_0001]", "[PERSON_NAME_10000]", "[email_0001]",

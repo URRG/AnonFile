@@ -120,6 +120,8 @@ class RulesPolicyExecution:
                 or any(not isinstance(item, AggregateLedgerEntry) for item in self.policy_ledger)
                 or type(self.actual_ledger) is not tuple
                 or any(not isinstance(item, TransformLedgerEntry) for item in self.actual_ledger)
+                or any(item.entity_type not in TAXONOMY_CATEGORIES or item.reason is not LedgerReason.POLICY_RULE
+                       for item in self.actual_ledger)
                 or type(self.uncovered_categories) is not frozenset
                 or any(type(item) is not str or item not in TAXONOMY_CATEGORIES
                        for item in self.uncovered_categories)
@@ -132,6 +134,18 @@ class RulesPolicyExecution:
             key=lambda item: (item.entity_type, item.action.value, item.reason.value),
         ))
         if self.actual_ledger != expected_order:
+            _fail()
+        expected_satisfied = (not self.uncovered_categories
+                              and _transform_obligations_satisfied(
+                                  plan=self.plan, actual_ledger=self.actual_ledger))
+        expected_disposition = (
+            CandidateDisposition.TRANSFORM_REQUIRED if expected_satisfied else
+            CandidateDisposition.QUARANTINE_REQUIRED if self.uncovered_categories
+            or self.plan.disposition is CandidateDisposition.TRANSFORM_REQUIRED else
+            self.plan.disposition
+        )
+        if (self.obligations_satisfied is not expected_satisfied
+                or self.disposition is not expected_disposition):
             _fail()
     @property
     def can_create_private_candidate(self) -> bool:

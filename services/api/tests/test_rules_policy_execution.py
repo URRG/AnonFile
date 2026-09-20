@@ -105,7 +105,7 @@ def test_default_all_taxonomy_requirement_quarantines_limited_rules_coverage():
 
 
 def test_unknown_labels_missing_operations_extra_operations_and_clean_result_fail_closed():
-    unknown = ProcessingResult("", (Finding("UNDECLARED", "high", 1),), (), False, 0, 0)
+    unknown = ProcessingResult("", (Finding("UNDECLARED", "high", 1),), (), (), False, 0, 0)
     clean = process_payload(content="ordinary synthetic sentence")
     known = process_payload(content="ada@example.invalid")
     cases = (

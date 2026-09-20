@@ -478,7 +478,8 @@ def test_digest_bound_nested_failed_residual_evidence_quarantines_run(store):
     """Current writers nest the status in the immutable report, not its wrapper."""
     run = control("processing_run", "run-evaluation")
     run["payload"] = {"state": "CANDIDATE", "attempts": 1,
-                      "policy_digest": "sha256:" + "p" * 64, "rights_digest": "r" * 64}
+                      "policy_digest": "sha256:" + "p" * 64, "rights_digest": "r" * 64,
+                      "events": [{"sequence": 1, "state": "CANDIDATE", "action": "CANDIDATE_CREATED", "attempt": 1}]}
     private = control("private_candidate", "candidate-evaluation")
     private["payload"] = {"run_id": run["id"], "artifact_digest": "sha256:" + "c" * 64}
     evidence = control("evaluation_report", "evaluation-failed")
@@ -497,7 +498,8 @@ def test_digest_bound_nested_failed_residual_evidence_quarantines_run(store):
 def test_ambiguous_evaluation_status_cannot_suppress_quarantine(store):
     run = control("processing_run", "run-ambiguous")
     run["payload"] = {"state": "CANDIDATE", "attempts": 1,
-                      "policy_digest": "sha256:" + "p" * 64, "rights_digest": "r" * 64}
+                      "policy_digest": "sha256:" + "p" * 64, "rights_digest": "r" * 64,
+                      "events": [{"sequence": 1, "state": "CANDIDATE", "action": "CANDIDATE_CREATED", "attempt": 1}]}
     private = control("private_candidate", "candidate-ambiguous")
     private["payload"] = {"run_id": run["id"], "artifact_digest": "sha256:" + "c" * 64}
     evidence = control("evaluation_report", "evaluation-ambiguous")

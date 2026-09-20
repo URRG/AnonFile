@@ -95,8 +95,9 @@ def test_registered_run_binds_policy_rights_and_source_without_output(client):
     assert "output" not in run and "synthetic@example.test" not in response.text
     replay = client.post("/processing-runs", headers={**auth(), "Idempotency-Key": "control-run-0001"}, json=payload)
     assert replay.status_code == 200 and replay.json() == run
-    conflict = client.post("/processing-runs", headers={**auth(), "Idempotency-Key": "control-run-0001"}, json=run_request(dataset_id, policy["id"], rights["id"], method_id="rules-v2"))
-    assert conflict.status_code == 409
+    unsupported = client.post("/processing-runs", headers={**auth(), "Idempotency-Key": "control-run-0001"}, json=run_request(dataset_id, policy["id"], rights["id"], method_id="rules-v2"))
+    assert unsupported.status_code == 422
+    assert run["method_id"] == "rules-v1" and run["language"] == "en"
     assert client.get(f"/processing-runs/{run['id']}", headers=auth("reviewer")).json() == run
     assert client.get(f"/processing-runs/{run['id']}", headers=auth("other")).status_code == 404
     actions = [event["action"] for event in client.get("/audit", headers=auth("reviewer")).json()["events"]]
