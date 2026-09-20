@@ -39,6 +39,11 @@ def setup(monkeypatch, tmp_path, mode="memory"):
         "tenant": "tenant-a", "key_id": "development-risk-a", "expires_at": "2030-01-01T00:00:00Z",
         "quasi_identifier_fields": ["code"], "key": base64.b64encode(b"r" * 32).decode(),
     }]))
+    monkeypatch.setenv("ANONFLOW_LINKAGE_RISK_AUTHORITIES", json.dumps([{
+        "tenant": "tenant-a", "key_id": "development-linkage-a", "expires_at": "2030-01-01T00:00:00Z",
+        "linkage_key_fields": ["code"], "reference_records": [{"code": "001"}],
+        "key": base64.b64encode(b"l" * 32).decode(),
+    }]))
 
 
 @pytest.fixture(params=["memory", "sqlite"])
