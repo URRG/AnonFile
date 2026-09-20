@@ -25,6 +25,9 @@ MAX_QUASI_IDENTIFIERS = 32
 MAX_FIELD_NAME_BYTES = 128
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _FIELD = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}\Z")
+# An opaque 32-64 byte URL-safe token supplied by the trusted caller.  It is
+# deliberately not a digest generated from a qid field name/path here.
+_OPAQUE_COMMITMENT = re.compile(r"qidcfg:v1:[A-Za-z0-9_-]{43,86}\Z")
 _PERCENT_SCALE = 100  # fixed two decimal places for a percentage value
 
 
@@ -81,28 +84,33 @@ def _is_scalar(value: object) -> bool:
 class QuasiIdentifierConfig:
     """Private top-level quasi-identifier selection.
 
-    Nested paths are intentionally unsupported in this first bounded primitive:
-    field selections are normalised into a commitment and are not exposed by
-    the report or by ``repr``.
+    Nested paths are intentionally unsupported in this first bounded primitive.
+    The caller must bind this selection to a high-entropy opaque commitment
+    created in its protected control plane (for example, from a per-run secret
+    or a signed configuration record).  This module never derives a public
+    commitment by hashing field names, because such hashes are dictionary
+    reversible for common schema names.
     """
 
     _fields: tuple[str, ...] = field(repr=False, compare=True)
-    digest: str = field(init=False)
+    _public_commitment: str = field(repr=False, compare=True)
 
     @classmethod
-    def from_fields(cls, fields: Iterable[str]) -> "QuasiIdentifierConfig":
+    def from_fields(cls, fields: Iterable[str], *, public_commitment: str) -> "QuasiIdentifierConfig":
         if isinstance(fields, (str, bytes)):
             _fail()
         try:
             selected = tuple(fields)
         except TypeError:
             _fail()
-        return cls(_fields=selected)
+        return cls(_fields=selected, _public_commitment=public_commitment)
 
     def __post_init__(self) -> None:
         if (type(self._fields) is not tuple or not 1 <= len(self._fields) <= MAX_QUASI_IDENTIFIERS
                 or any(type(item) is not str or not _FIELD.fullmatch(item) for item in self._fields)
-                or len(set(self._fields)) != len(self._fields)):
+                or len(set(self._fields)) != len(self._fields)
+                or type(self._public_commitment) is not str
+                or not _OPAQUE_COMMITMENT.fullmatch(self._public_commitment)):
             _fail()
         try:
             if any(len(item.encode("utf-8")) > MAX_FIELD_NAME_BYTES for item in self._fields):
@@ -111,11 +119,15 @@ class QuasiIdentifierConfig:
             _fail()
         normalised = tuple(sorted(self._fields))
         object.__setattr__(self, "_fields", normalised)
-        object.__setattr__(self, "digest", _digest(_canonical({"version": 1, "fields": normalised})))
 
     @property
     def field_count(self) -> int:
         return len(self._fields)
+
+    @property
+    def public_commitment(self) -> str:
+        """Opaque caller-supplied commitment safe for a public report."""
+        return self._public_commitment
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,7 +156,7 @@ class DisclosureRiskReport:
 
     candidate_artifact_digest: str
     candidate_schema_digest: str
-    quasi_identifier_config_digest: str
+    quasi_identifier_commitment: str
     quasi_identifier_count: int
     status: DisclosureRiskStatus
     abstention_reason: DisclosureRiskAbstention | None
@@ -156,10 +168,12 @@ class DisclosureRiskReport:
     digest: str = field(init=False)
 
     def __post_init__(self) -> None:
-        for item in (self.candidate_artifact_digest, self.candidate_schema_digest,
-                     self.quasi_identifier_config_digest):
+        for item in (self.candidate_artifact_digest, self.candidate_schema_digest):
             if type(item) is not str or not _DIGEST.fullmatch(item):
                 _fail()
+        if (type(self.quasi_identifier_commitment) is not str
+                or not _OPAQUE_COMMITMENT.fullmatch(self.quasi_identifier_commitment)):
+            _fail()
         if type(self.quasi_identifier_count) is not int or not 1 <= self.quasi_identifier_count <= MAX_QUASI_IDENTIFIERS:
             _fail()
         if not isinstance(self.status, DisclosureRiskStatus):
@@ -199,7 +213,7 @@ class DisclosureRiskReport:
                 for item in self.equivalence_class_sizes
             ],
             "minimum_equivalence_class_size": self.minimum_equivalence_class_size,
-            "quasi_identifier_config_digest": self.quasi_identifier_config_digest,
+            "quasi_identifier_commitment": self.quasi_identifier_commitment,
             "quasi_identifier_count": self.quasi_identifier_count,
             "record_count": self.record_count,
             "status": self.status.value,
@@ -227,7 +241,7 @@ def _abstain(candidate: CandidateArtifact, config: QuasiIdentifierConfig,
     metadata = candidate.metadata
     return DisclosureRiskReport(
         candidate_artifact_digest=metadata.artifact_digest, candidate_schema_digest=metadata.schema_digest,
-        quasi_identifier_config_digest=config.digest, quasi_identifier_count=config.field_count,
+        quasi_identifier_commitment=config.public_commitment, quasi_identifier_count=config.field_count,
         status=DisclosureRiskStatus.ABSTAINED, abstention_reason=reason,
         record_count=None, minimum_equivalence_class_size=None, unique_record_count=None,
         unique_record_percent=None, equivalence_class_sizes=(),
@@ -276,7 +290,7 @@ def assess_disclosure_risk(*, candidate: CandidateArtifact,
     metadata = candidate.metadata
     return DisclosureRiskReport(
         candidate_artifact_digest=metadata.artifact_digest, candidate_schema_digest=metadata.schema_digest,
-        quasi_identifier_config_digest=quasi_identifiers.digest,
+        quasi_identifier_commitment=quasi_identifiers.public_commitment,
         quasi_identifier_count=quasi_identifiers.field_count,
         status=DisclosureRiskStatus.ASSESSED, abstention_reason=None,
         record_count=len(payload), minimum_equivalence_class_size=sizes[0].size,

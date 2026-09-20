@@ -16,6 +16,7 @@ from app.disclosure_risk import (
 
 INPUT = "sha256:" + "a" * 64
 POLICY = "sha256:" + "b" * 64
+COMMITMENT = "qidcfg:v1:K60_5jYISeRCFMrobgGtAfKrBId_JYwX4tCKgHnS5lM"
 
 
 def structured_candidate(records):
@@ -33,7 +34,7 @@ def text_candidate():
 
 
 def qids(*fields):
-    return QuasiIdentifierConfig.from_fields(fields)
+    return QuasiIdentifierConfig.from_fields(fields, public_commitment=COMMITMENT)
 
 
 def test_assessment_reports_safe_equivalence_histogram_k_and_unique_percent():
@@ -57,6 +58,8 @@ def test_assessment_reports_safe_equivalence_histogram_k_and_unique_percent():
     rendered = json.dumps(public, sort_keys=True)
     assert "alice" not in rendered and "private" not in rendered
     assert "region" not in rendered and "age_band" not in rendered
+    assert public["quasi_identifier_commitment"] == COMMITMENT
+    assert "config_digest" not in rendered
     assert public["digest"].startswith("sha256:")
 
 
@@ -117,6 +120,10 @@ def test_config_and_api_reject_unbounded_or_unsafe_inputs_with_fixed_error():
     with pytest.raises(DisclosureRiskError):
         qids(*(f"field_{index}" for index in range(33)))
     with pytest.raises(DisclosureRiskError):
+        QuasiIdentifierConfig.from_fields(["age"], public_commitment="sha256:" + "a" * 64)
+    with pytest.raises(DisclosureRiskError):
+        QuasiIdentifierConfig.from_fields(["age"], public_commitment="qidcfg:v1:too-short")
+    with pytest.raises(DisclosureRiskError):
         assess_disclosure_risk(candidate="not-artifact", quasi_identifiers=qids("age"))
 
 
@@ -127,10 +134,33 @@ def test_output_construction_cannot_introduce_raw_values_or_invalid_digest_contr
         type(report)(
             candidate_artifact_digest=report.candidate_artifact_digest,
             candidate_schema_digest=report.candidate_schema_digest,
-            quasi_identifier_config_digest=report.quasi_identifier_config_digest,
+            quasi_identifier_commitment=report.quasi_identifier_commitment,
             quasi_identifier_count=1, status=DisclosureRiskStatus.ASSESSED,
             abstention_reason=None, record_count=1, minimum_equivalence_class_size=1,
             unique_record_count=0, unique_record_percent="0.00", equivalence_class_sizes=(),
         )
     with pytest.raises(CandidateError):
         structured_candidate([{"age": "x" * 70_000}])
+
+
+def test_public_qid_commitment_is_caller_supplied_not_a_field_name_hash():
+    candidate = structured_candidate([{"age": "30-39", "region": "west"}])
+    commitment = "qidcfg:v1:Z0FqS5wYujr9Jks0L2CIacKxDqT4CqR-lC1BuE4n3VQ"
+    report = assess_disclosure_risk(
+        candidate=candidate,
+        quasi_identifiers=QuasiIdentifierConfig.from_fields(
+            ["age", "region"], public_commitment=commitment,
+        ),
+    )
+    public = report.to_record()
+    assert public["quasi_identifier_commitment"] == commitment
+    assert "age" not in json.dumps(public) and "region" not in json.dumps(public)
+    # Changing only the protected caller commitment changes the immutable
+    # public report binding without this module ever hashing field names.
+    other = assess_disclosure_risk(
+        candidate=candidate,
+        quasi_identifiers=QuasiIdentifierConfig.from_fields(
+            ["age", "region"], public_commitment=COMMITMENT,
+        ),
+    )
+    assert other.digest != report.digest
