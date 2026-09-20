@@ -75,7 +75,7 @@ def test_unique_percentage_is_half_up_rounded_to_exactly_two_decimal_places():
         {"age": "20-29", "region": "north"},
         {"age": "30-39", "region": "south"},
     ])
-    report = assess_disclosure_risk(candidate=candidate, quasi_identifiers=qids("age", "region"))
+    report = assess(candidate, ("age", "region"))
     assert report.unique_record_percent == "33.33"
 
 
