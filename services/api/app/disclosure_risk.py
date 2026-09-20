@@ -12,9 +12,11 @@ from collections import Counter
 from dataclasses import dataclass, field
 from enum import StrEnum
 import hashlib
+import hmac
 import json
 import math
 import re
+from base64 import urlsafe_b64encode
 from typing import Any, Iterable
 
 from .candidate import CandidateArtifact, PayloadKind
@@ -51,6 +53,7 @@ class DisclosureRiskAbstention(StrEnum):
     EMPTY_RECORD_SET = "EMPTY_RECORD_SET"
     RECORD_LIMIT_EXCEEDED = "RECORD_LIMIT_EXCEEDED"
     QUASI_IDENTIFIER_NOT_APPLICABLE = "QUASI_IDENTIFIER_NOT_APPLICABLE"
+    QUASI_IDENTIFIER_COMMITMENT_UNVERIFIED = "QUASI_IDENTIFIER_COMMITMENT_UNVERIFIED"
 
 
 def _fail() -> None:
@@ -80,16 +83,71 @@ def _is_scalar(value: object) -> bool:
             or (type(value) is float and math.isfinite(value)))
 
 
+def _normalise_fields(fields: Iterable[str]) -> tuple[str, ...]:
+    if isinstance(fields, (str, bytes)):
+        _fail()
+    try:
+        selected = tuple(fields)
+    except TypeError:
+        _fail()
+    if (not 1 <= len(selected) <= MAX_QUASI_IDENTIFIERS
+            or any(type(item) is not str or not _FIELD.fullmatch(item) for item in selected)
+            or len(set(selected)) != len(selected)):
+        _fail()
+    try:
+        if any(len(item.encode("utf-8")) > MAX_FIELD_NAME_BYTES for item in selected):
+            _fail()
+    except UnicodeError:
+        _fail()
+    return tuple(sorted(selected))
+
+
+@dataclass(frozen=True, slots=True)
+class QuasiIdentifierCommitmentAuthority:
+    """Ephemeral trusted-control-plane issuer and verifier for QID bindings.
+
+    The caller owns the high-entropy secret and must retain it outside public
+    reports and persistence records.  M8 never generates, stores, or exposes a
+    global key.  HMAC binds the canonical sorted private field set to the only
+    QID token that may enter a public report.
+    """
+
+    _secret: bytes = field(repr=False, compare=False)
+
+    @classmethod
+    def from_secret(cls, secret: bytes) -> "QuasiIdentifierCommitmentAuthority":
+        return cls(_secret=secret)
+
+    def __post_init__(self) -> None:
+        if type(self._secret) is not bytes or not 32 <= len(self._secret) <= 64:
+            _fail()
+
+    def issue(self, fields: Iterable[str]) -> str:
+        """Issue an opaque token for a private normalized QID field set."""
+        normalised = _normalise_fields(fields)
+        mac = hmac.new(self._secret, _canonical({"fields": normalised, "version": 1}), hashlib.sha256).digest()
+        return "qidcfg:v1:" + urlsafe_b64encode(mac).rstrip(b"=").decode("ascii")
+
+    def create_config(self, fields: Iterable[str]) -> "QuasiIdentifierConfig":
+        """Create a private selection paired with its verifiable public token."""
+        normalised = _normalise_fields(fields)
+        return QuasiIdentifierConfig(_fields=normalised, _public_commitment=self.issue(normalised))
+
+    def verifies(self, config: "QuasiIdentifierConfig") -> bool:
+        """Return only whether this authority binds the private selection."""
+        if not isinstance(config, QuasiIdentifierConfig):
+            return False
+        return hmac.compare_digest(self.issue(config._fields), config.public_commitment)
+
+
 @dataclass(frozen=True, slots=True)
 class QuasiIdentifierConfig:
     """Private top-level quasi-identifier selection.
 
     Nested paths are intentionally unsupported in this first bounded primitive.
-    The caller must bind this selection to a high-entropy opaque commitment
-    created in its protected control plane (for example, from a per-run secret
-    or a signed configuration record).  This module never derives a public
-    commitment by hashing field names, because such hashes are dictionary
-    reversible for common schema names.
+    A trusted control-plane authority must bind this selection to its opaque
+    HMAC commitment.  The report code does not derive public field-name hashes,
+    because those are dictionary reversible for common schema names.
     """
 
     _fields: tuple[str, ...] = field(repr=False, compare=True)
@@ -97,28 +155,15 @@ class QuasiIdentifierConfig:
 
     @classmethod
     def from_fields(cls, fields: Iterable[str], *, public_commitment: str) -> "QuasiIdentifierConfig":
-        if isinstance(fields, (str, bytes)):
-            _fail()
-        try:
-            selected = tuple(fields)
-        except TypeError:
-            _fail()
-        return cls(_fields=selected, _public_commitment=public_commitment)
+        return cls(_fields=_normalise_fields(fields), _public_commitment=public_commitment)
 
     def __post_init__(self) -> None:
-        if (type(self._fields) is not tuple or not 1 <= len(self._fields) <= MAX_QUASI_IDENTIFIERS
-                or any(type(item) is not str or not _FIELD.fullmatch(item) for item in self._fields)
-                or len(set(self._fields)) != len(self._fields)
+        if (type(self._fields) is not tuple
                 or type(self._public_commitment) is not str
                 or not _OPAQUE_COMMITMENT.fullmatch(self._public_commitment)):
             _fail()
-        try:
-            if any(len(item.encode("utf-8")) > MAX_FIELD_NAME_BYTES for item in self._fields):
-                _fail()
-        except UnicodeError:
+        if _normalise_fields(self._fields) != self._fields:
             _fail()
-        normalised = tuple(sorted(self._fields))
-        object.__setattr__(self, "_fields", normalised)
 
     @property
     def field_count(self) -> int:
@@ -249,7 +294,8 @@ def _abstain(candidate: CandidateArtifact, config: QuasiIdentifierConfig,
 
 
 def assess_disclosure_risk(*, candidate: CandidateArtifact,
-                           quasi_identifiers: QuasiIdentifierConfig) -> DisclosureRiskReport:
+                           quasi_identifiers: QuasiIdentifierConfig,
+                           commitment_verifier: QuasiIdentifierCommitmentAuthority | None = None) -> DisclosureRiskReport:
     """Assess bounded record-level equivalence classes for one exact candidate.
 
     This function intentionally performs no policy decision and does not
@@ -258,6 +304,13 @@ def assess_disclosure_risk(*, candidate: CandidateArtifact,
     """
     if not isinstance(candidate, CandidateArtifact) or not isinstance(quasi_identifiers, QuasiIdentifierConfig):
         _fail()
+    # The public commitment is evidence only when an in-memory trusted control
+    # plane verifies its HMAC against the private field selection.  A missing,
+    # wrong, or malformed verifier cannot reach an ASSESSED report.
+    if (not isinstance(commitment_verifier, QuasiIdentifierCommitmentAuthority)
+            or not commitment_verifier.verifies(quasi_identifiers)):
+        return _abstain(candidate, quasi_identifiers,
+                         DisclosureRiskAbstention.QUASI_IDENTIFIER_COMMITMENT_UNVERIFIED)
     if candidate.metadata.payload_kind is PayloadKind.TEXT:
         return _abstain(candidate, quasi_identifiers, DisclosureRiskAbstention.TEXT_PAYLOAD)
     payload = candidate.materialize_for_private_worker()

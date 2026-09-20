@@ -9,6 +9,7 @@ from app.disclosure_risk import (
     DisclosureRiskAbstention,
     DisclosureRiskError,
     DisclosureRiskStatus,
+    QuasiIdentifierCommitmentAuthority,
     QuasiIdentifierConfig,
     assess_disclosure_risk,
 )
@@ -16,7 +17,7 @@ from app.disclosure_risk import (
 
 INPUT = "sha256:" + "a" * 64
 POLICY = "sha256:" + "b" * 64
-COMMITMENT = "qidcfg:v1:K60_5jYISeRCFMrobgGtAfKrBId_JYwX4tCKgHnS5lM"
+AUTHORITY = QuasiIdentifierCommitmentAuthority.from_secret(b"q" * 32)
 
 
 def structured_candidate(records):
@@ -34,7 +35,12 @@ def text_candidate():
 
 
 def qids(*fields):
-    return QuasiIdentifierConfig.from_fields(fields, public_commitment=COMMITMENT)
+    return AUTHORITY.create_config(fields)
+
+
+def assess(candidate, fields):
+    return assess_disclosure_risk(candidate=candidate, quasi_identifiers=qids(*fields),
+                                  commitment_verifier=AUTHORITY)
 
 
 def test_assessment_reports_safe_equivalence_histogram_k_and_unique_percent():
@@ -44,7 +50,7 @@ def test_assessment_reports_safe_equivalence_histogram_k_and_unique_percent():
         {"age_band": "40-49", "region": "east", "private": "carol"},
         {"age_band": "50-59", "region": "north", "private": "dave"},
     ])
-    report = assess_disclosure_risk(candidate=candidate, quasi_identifiers=qids("region", "age_band"))
+    report = assess(candidate, ("region", "age_band"))
 
     assert report.status is DisclosureRiskStatus.ASSESSED
     assert report.record_count == 4
@@ -58,7 +64,7 @@ def test_assessment_reports_safe_equivalence_histogram_k_and_unique_percent():
     rendered = json.dumps(public, sort_keys=True)
     assert "alice" not in rendered and "private" not in rendered
     assert "region" not in rendered and "age_band" not in rendered
-    assert public["quasi_identifier_commitment"] == COMMITMENT
+    assert public["quasi_identifier_commitment"] == qids("region", "age_band").public_commitment
     assert "config_digest" not in rendered
     assert public["digest"].startswith("sha256:")
 
@@ -77,15 +83,15 @@ def test_same_candidate_and_set_have_deterministic_digest_irrespective_of_qid_or
     candidate = structured_candidate([
         {"age": "30-39", "region": "west"}, {"age": "30-39", "region": "west"},
     ])
-    first = assess_disclosure_risk(candidate=candidate, quasi_identifiers=qids("age", "region"))
-    second = assess_disclosure_risk(candidate=candidate, quasi_identifiers=qids("region", "age"))
+    first = assess(candidate, ("age", "region"))
+    second = assess(candidate, ("region", "age"))
 
     assert first.digest == second.digest
     assert first.to_record() == second.to_record()
     changed = structured_candidate([
         {"age": "30-39", "region": "west"}, {"age": "40-49", "region": "west"},
     ])
-    assert assess_disclosure_risk(candidate=changed, quasi_identifiers=qids("age", "region")).digest != first.digest
+    assert assess(changed, ("age", "region")).digest != first.digest
 
 
 @pytest.mark.parametrize(("candidate", "reason"), [
@@ -94,7 +100,7 @@ def test_same_candidate_and_set_have_deterministic_digest_irrespective_of_qid_or
     (structured_candidate({"age": "30-39"}), DisclosureRiskAbstention.UNSUPPORTED_RECORD_SHAPE),
 ])
 def test_text_empty_and_nonrecord_structures_abstain_without_any_source_content(candidate, reason):
-    report = assess_disclosure_risk(candidate=candidate, quasi_identifiers=qids("age"))
+    report = assess(candidate, ("age",))
     assert report.status is DisclosureRiskStatus.ABSTAINED
     assert report.abstention_reason is reason
     assert report.record_count is None and not report.equivalence_class_sizes
@@ -106,7 +112,7 @@ def test_missing_or_nonscalar_quasi_identifiers_abstain_fail_closed():
     missing = structured_candidate([{"age": "30-39"}, {"age": "40-49"}])
     nested = structured_candidate([{"age": ["30-39"]}, {"age": ["30-39"]}])
     for candidate in (missing, nested):
-        report = assess_disclosure_risk(candidate=candidate, quasi_identifiers=qids("age", "region"))
+        report = assess(candidate, ("age", "region"))
         assert report.status is DisclosureRiskStatus.ABSTAINED
         assert report.abstention_reason is DisclosureRiskAbstention.QUASI_IDENTIFIER_NOT_APPLICABLE
 
@@ -124,12 +130,12 @@ def test_config_and_api_reject_unbounded_or_unsafe_inputs_with_fixed_error():
     with pytest.raises(DisclosureRiskError):
         QuasiIdentifierConfig.from_fields(["age"], public_commitment="qidcfg:v1:too-short")
     with pytest.raises(DisclosureRiskError):
-        assess_disclosure_risk(candidate="not-artifact", quasi_identifiers=qids("age"))
+        assess_disclosure_risk(candidate="not-artifact", quasi_identifiers=qids("age"), commitment_verifier=AUTHORITY)
 
 
 def test_output_construction_cannot_introduce_raw_values_or_invalid_digest_contract():
     candidate = structured_candidate([{"age": "30-39"}])
-    report = assess_disclosure_risk(candidate=candidate, quasi_identifiers=qids("age"))
+    report = assess(candidate, ("age",))
     with pytest.raises(DisclosureRiskError):
         type(report)(
             candidate_artifact_digest=report.candidate_artifact_digest,
@@ -143,24 +149,39 @@ def test_output_construction_cannot_introduce_raw_values_or_invalid_digest_contr
         structured_candidate([{"age": "x" * 70_000}])
 
 
-def test_public_qid_commitment_is_caller_supplied_not_a_field_name_hash():
+def test_public_qid_commitment_is_hmac_bound_not_a_field_name_hash():
     candidate = structured_candidate([{"age": "30-39", "region": "west"}])
-    commitment = "qidcfg:v1:Z0FqS5wYujr9Jks0L2CIacKxDqT4CqR-lC1BuE4n3VQ"
+    authority = QuasiIdentifierCommitmentAuthority.from_secret(b"r" * 32)
+    config = authority.create_config(["age", "region"])
     report = assess_disclosure_risk(
         candidate=candidate,
-        quasi_identifiers=QuasiIdentifierConfig.from_fields(
-            ["age", "region"], public_commitment=commitment,
-        ),
+        quasi_identifiers=config, commitment_verifier=authority,
     )
     public = report.to_record()
-    assert public["quasi_identifier_commitment"] == commitment
+    assert public["quasi_identifier_commitment"] == config.public_commitment
     assert "age" not in json.dumps(public) and "region" not in json.dumps(public)
-    # Changing only the protected caller commitment changes the immutable
-    # public report binding without this module ever hashing field names.
-    other = assess_disclosure_risk(
-        candidate=candidate,
-        quasi_identifiers=QuasiIdentifierConfig.from_fields(
-            ["age", "region"], public_commitment=COMMITMENT,
-        ),
+    assert report.status is DisclosureRiskStatus.ASSESSED
+
+
+def test_missing_or_wrong_authority_abstains_and_tampered_token_is_not_assessed():
+    candidate = structured_candidate([{"age": "30-39", "region": "west"}])
+    config = qids("age", "region")
+    missing = assess_disclosure_risk(candidate=candidate, quasi_identifiers=config)
+    wrong = assess_disclosure_risk(
+        candidate=candidate, quasi_identifiers=config,
+        commitment_verifier=QuasiIdentifierCommitmentAuthority.from_secret(b"z" * 32),
     )
-    assert other.digest != report.digest
+    tampered = QuasiIdentifierConfig.from_fields(
+        ["age", "region"], public_commitment="qidcfg:v1:Z0FqS5wYujr9Jks0L2CIacKxDqT4CqR-lC1BuE4n3VQ",
+    )
+    selection_mismatch = QuasiIdentifierConfig.from_fields(
+        ["age"], public_commitment=config.public_commitment,
+    )
+    invalid = assess_disclosure_risk(candidate=candidate, quasi_identifiers=tampered,
+                                     commitment_verifier=AUTHORITY)
+    mismatch = assess_disclosure_risk(candidate=candidate, quasi_identifiers=selection_mismatch,
+                                      commitment_verifier=AUTHORITY)
+    for report in (missing, wrong, invalid, mismatch):
+        assert report.status is DisclosureRiskStatus.ABSTAINED
+        assert report.abstention_reason is DisclosureRiskAbstention.QUASI_IDENTIFIER_COMMITMENT_UNVERIFIED
+    assert b"q" * 32 not in repr(AUTHORITY).encode("utf-8")
