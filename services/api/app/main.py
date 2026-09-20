@@ -25,7 +25,8 @@ from app.security import Principal, configure_auth, require_roles
 from app.policies import PolicyError, PolicyProfile, PolicyRule, PolicySnapshot
 from app.rights import RightsError, RightsProfile, evaluate_rights
 from app.runs import ProcessingPlan, RunError, RunRegistry
-from app.candidate import CandidateArtifact, CandidateError, LedgerAction, PayloadKind, SchemaContract
+from app.candidate import (CandidateArtifact, CandidateError, LedgerAction, LedgerReason,
+                           PayloadKind, SchemaContract, TransformLedgerEntry)
 from app.rules_policy_execution import (ActualOutputOperation as PolicyOutputOperation,
                                         RULES_LABEL_TO_CATEGORY, RulesPolicyExecutionError,
                                         RULES_TAXONOMY_MAPPING_DIGEST, execute_rules_policy)
@@ -39,6 +40,9 @@ from app.qualification import (CandidateBinding, CategoryMeasurement, CategoryTh
 from app.evaluation_harness import EvaluationHarnessError, ScoredEvaluation
 from app.evaluator_authority import (EvaluatorAuthorityError, load_evaluator_authorities,
                                      matching_authority)
+from app.utility_evidence import DataUtilityReport, UtilityEvidenceError, assess_data_utility
+from app.utility_evidence_authority import (UtilityEvidenceAuthorityError, authority_for_tenant,
+                                            load_utility_evidence_authorities)
 from app.policies import TAXONOMY_CATEGORIES
 
 MAX_BODY_BYTES = 2_100_000
@@ -330,6 +334,17 @@ class DetectorEvaluationEvidenceView(BaseModel):
     limitations: list[str]
     report: dict[str, Any]
 
+class UtilityEvidenceView(BaseModel):
+    """Source-safe structural evidence from a trusted local worker only."""
+    id: str
+    run_id: str
+    processing_request_digest: str
+    candidate_artifact_digest: str
+    report_digest: str
+    posture: Literal["OBSERVATIONAL_ONLY"]
+    limitations: list[str]
+    report: dict[str, Any]
+
 class QualificationCreate(StrictModel):
     evaluation_id: str = Field(min_length=1, max_length=80)
     max_evaluation_age_seconds: int = Field(default=3600, ge=1, le=2_678_400)
@@ -508,6 +523,70 @@ def detector_evaluation_evidence_view(record: dict[str, Any], *, evaluator_autho
     except (KeyError, TypeError, ValueError, EvaluationHarnessError, EvaluatorAuthorityError):
         raise HTTPException(503, "Control integrity verification failed") from None
 
+def utility_evidence_view(record: dict[str, Any], *, utility_evidence_authorities) -> UtilityEvidenceView:
+    """Render one independently reconstructed, aggregate-only utility report."""
+    try:
+        payload = record["payload"]
+        expected = {"run_id", "processing_request_digest", "candidate_artifact_digest", "policy_digest",
+                    "rights_digest", "method_id", "method_version", "method_config_digest",
+                    "taxonomy_mapping_digest", "idempotency_key", "utility_authority_id",
+                    "attestation_signature", "report"}
+        report = DataUtilityReport.from_record(payload["report"])
+        if (set(payload) != expected or payload["report"]["digest"] != report.digest
+                or payload["candidate_artifact_digest"] != report.candidate_artifact_digest
+                or type(payload["run_id"]) is not str or type(payload["processing_request_digest"]) is not str
+                or type(payload["utility_authority_id"]) is not str):
+            raise ValueError
+        authority = authority_for_tenant(utility_evidence_authorities, tenant=record["tenant"])
+        if (authority.authority_id != payload["utility_authority_id"]
+                or not authority.verify(
+                    signature=payload["attestation_signature"], tenant=record["tenant"], run_id=payload["run_id"],
+                    processing_request_digest=payload["processing_request_digest"],
+                    candidate_artifact_digest=payload["candidate_artifact_digest"],
+                    policy_digest=payload["policy_digest"], rights_digest=payload["rights_digest"],
+                    method_id=payload["method_id"], method_version=payload["method_version"],
+                    method_config_digest=payload["method_config_digest"],
+                    taxonomy_mapping_digest=payload["taxonomy_mapping_digest"],
+                    idempotency_key=payload["idempotency_key"], report=report)):
+            raise ValueError
+        return UtilityEvidenceView(
+            id=record["id"], run_id=payload["run_id"],
+            processing_request_digest=payload["processing_request_digest"],
+            candidate_artifact_digest=report.candidate_artifact_digest, report_digest=report.digest,
+            posture="OBSERVATIONAL_ONLY",
+            limitations=[
+                "NO_RELEASE_AUTHORIZATION",
+                "Structural counts and value-free shape checks are not semantic, ML-task, fairness, privacy, or linkage evidence.",
+                "A server-owned in-process authority is not KMS-backed production secret custody.",
+            ], report=report.to_record(),
+        )
+    except (KeyError, TypeError, ValueError, UtilityEvidenceError, UtilityEvidenceAuthorityError):
+        raise HTTPException(503, "Control integrity verification failed") from None
+
+def private_candidate_artifact(private: dict[str, Any]) -> CandidateArtifact:
+    """Recreate a validated candidate only within a trusted worker boundary."""
+    try:
+        schema = SchemaContract.from_private_descriptor(
+            kind=PayloadKind(private["payload_kind"]), digest=private["schema_digest"],
+            descriptor=private["schema_descriptor"],
+        )
+        ledger = tuple(TransformLedgerEntry(item["entity_type"], LedgerAction(item["action"]),
+                                            LedgerReason(item["reason"]), item["count"])
+                       for item in private["ledger"])
+        artifact = CandidateArtifact.create(
+            run_id=private["run_id"], input_digest=private["input_digest"],
+            policy_digest=private["policy_digest"], transformed=private["body"], schema=schema, ledger=ledger,
+        )
+        metadata = artifact.metadata
+        if (metadata.artifact_digest != private["artifact_digest"]
+                or metadata.byte_count != private["byte_count"]
+                or metadata.media_type != private["media_type"]
+                or metadata.payload_kind.value != private["payload_kind"]):
+            raise ValueError
+        return artifact
+    except (KeyError, TypeError, ValueError, CandidateError):
+        raise HTTPException(503, "Control integrity verification failed") from None
+
 def _residual_detector(candidate: str | list[dict[str, Any]]) -> DetectorResult:
     """Compatibility adapter for the separately configured residual scanner."""
     return scan_residual_candidate(candidate)
@@ -542,6 +621,10 @@ def create_app() -> FastAPI:
         app.state.evaluator_authorities = load_evaluator_authorities()
     except EvaluatorAuthorityError:
         raise RuntimeError("Invalid evaluator authority configuration") from None
+    try:
+        app.state.utility_evidence_authorities = load_utility_evidence_authorities()
+    except UtilityEvidenceAuthorityError:
+        raise RuntimeError("Invalid utility-evidence authority configuration") from None
     app.state.store = create_store()
     app.add_middleware(BodyLimitMiddleware)
     origins = [v.strip() for v in os.getenv("WEB_ORIGIN", "http://localhost:3000,http://localhost:5173").split(",") if v.strip()]
@@ -837,6 +920,82 @@ def create_app() -> FastAPI:
         if record["payload"].get("run_id") != run_id:
             raise HTTPException(404, "Control record not found")
         return detector_evaluation_evidence_view(record, evaluator_authorities=app.state.evaluator_authorities)
+
+    @app.post("/processing-runs/{run_id}/utility-evidence", response_model=UtilityEvidenceView, status_code=201)
+    async def create_utility_evidence(run_id: str, request_context: Request,
+                                      principal: Principal = Depends(require_roles("processor"))):
+        """Run a server-owned source/candidate comparison and retain aggregates only.
+
+        This intentionally accepts no JSON body: a client cannot provide source
+        values, candidate values, commitments, keys, detector output, or a
+        purported report.  The private source and candidate cross the boundary
+        only inside the local trusted-worker path below.
+        """
+        keys = request_context.headers.getlist("idempotency-key")
+        if (len(keys) != 1 or not 1 <= len(keys[0]) <= 200 or not keys[0].isascii()
+                or any(char.isspace() for char in keys[0]) or await request_context.body()):
+            raise HTTPException(422, "Request validation failed")
+        candidate_record, run = app.state.store.private_candidate_for_run(run_id, principal.tenant)
+        if run["payload"].get("processor_subject") != principal.subject:
+            raise HTTPException(403, "Processing-run owner required")
+        try:
+            authority = authority_for_tenant(app.state.utility_evidence_authorities, tenant=principal.tenant)
+        except UtilityEvidenceAuthorityError:
+            # No authority means there is no safe way to issue a private-source
+            # commitment.  Do not compute or retain a partial metric report.
+            raise HTTPException(409, "Utility evidence authority is unavailable") from None
+        dataset = app.state.store.get_dataset(run["payload"]["dataset_id"], principal.tenant)
+        source = dataset["content"] if dataset["content"] is not None else dataset["records"]
+        try:
+            artifact = private_candidate_artifact(candidate_record["payload"])
+            commitment = authority.issue(source)
+            report = assess_data_utility(source=source, candidate=artifact, source_commitment=commitment,
+                                         commitment_verifier=authority.verifier)
+        except (UtilityEvidenceAuthorityError, UtilityEvidenceError, CandidateError, KeyError, TypeError, ValueError):
+            # Source/candidate integrity errors and authority failures must not
+            # become an HTTP reflection or retained aggregate measurement.
+            raise HTTPException(503, "Utility evidence is unavailable") from None
+        if report.status.value != "ASSESSED":
+            raise HTTPException(503, "Utility evidence is unavailable")
+        payload = {
+            "run_id": run_id, "processing_request_digest": run["payload"]["request_digest"],
+            "candidate_artifact_digest": artifact.metadata.artifact_digest,
+            "policy_digest": run["payload"]["policy_digest"], "rights_digest": run["payload"]["rights_digest"],
+            "method_id": run["payload"]["method_id"], "method_version": run["payload"]["method_version"],
+            "method_config_digest": run["payload"]["method_config_digest"],
+            "taxonomy_mapping_digest": run["payload"]["taxonomy_mapping_digest"],
+            "idempotency_key": keys[0], "utility_authority_id": authority.authority_id,
+            "report": report.to_record(),
+        }
+        try:
+            payload["attestation_signature"] = authority.sign_for_worker(
+                tenant=principal.tenant, run_id=run_id,
+                processing_request_digest=payload["processing_request_digest"],
+                candidate_artifact_digest=payload["candidate_artifact_digest"],
+                policy_digest=payload["policy_digest"], rights_digest=payload["rights_digest"],
+                method_id=payload["method_id"], method_version=payload["method_version"],
+                method_config_digest=payload["method_config_digest"],
+                taxonomy_mapping_digest=payload["taxonomy_mapping_digest"],
+                idempotency_key=payload["idempotency_key"], report=report,
+            )
+        except UtilityEvidenceAuthorityError:
+            raise HTTPException(503, "Utility evidence is unavailable") from None
+        record = control_record(kind="utility_evidence", identifier=str(uuid4()), tenant=principal.tenant,
+                                payload=payload, expires_at=min(run["expires_at"], candidate_record["expires_at"]))
+        persisted, reused = app.state.store.record_utility_evidence(
+            run_id, principal.tenant, record, principal.subject, authority)
+        view = utility_evidence_view(persisted, utility_evidence_authorities=app.state.utility_evidence_authorities)
+        if reused:
+            return Response(view.model_dump_json(), status_code=200, media_type="application/json")
+        return view
+
+    @app.get("/processing-runs/{run_id}/utility-evidence/{evidence_id}", response_model=UtilityEvidenceView)
+    def get_utility_evidence(run_id: str, evidence_id: str,
+                             principal: Principal = Depends(require_roles("processor", "reviewer"))):
+        record = app.state.store.get_control("utility_evidence", evidence_id, principal.tenant)
+        if record["payload"].get("run_id") != run_id:
+            raise HTTPException(404, "Control record not found")
+        return utility_evidence_view(record, utility_evidence_authorities=app.state.utility_evidence_authorities)
 
     @app.post("/processing-runs/{run_id}/residual-evaluations", response_model=ResidualEvaluationView, status_code=201)
     def create_residual_evaluation(run_id: str, principal: Principal = Depends(require_roles("reviewer"))):
