@@ -17,6 +17,9 @@ import json
 import re
 from typing import Iterable
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
 
 PPM = 1_000_000
 MAX_COUNT = 1_000_000_000
@@ -26,7 +29,7 @@ _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _RIGHTS_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _IDENTIFIER = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}\Z")
 _REFERENCE = re.compile(r"evidence:v1:[A-Za-z0-9_-]{43}\Z")
-_SIGNATURE = re.compile(r"privacy-evidence-sig:v1:[A-Za-z0-9_-]{43}\Z")
+_SIGNATURE = re.compile(r"(?:privacy-evidence-sig:v1:[A-Za-z0-9_-]{43}|privacy-evidence-sig:v2:[A-Za-z0-9_-]{86})\Z")
 
 
 class PrivacyEvidencePolicyError(ValueError):
@@ -315,6 +318,41 @@ class PrivacyEvidenceAuthority:
                 and hmac.compare_digest(evidence.signature, self._sign(evidence.canonical())))
 
 
+class PrivacyEvidencePublicVerifier:
+    """Ed25519 public-key verifier; deliberately incapable of issuing evidence."""
+
+    __slots__ = ("_public_key", "key_id")
+
+    def __init__(self, *, key_id: str, public_key_b64: str) -> None:
+        self.key_id = _identifier(key_id)
+        if type(public_key_b64) is not str or len(public_key_b64) != 44:
+            _fail()
+        try:
+            raw = base64.b64decode(public_key_b64, validate=True)
+            if len(raw) != 32 or base64.b64encode(raw).decode("ascii") != public_key_b64:
+                _fail()
+            self._public_key = Ed25519PublicKey.from_public_bytes(raw)
+        except (ValueError, UnicodeError):
+            _fail()
+
+    def __repr__(self) -> str:
+        return f"PrivacyEvidencePublicVerifier(key_id={self.key_id!r}, public_key=<redacted>)"
+
+    def verifies(self, evidence: object) -> bool:
+        if (type(evidence) is not AttestedPrivacyEvidence or evidence.issuer_key_id != self.key_id
+                or type(evidence.signature) is not str
+                or not evidence.signature.startswith("privacy-evidence-sig:v2:")):
+            return False
+        try:
+            signature = base64.urlsafe_b64decode(evidence.signature.split(":", 2)[2] + "==")
+            if len(signature) != 64:
+                return False
+            self._public_key.verify(signature, b"privacy-evidence-v2:" + _canonical(evidence.canonical()))
+            return True
+        except (InvalidSignature, ValueError, UnicodeError, PrivacyEvidencePolicyError):
+            return False
+
+
 @dataclass(frozen=True, slots=True)
 class PrivacyEvidenceDecision:
     """Immutable source-safe outcome, explicitly without release authority."""
@@ -367,21 +405,22 @@ class PrivacyEvidenceDecision:
         return {**self.canonical(), "digest": self.digest}
 
 
-def _authority_map(authorities: Iterable[PrivacyEvidenceAuthority]) -> dict[str, PrivacyEvidenceAuthority]:
+def _authority_map(authorities: Iterable[PrivacyEvidenceAuthority | PrivacyEvidencePublicVerifier]) -> dict[str, PrivacyEvidenceAuthority | PrivacyEvidencePublicVerifier]:
     if isinstance(authorities, (str, bytes)):
         _fail()
     try:
         values = tuple(authorities)
     except TypeError:
         _fail()
-    if any(type(value) is not PrivacyEvidenceAuthority for value in values) or len({value.key_id for value in values}) != len(values):
+    if (any(type(value) not in {PrivacyEvidenceAuthority, PrivacyEvidencePublicVerifier} for value in values)
+            or len({value.key_id for value in values}) != len(values)):
         _fail()
     return {value.key_id: value for value in values}
 
 
 def assess_privacy_evidence(*, decision_id: str, binding: PrivacyEvidenceBinding,
                             policy: PrivacyEvidencePolicy, evidence: Iterable[AttestedPrivacyEvidence],
-                            authorities: Iterable[PrivacyEvidenceAuthority], at: datetime) -> PrivacyEvidenceDecision:
+                            authorities: Iterable[PrivacyEvidenceAuthority | PrivacyEvidencePublicVerifier], at: datetime) -> PrivacyEvidenceDecision:
     """Apply exact signed evidence policy without authorizing a release.
 
     Unverifiable or mismatched evidence quarantines.  Missing, stale, future,

@@ -16,38 +16,32 @@ import base64
 from dataclasses import InitVar, dataclass, field
 from datetime import UTC, datetime
 import hashlib
-import hmac
 import json
 import re
-from weakref import WeakKeyDictionary, WeakValueDictionary
+
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from app.privacy_evidence_policy import (
     MAX_COUNT,
     MAX_EVIDENCE_LIFETIME_SECONDS,
     PPM,
     AttestedPrivacyEvidence,
-    PrivacyEvidenceAuthority,
     PrivacyEvidenceBinding,
-    PrivacyEvidenceDecision,
     PrivacyEvidenceKind,
     PrivacyEvidencePolicy,
     PrivacyEvidencePolicyError,
-    assess_privacy_evidence,
+    PrivacyEvidencePublicVerifier,
 )
 
 
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _IDENTIFIER = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}\Z")
 _REFERENCE = re.compile(r"evidence:v1:[A-Za-z0-9_-]{43}\Z")
-_SIGNATURE = re.compile(r"privacy-reference-sig:v1:[A-Za-z0-9_-]{43}\Z")
+_SIGNATURE = re.compile(r"privacy-reference-sig:v2:[A-Za-z0-9_-]{86}\Z")
 _AUTHORITY = re.compile(r"privacy-authority:v1:[A-Za-z0-9_-]{43}\Z")
 _MAX_AUTHORITY_LIFETIME_SECONDS = 366 * 24 * 60 * 60
-
-# Keys are retained inside this module's worker boundary, never on an authority
-# object or in a returned verifier.  Weak registries also make a reference
-# unverifiable once its configured authority is no longer held by the process.
-_AUTHORITY_KEYS: WeakKeyDictionary["PrivacyEvidenceAttestationAuthority", bytes] = WeakKeyDictionary()
-_AUTHORITIES_BY_ID: WeakValueDictionary[str, "PrivacyEvidenceAttestationAuthority"] = WeakValueDictionary()
 
 
 class PrivacyEvidenceAuthorityError(ValueError):
@@ -100,12 +94,22 @@ def _instant(value: datetime) -> str:
     return value.isoformat().replace("+00:00", "Z")
 
 
-def _worker_key(authority: "PrivacyEvidenceAttestationAuthority") -> bytes:
-    """Read key material only inside this module's authority boundary."""
-    secret = _AUTHORITY_KEYS.get(authority)
-    if type(secret) is not bytes:
+def _private_key(value: object) -> Ed25519PrivateKey:
+    """Decode one canonical base64 raw Ed25519 private key at the issuer boundary."""
+    if type(value) is not str or len(value) != 44:
         _fail()
-    return secret
+    try:
+        raw = base64.b64decode(value, validate=True)
+        if len(raw) != 32 or base64.b64encode(raw).decode("ascii") != value:
+            _fail()
+        return Ed25519PrivateKey.from_private_bytes(raw)
+    except (ValueError, UnicodeError):
+        _fail()
+
+
+def _signature(prefix: bytes, private_key: Ed25519PrivateKey, value: object, *, label: str) -> str:
+    signed = private_key.sign(prefix + _canonical(value))
+    return label + base64.urlsafe_b64encode(signed).decode("ascii").rstrip("=")
 
 
 def _score(kind: PrivacyEvidenceKind, value: object) -> int:
@@ -189,29 +193,29 @@ class PrivacyEvidenceReference:
         return {**self.canonical(), "digest": self.digest, "signature": self.signature}
 
 
-@dataclass(frozen=True, slots=True, weakref_slot=True)
+@dataclass(frozen=True, slots=True)
 class PrivacyEvidenceAttestationAuthority:
-    """One active tenant/issuer HMAC boundary for policy evidence.
+    """One active tenant/issuer Ed25519 boundary for policy evidence.
 
-    The HMAC key is never serialized.  A reference can be converted to the
-    existing policy type only by this same authority after exact verification.
-    This avoids treating a self-consistent report digest as evidence.
+    The private key remains issuer-side.  Callers receive only an Ed25519
+    public verifier for policy assessment, never a symmetric-key capability.
     """
 
     tenant: str
     issuer_key_id: str
     expires_at: datetime
-    secret: InitVar[bytes] = field(repr=False, compare=False)
+    private_key_b64: InitVar[str] = field(repr=False, compare=False)
     authority_id: str = field(init=False)
+    _private_key: Ed25519PrivateKey = field(init=False, repr=False, compare=False)
+    _public_key_b64: str = field(init=False, repr=False, compare=False)
 
-    def __post_init__(self, secret: bytes) -> None:
+    def __post_init__(self, private_key_b64: str) -> None:
         if type(self) is not PrivacyEvidenceAttestationAuthority:
             _fail()
         tenant = _identifier(self.tenant)
         issuer = _identifier(self.issuer_key_id)
         expires = _time(self.expires_at)
-        if type(secret) is not bytes or not 32 <= len(secret) <= 64:
-            _fail()
+        private_key = _private_key(private_key_b64)
         # An unbounded authority lifetime makes a misconfiguration permanent.
         now = datetime.now(UTC).replace(microsecond=0)
         if expires <= now or (expires - now).total_seconds() > _MAX_AUTHORITY_LIFETIME_SECONDS:
@@ -219,22 +223,22 @@ class PrivacyEvidenceAttestationAuthority:
         object.__setattr__(self, "tenant", tenant)
         object.__setattr__(self, "issuer_key_id", issuer)
         object.__setattr__(self, "expires_at", expires)
-        commitment = base64.urlsafe_b64encode(hmac.new(
-            secret,
-            _canonical({"schema": "privacy-evidence-authority-key-v1", "tenant": tenant,
-                        "issuer_key_id": issuer, "expires_at": _instant(expires)}),
-            hashlib.sha256,
-        ).digest()).decode("ascii").rstrip("=")
-        authority_id = "privacy-authority:v1:" + commitment
+        public_raw = private_key.public_key().public_bytes(serialization.Encoding.Raw,
+                                                            serialization.PublicFormat.Raw)
+        public_key_b64 = base64.b64encode(public_raw).decode("ascii")
+        authority_id = "privacy-authority:v1:" + base64.urlsafe_b64encode(hashlib.sha256(_canonical({
+            "schema": "privacy-evidence-authority-ed25519-v2", "tenant": tenant,
+            "issuer_key_id": issuer, "expires_at": _instant(expires), "public_key": public_key_b64,
+        })).digest()).decode("ascii").rstrip("=")
         if not _AUTHORITY.fullmatch(authority_id):
             _fail()
         object.__setattr__(self, "authority_id", authority_id)
-        _AUTHORITY_KEYS[self] = secret
-        _AUTHORITIES_BY_ID[authority_id] = self
+        object.__setattr__(self, "_private_key", private_key)
+        object.__setattr__(self, "_public_key_b64", public_key_b64)
 
     def __repr__(self) -> str:
         return ("PrivacyEvidenceAttestationAuthority(tenant=" + repr(self.tenant)
-                + ", issuer_key_id=" + repr(self.issuer_key_id) + ", secret=<redacted>)")
+                + ", issuer_key_id=" + repr(self.issuer_key_id) + ", private_key=<redacted>)")
 
     def is_active(self, *, at: datetime | None = None) -> bool:
         moment = datetime.now(UTC).replace(microsecond=0) if at is None else at
@@ -245,9 +249,8 @@ class PrivacyEvidenceAttestationAuthority:
             return False
 
     def _sign(self, value: object) -> str:
-        digest = hmac.new(_worker_key(self), b"privacy-evidence-reference-v1:" + _canonical(value),
-                          hashlib.sha256).digest()
-        return "privacy-reference-sig:v1:" + base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+        return _signature(b"privacy-evidence-reference-v2:", self._private_key, value,
+                          label="privacy-reference-sig:v2:")
 
     def _validate_scope(self, *, kind: object, binding: object, policy: object,
                         measured_at: object, expires_at: object) -> tuple[PrivacyEvidenceKind, PrivacyEvidenceBinding,
@@ -285,7 +288,7 @@ class PrivacyEvidenceAttestationAuthority:
             evidence_reference=_reference(evidence_reference), evidence_digest=_digest(evidence_digest),
             binding=checked_binding, policy=checked_policy, issuer_key_id=self.issuer_key_id,
             observed_value=_score(checked_kind, observed_value), measured_at=measured, expires_at=expires,
-            signature="privacy-reference-sig:v1:" + "A" * 43,
+            signature="privacy-reference-sig:v2:" + "A" * 86,
         )
         return PrivacyEvidenceReference(**{
             "tenant": provisional.tenant, "authority_id": provisional.authority_id, "kind": provisional.kind,
@@ -311,12 +314,22 @@ class PrivacyEvidenceAttestationAuthority:
                     or reference.issuer_key_id != self.issuer_key_id
                     or measured > _time(moment) or expires <= _time(moment)):
                 return False
-            return hmac.compare_digest(reference.signature, self._sign(reference.canonical()))
-        except (PrivacyEvidenceAuthorityError, PrivacyEvidencePolicyError, TypeError, ValueError):
+            signature = base64.urlsafe_b64decode(reference.signature.split(":", 2)[2] + "==")
+            self._private_key.public_key().verify(signature,
+                                                  b"privacy-evidence-reference-v2:" + _canonical(reference.canonical()))
+            return True
+        except (InvalidSignature, PrivacyEvidenceAuthorityError, PrivacyEvidencePolicyError, TypeError, ValueError, UnicodeError):
             return False
 
-    def _policy_evidence(self, reference: PrivacyEvidenceReference) -> AttestedPrivacyEvidence:
-        """Internal bridge; callers receive only the policy decision, never a key capability."""
+    @property
+    def policy_verifier(self) -> PrivacyEvidencePublicVerifier:
+        """Public-key-only policy verification capability for this issuer."""
+        return PrivacyEvidencePublicVerifier(key_id=self.issuer_key_id, public_key_b64=self._public_key_b64)
+
+    def to_policy_evidence(self, reference: PrivacyEvidenceReference, *, at: datetime | None = None) -> AttestedPrivacyEvidence:
+        """Re-verify a signed reference and emit a public-key-verifiable policy record."""
+        if not self.verifies(reference, at=at):
+            _fail()
         provisional = {
             "binding_digest": reference.binding.digest, "evidence_digest": reference.evidence_digest,
             "evidence_policy_digest": reference.policy.digest, "evidence_reference": reference.evidence_reference,
@@ -325,49 +338,9 @@ class PrivacyEvidenceAttestationAuthority:
             "method_provenance_digest": reference.binding.method_provenance_digest,
             "observed_value": reference.observed_value,
         }
-        signature = hmac.new(_worker_key(self), b"privacy-evidence-v1:" + _canonical(provisional),
-                             hashlib.sha256).digest()
+        signature = _signature(b"privacy-evidence-v2:", self._private_key, provisional,
+                               label="privacy-evidence-sig:v2:")
         return AttestedPrivacyEvidence(
             **{**provisional, "kind": reference.kind, "measured_at": reference.measured_at,
-               "expires_at": reference.expires_at,
-               "signature": "privacy-evidence-sig:v1:" + base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")},
+               "expires_at": reference.expires_at, "signature": signature},
         )
-
-    def assess_policy(self, *, binding: PrivacyEvidenceBinding, policy: PrivacyEvidencePolicy,
-                      references: object, at: datetime) -> PrivacyEvidenceDecision:
-        """Assess only references from this tenant within the private authority boundary.
-
-        No verifier, key, HMAC signer, or separately usable policy attestation
-        is returned.  Unknown, malformed, foreign, inactive, expired, or
-        altered references become unverified evidence in the policy's
-        fail-closed decision rather than crossing this boundary as a claim.
-        """
-        if type(binding) is not PrivacyEvidenceBinding or type(policy) is not PrivacyEvidencePolicy:
-            _fail()
-        moment = _time(at)
-        if not self.is_active(at=moment) or isinstance(references, (str, bytes)):
-            _fail()
-        try:
-            supplied = tuple(references)
-        except TypeError:
-            _fail()
-        evidence: list[object] = []
-        verified_authorities: dict[str, PrivacyEvidenceAttestationAuthority] = {}
-        for reference in supplied:
-            authority = (_AUTHORITIES_BY_ID.get(reference.authority_id)
-                         if type(reference) is PrivacyEvidenceReference and reference.tenant == self.tenant else None)
-            if (type(authority) is PrivacyEvidenceAttestationAuthority and authority.tenant == self.tenant
-                    and authority.verifies(reference, at=moment)):
-                evidence.append(authority._policy_evidence(reference))
-                verified_authorities[authority.authority_id] = authority
-            else:
-                evidence.append(object())
-        expected_issuers = {requirement.issuer_key_id for requirement in policy.requirements}
-        matching = {authority.issuer_key_id: authority for authority in verified_authorities.values()
-                    if authority.issuer_key_id in expected_issuers}
-        policy_authorities = tuple(PrivacyEvidenceAuthority(key_id=authority.issuer_key_id,
-                                                             secret=_worker_key(authority))
-                                   for authority in matching.values())
-        return assess_privacy_evidence(decision_id="privacy-evidence-authority", binding=binding,
-                                       policy=policy, evidence=evidence,
-                                       authorities=policy_authorities, at=moment)
