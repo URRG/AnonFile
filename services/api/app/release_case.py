@@ -253,6 +253,60 @@ class ReleaseCase:
         """Metadata-only record, with no source bytes, recipient, or delivery handle."""
         return {**self.canonical(), "digest": self.digest, "signature": self.signature}
 
+    @classmethod
+    def from_record(cls, value: object) -> "ReleaseCase":
+        """Reconstruct one signed record before admitting or rendering it.
+
+        This deliberately accepts no compatibility shapes.  A durable control
+        must carry every signed binding and its independently recomputable
+        digest; otherwise a restart would turn malformed ciphertext into a
+        usable release-case record.
+        """
+        try:
+            if not isinstance(value, dict) or set(value) != {
+                    "authority_id", "binding", "case_id", "digest", "expires_at", "issued_at",
+                    "issuer_key_id", "posture", "signature", "tenant"}:
+                _fail()
+            binding = value["binding"]
+            if not isinstance(binding, dict) or set(binding) != {
+                    "candidate_artifact_digest", "candidate_expires_at", "contract_digest",
+                    "contract_expires_at", "contract_reference", "dataset_provenance_digest",
+                    "ingestion_provenance_digest", "method_provenance_digest", "processing_policy_digest",
+                    "processing_run_digest", "processing_run_expires_at", "processing_run_id",
+                    "processing_request_digest", "processing_mode", "purpose_code", "recipient_commitment",
+                    "recipient_commitment_key_id", "rights_digest", "rights_expires_at"}:
+                _fail()
+            parse = lambda instant: datetime.fromisoformat(instant.replace("Z", "+00:00"))
+            result = cls(
+                tenant=value["tenant"], case_id=value["case_id"], authority_id=value["authority_id"],
+                issuer_key_id=value["issuer_key_id"], issued_at=parse(value["issued_at"]),
+                expires_at=parse(value["expires_at"]), signature=value["signature"], posture=value["posture"],
+                binding=ReleaseCaseBinding(
+                    candidate_artifact_digest=binding["candidate_artifact_digest"],
+                    processing_run_id=binding["processing_run_id"],
+                    processing_run_digest=binding["processing_run_digest"],
+                    processing_request_digest=binding["processing_request_digest"],
+                    processing_mode=binding["processing_mode"],
+                    processing_policy_digest=binding["processing_policy_digest"],
+                    dataset_provenance_digest=binding["dataset_provenance_digest"],
+                    ingestion_provenance_digest=binding["ingestion_provenance_digest"],
+                    rights_digest=binding["rights_digest"],
+                    recipient_commitment_key_id=binding["recipient_commitment_key_id"],
+                    recipient_commitment=binding["recipient_commitment"], purpose_code=binding["purpose_code"],
+                    method_provenance_digest=binding["method_provenance_digest"],
+                    contract_reference=binding["contract_reference"], contract_digest=binding["contract_digest"],
+                    candidate_expires_at=parse(binding["candidate_expires_at"]),
+                    processing_run_expires_at=parse(binding["processing_run_expires_at"]),
+                    rights_expires_at=parse(binding["rights_expires_at"]),
+                    contract_expires_at=parse(binding["contract_expires_at"]),
+                ),
+            )
+            if not hmac.compare_digest(value["digest"], result.digest):
+                _fail()
+            return result
+        except (AttributeError, KeyError, TypeError, ValueError, OverflowError, ReleaseCaseError):
+            _fail()
+
 
 class ReleaseCasePublicVerifier:
     """Public-key-only verifier, deliberately incapable of issuing cases."""
@@ -354,6 +408,26 @@ class ReleaseCaseAuthority:
         try:
             moment = datetime.now(UTC).replace(microsecond=0) if at is None else _time(at)
             return moment < self.expires_at
+        except ReleaseCaseError:
+            return False
+
+    def matches_recipient_commitment(self, record: object, *, recipient: object,
+                                     rights_digest: object, purpose_code: object,
+                                     processing_mode: object, processing_run_id: object) -> bool:
+        """Confirm that an existing signature used this authority's private recipient.
+
+        Signature validity alone is not enough at a persistence boundary: an
+        internal caller might replay a correctly signed case from another run.
+        """
+        try:
+            if type(record) is not ReleaseCase:
+                return False
+            expected = _recipient_commitment(
+                salt=self._recipient_salt, tenant=self.tenant, recipient=_recipient(recipient),
+                rights_digest=_rights_digest(rights_digest), purpose_code=_identifier(purpose_code),
+                processing_mode=_identifier(processing_mode), processing_run_id=_identifier(processing_run_id),
+                recipient_commitment_key_id=self.recipient_commitment_key_id)
+            return hmac.compare_digest(record.binding.recipient_commitment, expected)
         except ReleaseCaseError:
             return False
 

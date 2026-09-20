@@ -1,12 +1,14 @@
 """Fail-closed development API. Synthetic data only; no release qualification."""
 from __future__ import annotations
 import copy
+import hashlib
 import json
 import math
 import os
+from secrets import token_urlsafe
 import time
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any, Literal
 from uuid import uuid4
@@ -52,6 +54,10 @@ from app.linkage_risk import LinkageRiskError, LinkageRiskReport, assess_linkage
 from app.linkage_risk_authority import (LinkageRiskAuthorityError,
                                         authority_for_tenant as linkage_risk_authority_for_tenant,
                                         load_linkage_risk_authorities)
+from app.release_case import ReleaseCase, ReleaseCaseError
+from app.release_case_authority import (ReleaseCaseAuthorityError,
+                                        authority_for_tenant as release_case_authority_for_tenant,
+                                        load_release_case_authorities)
 from app.policies import TAXONOMY_CATEGORIES
 
 MAX_BODY_BYTES = 2_100_000
@@ -375,6 +381,18 @@ class LinkageRiskEvidenceView(BaseModel):
     limitations: list[str]
     report: dict[str, Any]
 
+class ReleaseCaseView(BaseModel):
+    """A signed scope record only; this endpoint cannot approve or deliver data."""
+    id: str
+    run_id: str
+    candidate_artifact_digest: str
+    case_digest: str
+    authority_id: str
+    issuer_key_id: str
+    expires_at: datetime
+    posture: Literal["NO_RELEASE_AUTHORIZATION"]
+    limitations: list[str]
+
 class QualificationCreate(StrictModel):
     evaluation_id: str = Field(min_length=1, max_length=80)
     max_evaluation_age_seconds: int = Field(default=3600, ge=1, le=2_678_400)
@@ -665,6 +683,26 @@ def linkage_risk_evidence_view(record: dict[str, Any], *, linkage_risk_authoriti
     except (KeyError, TypeError, ValueError, LinkageRiskError, LinkageRiskAuthorityError):
         raise HTTPException(503, "Control integrity verification failed") from None
 
+def release_case_view(record: dict[str, Any]) -> ReleaseCaseView:
+    """Return a source-safe index; scope verification occurs in the repository."""
+    try:
+        payload = record["payload"]
+        if set(payload) != {"run_id", "idempotency_key", "case"}:
+            raise ValueError
+        case = ReleaseCase.from_record(payload["case"])
+        if case.case_id != record["id"] or case.tenant != record["tenant"]:
+            raise ValueError
+        return ReleaseCaseView(id=record["id"], run_id=payload["run_id"],
+            candidate_artifact_digest=case.binding.candidate_artifact_digest, case_digest=case.digest,
+            authority_id=case.authority_id, issuer_key_id=case.issuer_key_id, expires_at=case.expires_at,
+            posture="NO_RELEASE_AUTHORIZATION", limitations=[
+                "NO_RELEASE_AUTHORIZATION",
+                "This immutable scope record is not a privacy-policy decision, approval, release, delivery, or download handle.",
+                "Recipient and contract values remain server-side; only opaque commitments/digests are retained.",
+            ])
+    except (KeyError, TypeError, ValueError, ReleaseCaseError):
+        raise HTTPException(503, "Control integrity verification failed") from None
+
 def private_candidate_artifact(private: dict[str, Any]) -> CandidateArtifact:
     """Recreate a validated candidate only within a trusted worker boundary."""
     try:
@@ -735,6 +773,10 @@ def create_app() -> FastAPI:
         app.state.linkage_risk_authorities = load_linkage_risk_authorities()
     except LinkageRiskAuthorityError:
         raise RuntimeError("Invalid linkage-risk authority configuration") from None
+    try:
+        app.state.release_case_authorities = load_release_case_authorities()
+    except ReleaseCaseAuthorityError:
+        raise RuntimeError("Invalid release-case authority configuration") from None
     app.state.store = create_store()
     app.add_middleware(BodyLimitMiddleware)
     origins = [v.strip() for v in os.getenv("WEB_ORIGIN", "http://localhost:3000,http://localhost:5173").split(",") if v.strip()]
@@ -1221,6 +1263,74 @@ def create_app() -> FastAPI:
         if record["payload"].get("run_id") != run_id:
             raise HTTPException(404, "Control record not found")
         return linkage_risk_evidence_view(record, linkage_risk_authorities=app.state.linkage_risk_authorities)
+
+    @app.post("/processing-runs/{run_id}/release-cases", response_model=ReleaseCaseView, status_code=201)
+    async def create_release_case(run_id: str, request_context: Request,
+                                  principal: Principal = Depends(require_roles("processor"))):
+        """Create a non-authorizing case from server-held run/candidate/config only."""
+        keys = request_context.headers.getlist("idempotency-key")
+        if len(keys) != 1 or await request_context.body():
+            raise HTTPException(422, "Request validation failed")
+        # Resolve the tenant-scoped private candidate first.  This preserves
+        # the control-plane's normal cross-tenant 404 boundary rather than
+        # revealing whether that tenant configured a release-case issuer.
+        candidate, run = app.state.store.private_candidate_for_run(run_id, principal.tenant)
+        try:
+            authority = release_case_authority_for_tenant(app.state.release_case_authorities,
+                                                          tenant=principal.tenant)
+        except ReleaseCaseAuthorityError:
+            raise HTTPException(409, "Release-case authority is unavailable") from None
+        try:
+            dataset = app.state.store.get_dataset(run["payload"]["dataset_id"], principal.tenant)
+            rights = app.state.store.get_control("rights_profile", run["payload"]["rights_profile_id"], principal.tenant)
+            issued = now().replace(microsecond=0)
+            convert = lambda value: datetime.fromtimestamp(value, UTC).replace(microsecond=0)
+            candidate_expiry, run_expiry, rights_expiry = (convert(candidate["expires_at"]),
+                                                           convert(run["expires_at"]), convert(rights["expires_at"]))
+            expiry = min(candidate_expiry, run_expiry, rights_expiry, authority.contract_expires_at,
+                         authority.issuer.expires_at, issued + timedelta(hours=1))
+            dataset_provenance_digest = "sha256:" + hashlib.sha256(json.dumps(
+                {"ingestion_manifest": dataset["ingestion_manifest"], "provenance": dataset["provenance"]},
+                ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+            method_provenance_digest = "sha256:" + hashlib.sha256(json.dumps(
+                {key: run["payload"][key] for key in ("method_id", "method_version", "method_config_digest", "taxonomy_mapping_digest")},
+                ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+            run_digest = "sha256:" + hashlib.sha256(json.dumps(run, ensure_ascii=False, allow_nan=False,
+                sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+            case = authority.issuer.issue(
+                case_id="release-case:v1:" + token_urlsafe(32), candidate_artifact_digest=candidate["payload"]["artifact_digest"],
+                processing_run_id=run_id, processing_run_digest=run_digest,
+                processing_request_digest=run["payload"]["request_digest"], processing_mode=run["payload"]["mode"],
+                processing_policy_digest=run["payload"]["policy_digest"], dataset_provenance_digest=dataset_provenance_digest,
+                ingestion_provenance_digest=run["payload"]["source_digest"], rights_digest=run["payload"]["rights_digest"],
+                recipient=run["payload"]["recipient"], purpose_code=run["payload"]["purpose"],
+                method_provenance_digest=method_provenance_digest, contract_reference=authority.contract_reference,
+                contract_digest=authority.contract_digest, candidate_expires_at=candidate_expiry,
+                processing_run_expires_at=run_expiry, rights_expires_at=rights_expiry,
+                contract_expires_at=authority.contract_expires_at, issued_at=issued, expires_at=expiry, at=issued)
+        except (KeyError, TypeError, ValueError, OSError, OverflowError, ReleaseCaseError):
+            raise HTTPException(503, "Release-case scope is unavailable") from None
+        record = control_record(kind="release_case", identifier=case.case_id, tenant=principal.tenant,
+                                payload={"run_id": run_id, "idempotency_key": keys[0], "case": case.to_record()},
+                                expires_at=case.expires_at.timestamp())
+        persisted, reused = app.state.store.record_release_case(run_id, principal.tenant, record,
+                                                                  principal.subject, authority)
+        view = release_case_view(persisted)
+        if reused:
+            return Response(view.model_dump_json(), status_code=200, media_type="application/json")
+        return view
+
+    @app.get("/release-cases/{case_id}", response_model=ReleaseCaseView)
+    def get_release_case(case_id: str, principal: Principal = Depends(require_roles("processor", "reviewer"))):
+        # Keep tenant isolation ahead of configuration selection.  A caller in
+        # another tenant learns only the usual not-found result.
+        app.state.store.get_control("release_case", case_id, principal.tenant)
+        try:
+            authority = release_case_authority_for_tenant(app.state.release_case_authorities,
+                                                          tenant=principal.tenant)
+        except ReleaseCaseAuthorityError:
+            raise HTTPException(409, "Release-case authority is unavailable") from None
+        return release_case_view(app.state.store.get_release_case(case_id, principal.tenant, authority))
 
     @app.post("/processing-runs/{run_id}/residual-evaluations", response_model=ResidualEvaluationView, status_code=201)
     def create_residual_evaluation(run_id: str, principal: Principal = Depends(require_roles("reviewer"))):

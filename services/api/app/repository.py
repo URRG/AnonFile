@@ -27,6 +27,8 @@ from app.disclosure_risk_authority import DisclosureRiskAuthorityError, Disclosu
 from app.linkage_risk import METHODOLOGY_DIGEST as LINKAGE_METHODOLOGY_DIGEST
 from app.linkage_risk import LinkageRiskError, LinkageRiskReport
 from app.linkage_risk_authority import LinkageRiskAuthorityError, LinkageRiskControlAuthority
+from app.release_case import ReleaseCase, ReleaseCaseError
+from app.release_case_authority import ReleaseCaseControlAuthority
 
 
 def unavailable():
@@ -85,7 +87,7 @@ class DevelopmentStore:
     CONTROL_KINDS = frozenset({"rights_profile", "policy_snapshot", "processing_run", "authorization_request",
                                 "private_candidate", "evaluation_report", "qualification",
                                 "detector_evaluation_evidence", "utility_evidence", "disclosure_risk_evidence",
-                                "linkage_risk_evidence"})
+                                "linkage_risk_evidence", "release_case"})
     TTL_SECONDS = 3600
 
     def __init__(self):
@@ -216,7 +218,7 @@ class DevelopmentStore:
             # in this transaction; no transient record state is persisted.
             if record["payload"].get("state") == "RUNNING":
                 record["payload"]["audit_reservation"] = 0
-            for kind in ("qualification", "evaluation_report", "detector_evaluation_evidence", "utility_evidence", "disclosure_risk_evidence", "linkage_risk_evidence",
+            for kind in ("qualification", "evaluation_report", "detector_evaluation_evidence", "utility_evidence", "disclosure_risk_evidence", "linkage_risk_evidence", "release_case",
                          "private_candidate"):
                 for evidence_id, evidence in list(self.controls[kind].items()):
                     if evidence["tenant"] == tenant and evidence["payload"].get("run_id") == run_id:
@@ -224,6 +226,13 @@ class DevelopmentStore:
                         del self.controls[kind][evidence_id]
             self._append_event(tenant, "processing_run.invalidated", run_id, "system")
             del self.controls["processing_run"][run_id]
+
+    def _invalidate_release_cases_for_run(self, tenant, run_id):
+        """Tombstone non-authorizing cases when their candidate/run ceases to be current."""
+        for case_id, record in list(self.controls["release_case"].items()):
+            if record["tenant"] == tenant and record["payload"].get("run_id") == run_id:
+                self._append_event(tenant, "release_case.invalidated", case_id, "system")
+                del self.controls["release_case"][case_id]
 
     def _dataset(self, identifier, tenant):
         result = self.datasets.get(identifier)
@@ -930,6 +939,125 @@ class DevelopmentStore:
             self.controls["linkage_risk_evidence"][data["id"]] = data
             return detached(data), False
 
+    @staticmethod
+    def _release_case_dataset_provenance_digest(dataset):
+        try:
+            manifest, provenance = dataset["ingestion_manifest"], dataset["provenance"]
+            if not isinstance(manifest, dict) or not isinstance(provenance, list):
+                raise ValueError
+            return "sha256:" + hashlib.sha256(encoded({"ingestion_manifest": manifest, "provenance": provenance})).hexdigest()
+        except (KeyError, TypeError, ValueError, UnicodeError):
+            raise unavailable() from None
+
+    @staticmethod
+    def _release_case_method_provenance_digest(payload):
+        try:
+            value = {key: payload[key] for key in ("method_id", "method_version", "method_config_digest", "taxonomy_mapping_digest")}
+            if any(type(value[key]) is not str for key in value):
+                raise ValueError
+            return "sha256:" + hashlib.sha256(encoded(value)).hexdigest()
+        except (KeyError, TypeError, ValueError, UnicodeError):
+            raise unavailable() from None
+
+    def _verify_release_case_scope(self, *, data, identifier, tenant, authority, moment):
+        """Re-derive every signed binding from live private controls/configuration."""
+        self._validate_control(data)
+        if (data["kind"] != "release_case" or data["tenant"] != tenant
+                or set(data["payload"]) != {"run_id", "idempotency_key", "case"}
+                or data["payload"].get("run_id") != identifier
+                or type(data["payload"].get("idempotency_key")) is not str
+                or not 1 <= len(data["payload"]["idempotency_key"]) <= 200
+                or not data["payload"]["idempotency_key"].isascii()
+                or any(character.isspace() for character in data["payload"]["idempotency_key"])
+                or type(authority) is not ReleaseCaseControlAuthority or not authority.is_active(at=moment)
+                or authority.tenant != tenant):
+            raise unavailable()
+        run = self._control("processing_run", identifier, tenant)
+        if run["payload"].get("state") not in {"CANDIDATE", "QUARANTINED"}:
+            raise HTTPException(409, "Processing run is not available for a release case")
+        self._validate_run_dependencies(run)
+        candidates = [item for item in self.controls["private_candidate"].values()
+                      if item["tenant"] == tenant and item["payload"].get("run_id") == identifier]
+        if len(candidates) != 1:
+            raise unavailable()
+        dataset = self._dataset(run["payload"].get("dataset_id"), tenant)
+        rights = self._control("rights_profile", run["payload"].get("rights_profile_id"), tenant)
+        policy = self._control("policy_snapshot", run["payload"].get("policy_snapshot_id"), tenant)
+        if any(record["expires_at"] <= time.time() for record in (dataset, rights, policy, candidates[0], run)):
+            raise HTTPException(409, "Release-case dependency is unavailable")
+        try:
+            case = ReleaseCase.from_record(data["payload"]["case"])
+            run_expiry = datetime.fromtimestamp(run["expires_at"], UTC).replace(microsecond=0)
+            candidate_expiry = datetime.fromtimestamp(candidates[0]["expires_at"], UTC).replace(microsecond=0)
+            rights_expiry = datetime.fromtimestamp(rights["expires_at"], UTC).replace(microsecond=0)
+            expected = (
+                case.tenant == tenant and case.case_id == data["id"] and case.authority_id == authority.authority_id
+                and case.issuer_key_id == authority.issuer.issuer_key_id
+                and case.binding.candidate_artifact_digest == candidates[0]["payload"].get("artifact_digest")
+                and case.binding.processing_run_id == identifier
+                and case.binding.processing_run_digest == "sha256:" + hashlib.sha256(encoded(run)).hexdigest()
+                and case.binding.processing_request_digest == run["payload"].get("request_digest")
+                and case.binding.processing_mode == run["payload"].get("mode")
+                and case.binding.processing_policy_digest == run["payload"].get("policy_digest")
+                and case.binding.dataset_provenance_digest == self._release_case_dataset_provenance_digest(dataset)
+                and case.binding.ingestion_provenance_digest == run["payload"].get("source_digest")
+                and case.binding.rights_digest == rights["payload"].get("digest") == run["payload"].get("rights_digest")
+                and case.binding.purpose_code == run["payload"].get("purpose")
+                and case.binding.method_provenance_digest == self._release_case_method_provenance_digest(run["payload"])
+                and case.binding.contract_reference == authority.contract_reference
+                and case.binding.contract_digest == authority.contract_digest
+                and case.binding.candidate_expires_at == candidate_expiry
+                and case.binding.processing_run_expires_at == run_expiry
+                and case.binding.rights_expires_at == rights_expiry
+                and case.binding.contract_expires_at == authority.contract_expires_at
+                and case.expires_at.timestamp() == data["expires_at"]
+                and authority.issuer.verifies(case, at=moment)
+                and authority.issuer.matches_recipient_commitment(
+                    case, recipient=run["payload"].get("recipient"), rights_digest=run["payload"].get("rights_digest"),
+                    purpose_code=run["payload"].get("purpose"), processing_mode=run["payload"].get("mode"),
+                    processing_run_id=identifier)
+            )
+        except (KeyError, TypeError, ValueError, OSError, OverflowError, ReleaseCaseError):
+            raise unavailable() from None
+        if not expected:
+            raise unavailable()
+        return case
+
+    def record_release_case(self, identifier, tenant, release_case, actor, authority):
+        """Atomically retain an immutable, non-authorizing provenance case only."""
+        data = detached(release_case)
+        with self._transaction():
+            self._purge(); self._purge_controls()
+            moment = datetime.now(UTC).replace(microsecond=0)
+            self._verify_release_case_scope(data=data, identifier=identifier, tenant=tenant,
+                                            authority=authority, moment=moment)
+            for existing in self.controls["release_case"].values():
+                payload = existing["payload"]
+                if existing["tenant"] == tenant and payload.get("run_id") == identifier and payload.get("idempotency_key") == data["payload"]["idempotency_key"]:
+                    self._verify_release_case_scope(data=existing, identifier=identifier, tenant=tenant,
+                                                    authority=authority, moment=moment)
+                    return detached(existing), True
+            if data["id"] in self.controls["release_case"] or self._used_identifier(data["id"], "release_case"):
+                raise HTTPException(409, "Object already exists")
+            if (sum(len(items) for items in self.controls.values()) >= self.MAX_CONTROLS
+                    or sum(item["tenant"] == tenant for items in self.controls.values() for item in items.values()) >= self.MAX_CONTROLS_PER_TENANT):
+                raise HTTPException(429, "Development control capacity exceeded")
+            self._append_event(tenant, "release_case.created", data["id"], actor, record=data)
+            self.controls["release_case"][data["id"]] = data
+            return detached(data), False
+
+    def get_release_case(self, case_id, tenant, authority):
+        """Return only a currently valid case; expired/rotated dependencies fail closed."""
+        with self._transaction():
+            self._purge(); self._purge_controls()
+            data = self._control("release_case", case_id, tenant)
+            run_id = data["payload"].get("run_id") if isinstance(data.get("payload"), dict) else None
+            if type(run_id) is not str:
+                raise unavailable()
+            self._verify_release_case_scope(data=data, identifier=run_id, tenant=tenant, authority=authority,
+                                            moment=datetime.now(UTC).replace(microsecond=0))
+            return detached(data)
+
     def record_qualification(self, identifier, tenant, qualification, evaluation_id, actor):
         """Persist only a candidate/evidence-bound, non-authorizing decision."""
         data = detached(qualification)
@@ -962,6 +1090,10 @@ class DevelopmentStore:
             self._append_event(tenant, "qualification.created", data["id"], actor, record=data)
             self.controls["qualification"][data["id"]] = data
             if payload.get("outcome") == "QUARANTINED" and run["payload"].get("state") == "CANDIDATE":
+                # A case names a current candidate/run snapshot.  Qualification
+                # quarantine changes that snapshot, so retain neither a stale
+                # provenance record nor an implication it remains assessable.
+                self._invalidate_release_cases_for_run(tenant, identifier)
                 revised = detached(run)
                 revised_payload = revised["payload"]
                 revised_payload["state"] = "QUARANTINED"
