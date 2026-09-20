@@ -1,6 +1,8 @@
 """Tests for source-safe, non-production audit anchor checkpoints."""
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 import pytest
 
@@ -112,3 +114,40 @@ def test_verifier_rejects_subclass_canonicalizer_overrides_at_trust_boundary():
                           checkpoint.issued_at, checkpoint.expires_at, checkpoint.authority_id,
                           checkpoint.signature)
     assert not signer.verify(lookalike, tenant_ref=TENANT_A, at=NOW)
+
+
+def test_concurrent_issuance_admits_exactly_one_head_without_a_fork():
+    signer = authority()
+    workers = 16
+    barrier = threading.Barrier(workers)
+
+    def issue_same_head():
+        barrier.wait()
+        try:
+            return signer.issue(checkpoint_id=CHECKPOINT_A, sequence=1, audit_chain_commitment=HEAD_A,
+                                previous_checkpoint_digest=None, issued_at=NOW,
+                                expires_at=NOW + timedelta(hours=1))
+        except AuditAnchorError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        results = list(pool.map(lambda _: issue_same_head(), range(workers)))
+    successful = [result for result in results if result is not None]
+    assert len(successful) == 1
+    assert successful[0].sequence == 1
+
+
+def test_concurrent_claim_admits_exactly_one_external_submission():
+    signer = authority()
+    checkpoint = issued(signer)
+    workers = 16
+    barrier = threading.Barrier(workers)
+
+    def claim_once():
+        barrier.wait()
+        return signer.claim(checkpoint, tenant_ref=TENANT_A, at=NOW)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        results = list(pool.map(lambda _: claim_once(), range(workers)))
+    assert results.count(True) == 1
+    assert results.count(False) == workers - 1

@@ -18,6 +18,7 @@ import hashlib
 import hmac
 import json
 import re
+import threading
 
 
 MAX_SEQUENCE = 9_223_372_036_854_775_807
@@ -181,6 +182,10 @@ class AuditAnchorAuthority:
         self._seen_checkpoint_ids: set[str] = set()
         self._seen_chain_commitments: set[str] = set()
         self._claimed_digests: set[str] = set()
+        # This protects the atomic state transitions below.  It intentionally
+        # provides no cross-process coordination; production needs durable,
+        # shared compare-and-swap semantics at the external anchor boundary.
+        self._lock = threading.RLock()
 
     def _message(self, checkpoint: AuditAnchorCheckpoint) -> bytes:
         return _canonical(checkpoint._signed_fields())
@@ -193,38 +198,42 @@ class AuditAnchorAuthority:
               previous_checkpoint_digest: str | None, issued_at: datetime,
               expires_at: datetime) -> AuditAnchorCheckpoint:
         """Issue the next exact head checkpoint or fail closed on replay/fork."""
-        checkpoint_id = _opaque(checkpoint_id, _CHECKPOINT_ID)
-        audit_chain_commitment = _opaque(audit_chain_commitment, _CHAIN_COMMITMENT)
-        sequence = _sequence(sequence)
-        if previous_checkpoint_digest is not None:
-            _opaque(previous_checkpoint_digest, _DIGEST)
-        # Sequential parent binding prevents a caller from silently anchoring a
-        # different local history branch.  A repeated head cannot create a new
-        # checkpoint either.
-        if (checkpoint_id in self._seen_checkpoint_ids
-                or audit_chain_commitment in self._seen_chain_commitments
-                or sequence != self._last_sequence + 1
-                or previous_checkpoint_digest != self._last_digest):
-            _fail()
-        unsigned = AuditAnchorCheckpoint(
-            tenant_ref=self.tenant_ref, checkpoint_id=checkpoint_id, sequence=sequence,
-            audit_chain_commitment=audit_chain_commitment,
-            previous_checkpoint_digest=previous_checkpoint_digest, issued_at=issued_at,
-            expires_at=expires_at, authority_id=self.authority_id,
-            signature=_encoded_signature(b"\0" * 32),
-        )
-        signature = _encoded_signature(hmac.new(self._key, self._message(unsigned), hashlib.sha256).digest())
-        result = AuditAnchorCheckpoint(
-            tenant_ref=unsigned.tenant_ref, checkpoint_id=unsigned.checkpoint_id,
-            sequence=unsigned.sequence, audit_chain_commitment=unsigned.audit_chain_commitment,
-            previous_checkpoint_digest=unsigned.previous_checkpoint_digest, issued_at=unsigned.issued_at,
-            expires_at=unsigned.expires_at, authority_id=unsigned.authority_id, signature=signature,
-        )
-        self._seen_checkpoint_ids.add(checkpoint_id)
-        self._seen_chain_commitments.add(audit_chain_commitment)
-        self._last_sequence = sequence
-        self._last_digest = result.digest
-        return self._mark_verified(result)
+        # All validation, parent/head checks, signing and state mutation share
+        # one critical section.  Otherwise two workers can both observe the
+        # same head and issue competing checkpoints.
+        with self._lock:
+            checkpoint_id = _opaque(checkpoint_id, _CHECKPOINT_ID)
+            audit_chain_commitment = _opaque(audit_chain_commitment, _CHAIN_COMMITMENT)
+            sequence = _sequence(sequence)
+            if previous_checkpoint_digest is not None:
+                _opaque(previous_checkpoint_digest, _DIGEST)
+            # Sequential parent binding prevents a caller from silently anchoring a
+            # different local history branch.  A repeated head cannot create a new
+            # checkpoint either.
+            if (checkpoint_id in self._seen_checkpoint_ids
+                    or audit_chain_commitment in self._seen_chain_commitments
+                    or sequence != self._last_sequence + 1
+                    or previous_checkpoint_digest != self._last_digest):
+                _fail()
+            unsigned = AuditAnchorCheckpoint(
+                tenant_ref=self.tenant_ref, checkpoint_id=checkpoint_id, sequence=sequence,
+                audit_chain_commitment=audit_chain_commitment,
+                previous_checkpoint_digest=previous_checkpoint_digest, issued_at=issued_at,
+                expires_at=expires_at, authority_id=self.authority_id,
+                signature=_encoded_signature(b"\0" * 32),
+            )
+            signature = _encoded_signature(hmac.new(self._key, self._message(unsigned), hashlib.sha256).digest())
+            result = AuditAnchorCheckpoint(
+                tenant_ref=unsigned.tenant_ref, checkpoint_id=unsigned.checkpoint_id,
+                sequence=unsigned.sequence, audit_chain_commitment=unsigned.audit_chain_commitment,
+                previous_checkpoint_digest=unsigned.previous_checkpoint_digest, issued_at=unsigned.issued_at,
+                expires_at=unsigned.expires_at, authority_id=unsigned.authority_id, signature=signature,
+            )
+            self._seen_checkpoint_ids.add(checkpoint_id)
+            self._seen_chain_commitments.add(audit_chain_commitment)
+            self._last_sequence = sequence
+            self._last_digest = result.digest
+            return self._mark_verified(result)
 
     def verify(self, checkpoint: object, *, tenant_ref: str, at: datetime) -> bool:
         """Verify exact authority, tenant, canonical signature and time window."""
@@ -281,11 +290,12 @@ class AuditAnchorAuthority:
         submission is a state transition, whereas later evidence inspection is
         expected to be repeatable.
         """
-        if not self.verify(checkpoint, tenant_ref=tenant_ref, at=at):
-            return False
-        assert type(checkpoint) is AuditAnchorCheckpoint
-        digest = checkpoint.digest
-        if digest in self._claimed_digests:
-            return False
-        self._claimed_digests.add(digest)
-        return True
+        with self._lock:
+            if not self.verify(checkpoint, tenant_ref=tenant_ref, at=at):
+                return False
+            assert type(checkpoint) is AuditAnchorCheckpoint
+            digest = checkpoint.digest
+            if digest in self._claimed_digests:
+                return False
+            self._claimed_digests.add(digest)
+            return True
