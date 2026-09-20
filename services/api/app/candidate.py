@@ -231,7 +231,15 @@ class SchemaContract:
         if kind is PayloadKind.TEXT:
             if type(value) is not str:
                 _fail()
-            _string(value)
+            # Text is one artifact, not a structured scalar.  It shares the
+            # artifact's 2 MiB byte ceiling; applying the 64 KiB scalar bound
+            # here made already-accepted ingestion payloads fail during
+            # candidate construction.
+            try:
+                if not value or len(value.encode("utf-8")) > MAX_CANDIDATE_BYTES:
+                    _fail()
+            except UnicodeError:
+                _fail()
             descriptor = canonical_json({"type": "text"})
         else:
             if type(value) not in (dict, list):

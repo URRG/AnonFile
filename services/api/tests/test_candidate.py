@@ -35,6 +35,14 @@ def test_text_candidate_binds_digests_and_never_shows_private_output_in_repr_or_
     assert artifact.materialize_for_private_worker() == "[REDACTED_EMAIL]"
 
 
+def test_text_schema_accepts_a_bounded_artifact_larger_than_structured_scalar_limit():
+    source = "x" * 65_537
+    schema = SchemaContract.from_value(source, kind=PayloadKind.TEXT)
+    artifact = CandidateArtifact.create(run_id="run-1", input_digest=INPUT, policy_digest=POLICY,
+                                         transformed=source, schema=schema)
+    assert artifact.metadata.byte_count == len(source)
+
+
 def test_structured_candidate_digest_is_canonical_and_materializes_detached_value():
     schema = SchemaContract.from_value({"a": "original", "b": [1, 2]}, kind=PayloadKind.STRUCTURED)
     first = CandidateArtifact.create(run_id="run-1", input_digest=INPUT, policy_digest=POLICY,
