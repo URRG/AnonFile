@@ -43,6 +43,10 @@ from app.evaluator_authority import (EvaluatorAuthorityError, load_evaluator_aut
 from app.utility_evidence import DataUtilityReport, UtilityEvidenceError, assess_data_utility
 from app.utility_evidence_authority import (UtilityEvidenceAuthorityError, authority_for_tenant,
                                             load_utility_evidence_authorities)
+from app.disclosure_risk import DisclosureRiskError, DisclosureRiskReport, QuasiIdentifierCommitmentAuthority, assess_disclosure_risk
+from app.disclosure_risk_authority import (DisclosureRiskAuthorityError,
+                                           authority_for_tenant as disclosure_risk_authority_for_tenant,
+                                           load_disclosure_risk_authorities)
 from app.policies import TAXONOMY_CATEGORIES
 
 MAX_BODY_BYTES = 2_100_000
@@ -345,6 +349,16 @@ class UtilityEvidenceView(BaseModel):
     limitations: list[str]
     report: dict[str, Any]
 
+class DisclosureRiskEvidenceView(BaseModel):
+    id: str
+    run_id: str
+    processing_request_digest: str
+    candidate_artifact_digest: str
+    report_digest: str
+    posture: Literal["OBSERVATIONAL_ONLY"]
+    limitations: list[str]
+    report: dict[str, Any]
+
 class QualificationCreate(StrictModel):
     evaluation_id: str = Field(min_length=1, max_length=80)
     max_evaluation_age_seconds: int = Field(default=3600, ge=1, le=2_678_400)
@@ -563,6 +577,32 @@ def utility_evidence_view(record: dict[str, Any], *, utility_evidence_authoritie
     except (KeyError, TypeError, ValueError, UtilityEvidenceError, UtilityEvidenceAuthorityError):
         raise HTTPException(503, "Control integrity verification failed") from None
 
+def disclosure_risk_evidence_view(record: dict[str, Any], *, disclosure_risk_authorities) -> DisclosureRiskEvidenceView:
+    try:
+        payload = record["payload"]
+        expected = {"run_id", "processing_request_digest", "candidate_artifact_digest", "policy_digest", "rights_digest",
+                    "method_id", "method_version", "method_config_digest", "taxonomy_mapping_digest", "idempotency_key",
+                    "risk_authority_id", "attestation_signature", "report"}
+        report = DisclosureRiskReport.from_record(payload["report"])
+        if set(payload) != expected or report.candidate_artifact_digest != payload["candidate_artifact_digest"]:
+            raise ValueError
+        authority = disclosure_risk_authority_for_tenant(disclosure_risk_authorities, tenant=record["tenant"])
+        if (authority.authority_id != payload["risk_authority_id"] or not authority.verify(
+                signature=payload["attestation_signature"], tenant=record["tenant"], run_id=payload["run_id"],
+                processing_request_digest=payload["processing_request_digest"],
+                candidate_artifact_digest=payload["candidate_artifact_digest"], policy_digest=payload["policy_digest"],
+                rights_digest=payload["rights_digest"], method_id=payload["method_id"], method_version=payload["method_version"],
+                method_config_digest=payload["method_config_digest"], taxonomy_mapping_digest=payload["taxonomy_mapping_digest"],
+                idempotency_key=payload["idempotency_key"], report=report)):
+            raise ValueError
+        return DisclosureRiskEvidenceView(id=record["id"], run_id=payload["run_id"],
+            processing_request_digest=payload["processing_request_digest"], candidate_artifact_digest=report.candidate_artifact_digest,
+            report_digest=report.digest, posture="OBSERVATIONAL_ONLY",
+            limitations=["NO_RELEASE_AUTHORIZATION", "Aggregate k-anonymity is not semantic privacy, linkage, or re-identification assurance."],
+            report=report.to_record())
+    except (KeyError, TypeError, ValueError, DisclosureRiskError, DisclosureRiskAuthorityError):
+        raise HTTPException(503, "Control integrity verification failed") from None
+
 def private_candidate_artifact(private: dict[str, Any]) -> CandidateArtifact:
     """Recreate a validated candidate only within a trusted worker boundary."""
     try:
@@ -625,6 +665,10 @@ def create_app() -> FastAPI:
         app.state.utility_evidence_authorities = load_utility_evidence_authorities()
     except UtilityEvidenceAuthorityError:
         raise RuntimeError("Invalid utility-evidence authority configuration") from None
+    try:
+        app.state.disclosure_risk_authorities = load_disclosure_risk_authorities()
+    except DisclosureRiskAuthorityError:
+        raise RuntimeError("Invalid disclosure-risk authority configuration") from None
     app.state.store = create_store()
     app.add_middleware(BodyLimitMiddleware)
     origins = [v.strip() for v in os.getenv("WEB_ORIGIN", "http://localhost:3000,http://localhost:5173").split(",") if v.strip()]
@@ -996,6 +1040,54 @@ def create_app() -> FastAPI:
         if record["payload"].get("run_id") != run_id:
             raise HTTPException(404, "Control record not found")
         return utility_evidence_view(record, utility_evidence_authorities=app.state.utility_evidence_authorities)
+
+    @app.post("/processing-runs/{run_id}/disclosure-risk-evidence", response_model=DisclosureRiskEvidenceView, status_code=201)
+    async def create_disclosure_risk_evidence(run_id: str, request_context: Request,
+                                              principal: Principal = Depends(require_roles("processor"))):
+        """Assess stored private candidate data using server-owned QID configuration only."""
+        keys = request_context.headers.getlist("idempotency-key")
+        if (len(keys) != 1 or not 1 <= len(keys[0]) <= 200 or not keys[0].isascii()
+                or any(char.isspace() for char in keys[0]) or await request_context.body()):
+            raise HTTPException(422, "Request validation failed")
+        candidate_record, run = app.state.store.private_candidate_for_run(run_id, principal.tenant)
+        if run["payload"].get("processor_subject") != principal.subject:
+            raise HTTPException(403, "Processing-run owner required")
+        try:
+            authority = disclosure_risk_authority_for_tenant(app.state.disclosure_risk_authorities, tenant=principal.tenant)
+            artifact = private_candidate_artifact(candidate_record["payload"])
+            report = assess_disclosure_risk(candidate=artifact, quasi_identifiers=authority.quasi_identifiers,
+                                            commitment_verifier=authority.commitment_verifier)
+        except (DisclosureRiskAuthorityError, DisclosureRiskError, CandidateError, KeyError, TypeError, ValueError):
+            raise HTTPException(503, "Disclosure-risk evidence is unavailable") from None
+        payload = {"run_id": run_id, "processing_request_digest": run["payload"]["request_digest"],
+                   "candidate_artifact_digest": artifact.metadata.artifact_digest,
+                   "policy_digest": run["payload"]["policy_digest"], "rights_digest": run["payload"]["rights_digest"],
+                   "method_id": run["payload"]["method_id"], "method_version": run["payload"]["method_version"],
+                   "method_config_digest": run["payload"]["method_config_digest"],
+                   "taxonomy_mapping_digest": run["payload"]["taxonomy_mapping_digest"], "idempotency_key": keys[0],
+                   "risk_authority_id": authority.authority_id, "report": report.to_record()}
+        try:
+            payload["attestation_signature"] = authority.sign_for_worker(
+                tenant=principal.tenant, run_id=run_id, processing_request_digest=payload["processing_request_digest"],
+                candidate_artifact_digest=payload["candidate_artifact_digest"], policy_digest=payload["policy_digest"],
+                rights_digest=payload["rights_digest"], method_id=payload["method_id"], method_version=payload["method_version"],
+                method_config_digest=payload["method_config_digest"], taxonomy_mapping_digest=payload["taxonomy_mapping_digest"],
+                idempotency_key=keys[0], report=report)
+        except DisclosureRiskAuthorityError:
+            raise HTTPException(503, "Disclosure-risk evidence is unavailable") from None
+        record = control_record(kind="disclosure_risk_evidence", identifier=str(uuid4()), tenant=principal.tenant,
+                                payload=payload, expires_at=min(run["expires_at"], candidate_record["expires_at"]))
+        persisted, reused = app.state.store.record_disclosure_risk_evidence(run_id, principal.tenant, record, principal.subject, authority)
+        view = disclosure_risk_evidence_view(persisted, disclosure_risk_authorities=app.state.disclosure_risk_authorities)
+        if reused: return Response(view.model_dump_json(), status_code=200, media_type="application/json")
+        return view
+
+    @app.get("/processing-runs/{run_id}/disclosure-risk-evidence/{evidence_id}", response_model=DisclosureRiskEvidenceView)
+    def get_disclosure_risk_evidence(run_id: str, evidence_id: str,
+                                     principal: Principal = Depends(require_roles("processor", "reviewer"))):
+        record = app.state.store.get_control("disclosure_risk_evidence", evidence_id, principal.tenant)
+        if record["payload"].get("run_id") != run_id: raise HTTPException(404, "Control record not found")
+        return disclosure_risk_evidence_view(record, disclosure_risk_authorities=app.state.disclosure_risk_authorities)
 
     @app.post("/processing-runs/{run_id}/residual-evaluations", response_model=ResidualEvaluationView, status_code=201)
     def create_residual_evaluation(run_id: str, principal: Principal = Depends(require_roles("reviewer"))):

@@ -272,6 +272,37 @@ class DisclosureRiskReport:
         """Return a detached public/persistable record with aggregate data only."""
         return {**self._canonical(), "digest": self.digest}
 
+    @classmethod
+    def from_record(cls, value: object) -> "DisclosureRiskReport":
+        """Rebuild a persisted aggregate report and recompute its digest."""
+        if not isinstance(value, dict):
+            _fail()
+        expected = set(cls.__dataclass_fields__) - {"digest"}
+        expected.update({"digest", "version"})
+        if set(value) != expected or value.get("version") != 1 or type(value.get("digest")) is not str:
+            _fail()
+        try:
+            sizes = tuple(EquivalenceClassSize(size=item["size"], class_count=item["class_count"],
+                                                record_count=item["record_count"])
+                          for item in value["equivalence_class_sizes"])
+            report = cls(
+                candidate_artifact_digest=value["candidate_artifact_digest"],
+                candidate_schema_digest=value["candidate_schema_digest"],
+                quasi_identifier_commitment=value["quasi_identifier_commitment"],
+                quasi_identifier_count=value["quasi_identifier_count"],
+                status=DisclosureRiskStatus(value["status"]),
+                abstention_reason=(None if value["abstention_reason"] is None
+                                   else DisclosureRiskAbstention(value["abstention_reason"])),
+                record_count=value["record_count"], minimum_equivalence_class_size=value["minimum_equivalence_class_size"],
+                unique_record_count=value["unique_record_count"], unique_record_percent=value["unique_record_percent"],
+                equivalence_class_sizes=sizes,
+            )
+        except (KeyError, TypeError, ValueError, DisclosureRiskError):
+            _fail()
+        if not hmac.compare_digest(value["digest"], report.digest):
+            _fail()
+        return report
+
 
 def _percent(numerator: int, denominator: int) -> str:
     # Integer half-up rounding gives an unambiguous, locale-independent 2dp
