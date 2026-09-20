@@ -896,7 +896,7 @@ class DevelopmentStore:
                 raise unavailable()
             try:
                 report = LinkageRiskReport.from_record(payload["report"])
-                verified = (isinstance(authority, LinkageRiskControlAuthority) and authority.is_active()
+                verified = (type(authority) is LinkageRiskControlAuthority and authority.is_active()
                             and authority.tenant == tenant and authority.authority_id == payload["linkage_authority_id"]
                             and authority.linkage_config_revision == payload["linkage_config_revision"]
                             and report.candidate_schema_digest == candidates[0]["payload"].get("schema_digest")

@@ -87,6 +87,11 @@ class LinkageRiskControlAuthority:
     authority_id: str = field(init=False)
 
     def __post_init__(self) -> None:
+        # This class is a trust boundary.  Subclasses can override public
+        # properties or verification methods, so only this exact immutable
+        # record type is a valid server authority.
+        if type(self) is not LinkageRiskControlAuthority:
+            _fail()
         _identifier(self.tenant)
         _identifier(self.key_id)
         if (not isinstance(self.expires_at, datetime) or self.expires_at.tzinfo is None
@@ -223,7 +228,10 @@ def load_linkage_risk_authorities() -> tuple[LinkageRiskControlAuthority, ...]:
 
 def authority_for_tenant(authorities: Iterable[LinkageRiskControlAuthority], *, tenant: str,
                          at: datetime | None = None) -> LinkageRiskControlAuthority:
-    matches = [item for item in authorities if item.tenant == tenant]
+    # Avoid attribute access until the exact trusted record type is known.
+    # A supplied subclass could override ``tenant`` or verification methods.
+    matches = [item for item in authorities
+               if type(item) is LinkageRiskControlAuthority and item.tenant == tenant]
     moment = datetime.now(UTC) if at is None else at
     if len(matches) != 1 or not matches[0].is_active(at=moment):
         _fail()

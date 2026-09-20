@@ -10,7 +10,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.linkage_risk import LinkageRiskReport
-from app.linkage_risk_authority import LinkageRiskAuthorityError
+from app.linkage_risk_authority import LinkageRiskAuthorityError, LinkageRiskControlAuthority
 from app.main import control_record, create_app, linkage_risk_evidence_view
 from test_access import auth
 from test_control_plane_api import client, controls, ingested_dataset, run_request, setup
@@ -181,4 +181,26 @@ def test_active_authority_and_repository_reject_reports_bound_to_another_config_
                                    payload=schema_payload, expires_at=stored["expires_at"])
     with pytest.raises(HTTPException) as error:
         client.app.state.store.record_linkage_risk_evidence(run["id"], "tenant-a", schema_record, "processor", authority)
+    assert error.value.status_code == 503
+
+
+def test_authority_subclasses_cannot_bypass_control_admission_or_evidence_retrieval(client):
+    class ForgedAuthority(LinkageRiskControlAuthority):
+        pass
+
+    run = executed_run(client, key="m12-subclass-run")
+    item = assess(client, run["id"], key="m12-subclass-evidence").json()
+    stored = client.app.state.store.get_control("linkage_risk_evidence", item["id"], "tenant-a")
+    authority = client.app.state.linkage_risk_authorities[0]
+    # Construction itself is refused; use an uninitialized forged instance to
+    # exercise boundaries without relying on subclass-controlled attributes.
+    with pytest.raises(LinkageRiskAuthorityError):
+        ForgedAuthority(authority.tenant, authority.key_id, authority.expires_at,
+                        authority._authority, authority._linkage_keys, authority._reference)
+    forged = object.__new__(ForgedAuthority)
+    with pytest.raises(HTTPException) as error:
+        client.app.state.store.record_linkage_risk_evidence(run["id"], "tenant-a", stored, "processor", forged)
+    assert error.value.status_code == 503
+    with pytest.raises(HTTPException) as error:
+        linkage_risk_evidence_view(stored, linkage_risk_authorities=(forged,))
     assert error.value.status_code == 503
