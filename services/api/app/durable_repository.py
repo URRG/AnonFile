@@ -34,16 +34,36 @@ class DurableStore(DevelopmentStore):
     MAX_RECORD_BLOB = 6_000_000
     MAX_AUDIT_BLOB = 4096
 
+    @staticmethod
+    def _derive_keys(key):
+        """Derive the two local-adapter subkeys from one operator-held root key."""
+        if type(key) is not bytes or len(key) != 32:
+            raise unavailable()
+        encryption_key = HKDF(algorithm=hashes.SHA256(), length=32,
+                              salt=b"anonflow-local-v1", info=b"record-encryption").derive(key)
+        audit_key = HKDF(algorithm=hashes.SHA256(), length=32,
+                         salt=b"anonflow-local-v1", info=b"audit-authentication").derive(key)
+        return encryption_key, audit_key
+
+    @staticmethod
+    def _key_identifier(value):
+        """Accept only opaque, non-secret operator key labels.
+
+        The label is encrypted in the key-check sentinel.  It is deliberately
+        not an authentication mechanism and is never exposed through the API.
+        """
+        if (type(value) is not str or not 1 <= len(value) <= 128 or not value.isascii()
+                or any(not (character.isalnum() or character in "._-") for character in value)):
+            raise unavailable()
+        return value
+
     def __init__(self, path: str, key: bytes):
         super().__init__()
         self._connection = None
         if type(key) is not bytes or len(key) != 32 or not isinstance(path, str) or not path or path == ":memory:":
             raise unavailable()
         try:
-            self._encryption_key = HKDF(algorithm=hashes.SHA256(), length=32,
-                                       salt=b"anonflow-local-v1", info=b"record-encryption").derive(key)
-            self._audit_key = HKDF(algorithm=hashes.SHA256(), length=32,
-                                  salt=b"anonflow-local-v1", info=b"audit-authentication").derive(key)
+            self._encryption_key, self._audit_key = self._derive_keys(key)
             self._cipher = AESGCM(self._encryption_key)
             existed = Path(path).exists()
             self._connection = sqlite3.connect(path, timeout=5, isolation_level=None, check_same_thread=False)
@@ -77,8 +97,12 @@ class DurableStore(DevelopmentStore):
             raise unavailable() from None
 
     def _seal(self, record, aad):
+        return self._seal_with(self._cipher, record, aad)
+
+    @staticmethod
+    def _seal_with(cipher, record, aad):
         nonce = os.urandom(12)
-        return nonce + self._cipher.encrypt(nonce, encoded(record), encoded(["anonflow-local-v1", *aad]))
+        return nonce + cipher.encrypt(nonce, encoded(record), encoded(["anonflow-local-v1", *aad]))
 
     def _open(self, blob, aad, maximum):
         if not isinstance(blob, bytes) or not 28 <= len(blob) <= maximum:
@@ -92,8 +116,124 @@ class DurableStore(DevelopmentStore):
         entries = dict(self._connection.execute("SELECT name,value FROM meta"))
         if set(entries) != {"schema", "key-check"} or entries["schema"] != self.SCHEMA_VERSION:
             raise unavailable()
-        if self._open(entries["key-check"], ["meta", "key-check"], 1024) != {"sentinel": "anonflow-key-check-v1"}:
+        sentinel = self._open(entries["key-check"], ["meta", "key-check"], 1024)
+        if sentinel == {"sentinel": "anonflow-key-check-v1"}:
+            return {"generation": 0, "key_id": None}
+        if (not isinstance(sentinel, dict) or set(sentinel) != {"sentinel", "generation", "key_id", "previous_key_id"}
+                or sentinel.get("sentinel") != "anonflow-key-check-v1" or type(sentinel.get("generation")) is not int
+                or not 1 <= sentinel["generation"] <= 1_000_000):
             raise unavailable()
+        self._key_identifier(sentinel.get("key_id"))
+        previous = sentinel.get("previous_key_id")
+        if previous is not None:
+            self._key_identifier(previous)
+        return {"generation": sentinel["generation"], "key_id": sentinel["key_id"]}
+
+    @classmethod
+    def rotate_key(cls, path: str, old_key: bytes, new_key: bytes, *, new_key_id: str) -> None:
+        """Atomically re-encrypt a closed local SQLite store under ``new_key``.
+
+        This is a trusted, offline operator primitive; it is intentionally not
+        wired to HTTP or environment-driven startup.  It verifies every record
+        and authenticated audit event with ``old_key`` before writing anything,
+        re-chains audit MACs under the new audit subkey, and verifies the whole
+        new state before the single transaction commits.  Any ordinary failure
+        rolls back, so the old key remains the only usable key.
+        """
+        if (not isinstance(path, str) or not path or path == ":memory:" or type(old_key) is not bytes
+                or type(new_key) is not bytes or len(old_key) != 32 or len(new_key) != 32
+                or hmac.compare_digest(old_key, new_key)):
+            raise unavailable()
+        new_key_id = cls._key_identifier(new_key_id)
+        store = None
+        try:
+            # Rotation is never an initialization path.  In particular, a
+            # spelling error in an operator database path must not create a
+            # fresh, apparently successful empty store under the new key.
+            if not Path(path).is_file():
+                raise unavailable()
+            # Constructor authentication also refuses a missing, malformed,
+            # wrong-key, or tampered existing database without initializing it.
+            store = cls(path, old_key)
+            new_encryption_key, new_audit_key = cls._derive_keys(new_key)
+            new_cipher = AESGCM(new_encryption_key)
+            with store.lock:
+                store._connection.execute("BEGIN IMMEDIATE")
+                try:
+                    # Re-authenticate after acquiring the write lock.  Another
+                    # process may have committed between construction and here.
+                    prior_key = store._check_meta()
+                    store._load()
+                    record_rows = list(store._connection.execute(
+                        "SELECT kind,id,tenant,size_bytes,expires_at,length(blob) FROM records ORDER BY kind,id"))
+                    audit_rows = list(store._connection.execute(
+                        "SELECT tenant,seq,length(blob) FROM audit ORDER BY tenant,seq"))
+                    # Bound and authenticate the individual encrypted records
+                    # before replacing them.  Only one plaintext object exists
+                    # at a time and no migration file is created.
+                    for kind, identifier, tenant, _size, _expiry, blob_length in record_rows:
+                        if kind not in {"dataset", "release", *store.CONTROL_KINDS} or type(blob_length) is not int or not 28 <= blob_length <= store.MAX_RECORD_BLOB:
+                            raise unavailable()
+                        blob = store._connection.execute(
+                            "SELECT blob FROM records WHERE kind=? AND id=?", (kind, identifier)).fetchone()[0]
+                        record = store._open(blob, [tenant, kind, identifier], store.MAX_RECORD_BLOB)
+                        replacement = store._seal_with(new_cipher, record, [tenant, kind, identifier])
+                        if len(replacement) > store.MAX_RECORD_BLOB:
+                            raise unavailable()
+                        store._connection.execute("UPDATE records SET blob=? WHERE kind=? AND id=?", (replacement, kind, identifier))
+                    # Audit MACs are bound to an audit subkey.  Preserve events
+                    # and commitments but reconstruct every chain under the new
+                    # key before encrypting the resulting entries.
+                    for tenant in sorted(store._audit):
+                        previous = "0" * 64
+                        for entry in store._audit[tenant]:
+                            signature = hmac.new(new_audit_key, encoded([
+                                tenant, previous, entry["event"], entry["record_commitment"], entry["parent_id"]
+                            ]), hashlib.sha256).hexdigest()
+                            entry["mac"] = signature
+                            previous = signature
+                    for tenant, sequence, blob_length in audit_rows:
+                        if type(blob_length) is not int or not 28 <= blob_length <= store.MAX_AUDIT_BLOB:
+                            raise unavailable()
+                        entries = store._audit.get(tenant)
+                        if entries is None or not 1 <= sequence <= len(entries):
+                            raise unavailable()
+                        replacement = store._seal_with(new_cipher, entries[sequence - 1], [tenant, "audit", sequence])
+                        if len(replacement) > store.MAX_AUDIT_BLOB:
+                            raise unavailable()
+                        store._connection.execute("UPDATE audit SET blob=? WHERE tenant=? AND seq=?", (replacement, tenant, sequence))
+                    sentinel = {
+                        "sentinel": "anonflow-key-check-v1",
+                        "generation": prior_key["generation"] + 1,
+                        "key_id": new_key_id,
+                        "previous_key_id": prior_key["key_id"],
+                    }
+                    store._connection.execute("UPDATE meta SET value=? WHERE name='key-check'",
+                                              (store._seal_with(new_cipher, sentinel, ["meta", "key-check"]),))
+                    # Validate the post-rotation rows, AAD and re-chained audit
+                    # before making the transaction durable.
+                    store._encryption_key, store._audit_key, store._cipher = new_encryption_key, new_audit_key, new_cipher
+                    store._load()
+                    store._connection.execute("COMMIT")
+                except Exception:
+                    try:
+                        store._connection.rollback()
+                    except sqlite3.Error:
+                        pass
+                    raise
+                except BaseException:
+                    try:
+                        store._connection.rollback()
+                    except sqlite3.Error:
+                        pass
+                    raise
+        except HTTPException:
+            raise unavailable() from None
+        except Exception:
+            raise unavailable()
+        finally:
+            if store is not None:
+                store.close()
 
     def _load(self):
         self._check_meta()

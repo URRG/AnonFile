@@ -12,6 +12,8 @@ from app.durable_repository import DurableStore
 from app.repository import DevelopmentStore
 
 KEY = bytes(range(32))
+NEXT_KEY = bytes(reversed(range(32)))
+THIRD_KEY = b"third-storage-key-material-000000"[:32]
 TIME = "2026-09-20T00:00:00+00:00"
 
 
@@ -239,6 +241,114 @@ def test_wrong_key_never_reinitializes_existing_database(tmp_path):
     good = DurableStore(str(path), KEY)
     assert good.get_dataset("d1", "tenant-a")["content"] == source()["content"]
     good.close()
+
+
+def test_key_rotation_reencrypts_records_and_audit_without_plaintext_artifacts(tmp_path):
+    path = tmp_path / "source.db"
+    store = DurableStore(str(path), KEY)
+    store.add_dataset(source())
+    store.add_release(candidate())
+    store.reject_release("r1", "tenant-a", "synthetic-private-reviewer", TIME)
+    store.close()
+
+    DurableStore.rotate_key(str(path), KEY, NEXT_KEY, new_key_id="local-2026q3")
+
+    raw = b"".join(item.read_bytes() for item in tmp_path.iterdir() if item.is_file())
+    for marker in (source()["content"], source()["original_source"], "synthetic-private-reviewer", "REVIEW_REQUIRED"):
+        assert marker.encode() not in raw
+    fails(503, DurableStore, str(path), KEY)
+    reopened = DurableStore(str(path), NEXT_KEY)
+    try:
+        assert reopened.get_dataset("d1", "tenant-a")["content"] == source()["content"]
+        assert reopened.get_release("r1", "tenant-a")["card"]["revision"] == 2
+        assert reopened.verify_audit("tenant-a")
+        blob = reopened._connection.execute("SELECT value FROM meta WHERE name='key-check'").fetchone()[0]
+        assert reopened._open(blob, ["meta", "key-check"], 1024) == {
+            "sentinel": "anonflow-key-check-v1", "generation": 1,
+            "key_id": "local-2026q3", "previous_key_id": None,
+        }
+    finally:
+        reopened.close()
+
+    DurableStore.rotate_key(str(path), NEXT_KEY, THIRD_KEY, new_key_id="local-2026q4")
+    fails(503, DurableStore, str(path), NEXT_KEY)
+    reopened = DurableStore(str(path), THIRD_KEY)
+    try:
+        assert reopened.get_dataset("d1", "tenant-a")["content"] == source()["content"]
+        assert reopened.verify_audit("tenant-a")
+        blob = reopened._connection.execute("SELECT value FROM meta WHERE name='key-check'").fetchone()[0]
+        assert reopened._open(blob, ["meta", "key-check"], 1024) == {
+            "sentinel": "anonflow-key-check-v1", "generation": 2,
+            "key_id": "local-2026q4", "previous_key_id": "local-2026q3",
+        }
+    finally:
+        reopened.close()
+
+
+def test_key_rotation_rejects_wrong_old_key_without_reinitialization(tmp_path):
+    path = tmp_path / "source.db"
+    store = DurableStore(str(path), KEY)
+    store.add_dataset(source())
+    store.close()
+    before = path.read_bytes()
+
+    fails(503, lambda: DurableStore.rotate_key(str(path), b"z" * 32, NEXT_KEY, new_key_id="local-2026q3"))
+
+    assert path.read_bytes() == before
+    old = DurableStore(str(path), KEY)
+    try:
+        assert old.get_dataset("d1", "tenant-a")["content"] == source()["content"]
+    finally:
+        old.close()
+    fails(503, DurableStore, str(path), NEXT_KEY)
+
+
+def test_interrupted_key_rotation_rolls_back_to_old_key(tmp_path, monkeypatch):
+    path = tmp_path / "source.db"
+    store = DurableStore(str(path), KEY)
+    store.add_dataset(source())
+    store.add_release(candidate())
+    store.close()
+    original = DurableStore._seal_with
+    calls = 0
+
+    def interrupted(cipher, record, aad):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("synthetic rotation interruption")
+        return original(cipher, record, aad)
+
+    monkeypatch.setattr(DurableStore, "_seal_with", staticmethod(interrupted))
+    fails(503, lambda: DurableStore.rotate_key(str(path), KEY, NEXT_KEY, new_key_id="local-2026q3"))
+    monkeypatch.setattr(DurableStore, "_seal_with", original)
+
+    old = DurableStore(str(path), KEY)
+    try:
+        assert old.get_release("r1", "tenant-a")["card"]["eligibility"] == "REVIEW_REQUIRED"
+        assert old.verify_audit("tenant-a")
+    finally:
+        old.close()
+    fails(503, DurableStore, str(path), NEXT_KEY)
+
+
+def test_key_rotation_refuses_tampered_store_and_invalid_operator_metadata(tmp_path):
+    path = tmp_path / "source.db"
+    store = DurableStore(str(path), KEY)
+    store.add_dataset(source())
+    store.close()
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE records SET blob=? WHERE kind='dataset'", (b"corrupt" * 10,))
+
+    fails(503, lambda: DurableStore.rotate_key(str(path), KEY, NEXT_KEY, new_key_id="local-2026q3"))
+    fails(503, DurableStore, str(path), KEY)
+    fails(503, DurableStore, str(path), NEXT_KEY)
+
+    untouched = tmp_path / "untouched.db"
+    fails(503, lambda: DurableStore.rotate_key(str(untouched), KEY, NEXT_KEY, new_key_id="contains whitespace"))
+    fails(503, lambda: DurableStore.rotate_key(str(untouched), KEY, KEY, new_key_id="local-2026q3"))
+    fails(503, lambda: DurableStore.rotate_key(str(untouched), KEY, NEXT_KEY, new_key_id="local-2026q3"))
+    assert not untouched.exists()
 
 
 @pytest.mark.parametrize("mutation", ["ciphertext", "tenant", "identifier", "type", "expiry", "size", "schema", "audit"])
