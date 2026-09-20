@@ -17,7 +17,8 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from app.contracts import PayloadError
-from app.processing import detect_text, process_payload
+from app.processing import (RULES_METHOD_CONFIG_DIGEST, RULES_METHOD_ID, RULES_METHOD_VERSION,
+                            detect_text, process_payload)
 from app.ingestion import IngestionError, parse_source
 from app.storage_config import create_store
 from app.security import Principal, configure_auth, require_roles
@@ -27,7 +28,7 @@ from app.runs import ProcessingPlan, RunError, RunRegistry
 from app.candidate import CandidateArtifact, CandidateError, LedgerAction, PayloadKind, SchemaContract
 from app.rules_policy_execution import (ActualOutputOperation as PolicyOutputOperation,
                                         RULES_LABEL_TO_CATEGORY, RulesPolicyExecutionError,
-                                        execute_rules_policy)
+                                        RULES_TAXONOMY_MAPPING_DIGEST, execute_rules_policy)
 from app.residual_eval import (CandidateMetadata as ResidualCandidateMetadata, DetectorIdentity,
                                DetectorResult, EvaluationError, EvaluationProfile,
                                EvidenceStatus, candidate_schema_digest, evaluate_candidate)
@@ -285,6 +286,9 @@ class ProcessingRunView(BaseModel):
     attempts: int
     request_digest: str
     method_id: str
+    method_version: str
+    method_config_digest: str | None
+    taxonomy_mapping_digest: str | None
     language: str
     policy_digest: str
     rights_digest: str
@@ -406,20 +410,38 @@ def run_view(record: dict[str, Any]) -> ProcessingRunView:
     try:
         payload = record["payload"]
         method_id, language = payload.get("method_id"), payload.get("language")
+        method_version = payload.get("method_version")
+        method_config_digest = payload.get("method_config_digest")
+        taxonomy_mapping_digest = payload.get("taxonomy_mapping_digest")
         # M5 execution provenance was not persisted in M2b/M3 records.  Keep
         # those records inspectable but make their inability to run explicit;
         # reconstructing an executor/language from an old request digest would
         # fabricate evidence.
         if method_id is None and language is None:
             method_id, language = "legacy-unavailable", "und"
+            method_version, method_config_digest, taxonomy_mapping_digest = "legacy-unavailable", None, None
+        elif (method_id == RULES_METHOD_ID and language is not None
+              and method_version is method_config_digest is taxonomy_mapping_digest is None):
+            # Existing M5 records preserve their method label but have no
+            # attested method configuration.  They remain viewable but cannot
+            # receive M9 method evidence.
+            method_version, method_config_digest, taxonomy_mapping_digest = "legacy-unavailable", None, None
         if (payload["state"] not in {"REGISTERED", "RUNNING", "CANDIDATE", "QUARANTINED", "FAILED"}
                 or type(payload["attempts"]) is not int or not 0 <= payload["attempts"] <= 3
-                or method_id not in {"rules-v1", "legacy-unavailable"} or type(language) is not str
+                or method_id not in {RULES_METHOD_ID, "legacy-unavailable"} or type(language) is not str
+                or (method_id == RULES_METHOD_ID and (method_version != RULES_METHOD_VERSION
+                    or method_config_digest != RULES_METHOD_CONFIG_DIGEST
+                    or taxonomy_mapping_digest != RULES_TAXONOMY_MAPPING_DIGEST)
+                    and method_version != "legacy-unavailable")
+                or (method_id == "legacy-unavailable" and (method_version != "legacy-unavailable"
+                    or method_config_digest is not None or taxonomy_mapping_digest is not None))
                 or not isinstance(payload["events"], list) or not 1 <= len(payload["events"]) <= 16):
             raise ValueError
         return ProcessingRunView(id=record["id"], dataset_id=payload["dataset_id"], state=payload["state"],
                                  attempts=payload["attempts"], request_digest=payload["request_digest"],
                                  method_id=method_id, language=language,
+                                 method_version=method_version, method_config_digest=method_config_digest,
+                                 taxonomy_mapping_digest=taxonomy_mapping_digest,
                                  policy_digest=payload["policy_digest"], rights_digest=payload["rights_digest"],
                                  recipient=payload["recipient"], purpose=payload["purpose"], events=copy.deepcopy(payload["events"]),
                                  candidate=copy.deepcopy(payload.get("candidate")))
@@ -460,8 +482,13 @@ def detector_evaluation_evidence_view(record: dict[str, Any]) -> DetectorEvaluat
         payload = record["payload"]
         report = ScoredEvaluation.from_record(payload["report"])
         if (set(payload) != {"run_id", "processing_request_digest", "policy_digest", "rights_digest",
-                            "method_id", "idempotency_key", "report"}
+                            "method_id", "method_version", "method_config_digest", "taxonomy_mapping_digest",
+                            "idempotency_key", "report"}
                 or payload["report"]["digest"] != report.digest
+                or (report.binding.detector_id, report.binding.detector_version,
+                    report.binding.detector_config_digest, report.binding.taxonomy_mapping_digest) != (
+                        payload["method_id"], payload["method_version"], payload["method_config_digest"],
+                        payload["taxonomy_mapping_digest"])
                 or report.posture.value != "OBSERVATIONAL_ONLY"):
             raise ValueError
         return DetectorEvaluationEvidenceView(
@@ -611,7 +638,7 @@ def create_app() -> FastAPI:
         if len(keys) != 1:
             raise HTTPException(422, "Request validation failed")
         key = keys[0]
-        if request.method_id != "rules-v1":
+        if request.method_id != RULES_METHOD_ID:
             raise HTTPException(422, "Unsupported processing method")
         dataset = app.state.store.get_dataset(request.dataset_id, principal.tenant)
         if "ingestion_manifest" not in dataset:
@@ -643,6 +670,8 @@ def create_app() -> FastAPI:
                    "attempts": registered.attempts, "policy_digest": snapshot.digest,
                    "source_digest": plan.source_digest,
                    "mode": request.release_mode, "method_id": request.method_id,
+                   "method_version": RULES_METHOD_VERSION, "method_config_digest": RULES_METHOD_CONFIG_DIGEST,
+                   "taxonomy_mapping_digest": RULES_TAXONOMY_MAPPING_DIGEST,
                    "language": request.language,
                    "rights_digest": profile.digest, "recipient": request.recipient,
                    "purpose": request.purpose,
@@ -753,11 +782,16 @@ def create_app() -> FastAPI:
         # A harness report measures a detector/method; it must never be
         # attached to an unrelated processing method merely because both are
         # aggregate-only records.
-        if report.binding.detector_id != run_payload.get("method_id"):
+        if (report.binding.detector_id, report.binding.detector_version,
+            report.binding.detector_config_digest, report.binding.taxonomy_mapping_digest) != (
+                run_payload.get("method_id"), run_payload.get("method_version"),
+                run_payload.get("method_config_digest"), run_payload.get("taxonomy_mapping_digest")):
             raise HTTPException(409, "Detector evidence does not match the processing method")
         payload = {"run_id": run_id, "processing_request_digest": run_payload["request_digest"],
                    "policy_digest": run_payload["policy_digest"], "rights_digest": run_payload["rights_digest"],
-                   "method_id": run_payload["method_id"], "idempotency_key": keys[0],
+                   "method_id": run_payload["method_id"], "method_version": run_payload["method_version"],
+                   "method_config_digest": run_payload["method_config_digest"],
+                   "taxonomy_mapping_digest": run_payload["taxonomy_mapping_digest"], "idempotency_key": keys[0],
                    "report": report.to_record()}
         record = control_record(kind="detector_evaluation_evidence", identifier=str(uuid4()), tenant=principal.tenant,
                                 payload=payload, expires_at=run["expires_at"])

@@ -10,10 +10,14 @@ It is intentionally distinct from M3/M8 residual candidate evaluation:
   metrics, detector/evaluator/taxonomy/corpus/prediction digests and fixed
   limitations.  It rejects corpus cases, annotations, protected references,
   predictions, source text, values, paths and offsets.
-- The report is bound to the run's request/policy/rights digests and method.
-  Its `binding.detector_id` must equal the configured processing method.  This
-  makes it **method benchmark evidence**, not evidence that a particular
-  private candidate was safe or utility-preserving.
+- The report is bound to the run's request/policy/rights digests and exact
+  processor provenance.  Its detector ID, version, configuration digest and
+  taxonomy-mapping digest must exactly match the canonical `rules-v1` identity
+  persisted when the run was registered.  That configuration includes the
+  bounded recognizer patterns/flags, field mappings, limits, output semantics,
+  and versioned algorithm/build revisions.  This makes it **method benchmark
+  evidence**, not evidence that a particular private candidate was safe or
+  utility-preserving.
 - It has only the `OBSERVATIONAL_ONLY` posture and must carry
   `NO_RELEASE_AUTHORIZATION`.  Recording/retrieving it cannot alter a run
   state, create a candidate, qualify, approve, export, or deliver anything.

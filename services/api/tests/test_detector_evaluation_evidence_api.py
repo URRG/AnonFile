@@ -6,6 +6,8 @@ from fastapi import HTTPException
 from app.benchmark_evidence import CategoryMetrics
 from app.evaluation_harness import ScoredEvaluation, ScoringBinding
 from app.main import detector_evaluation_evidence_view
+from app.processing import RULES_METHOD_CONFIG_DIGEST, RULES_METHOD_VERSION, rules_method_config_digest
+from app.rules_policy_execution import RULES_TAXONOMY_MAPPING_DIGEST, rules_taxonomy_mapping_digest
 from test_access import auth
 from test_control_plane_api import client, controls, ingested_dataset, run_request
 
@@ -14,12 +16,15 @@ def digest(letter: str) -> str:
     return "sha256:" + letter * 64
 
 
-def report(*, false_negatives: int = 0, detector_id: str = "rules-v1") -> dict:
+def report(*, false_negatives: int = 0, detector_id: str = "rules-v1",
+           detector_version: str = RULES_METHOD_VERSION,
+           detector_config_digest: str = RULES_METHOD_CONFIG_DIGEST,
+           taxonomy_mapping_digest: str = RULES_TAXONOMY_MAPPING_DIGEST) -> dict:
     result = ScoredEvaluation(
         binding=ScoringBinding(
             evaluator_id="m8-harness", evaluator_version="v1", evaluator_config_digest=digest("a"),
-            detector_id=detector_id, detector_version="v1", detector_config_digest=digest("b"),
-            taxonomy_mapping_digest=digest("c"), corpus_digest=digest("d"), prediction_set_digest=digest("e"),
+            detector_id=detector_id, detector_version=detector_version, detector_config_digest=detector_config_digest,
+            taxonomy_mapping_digest=taxonomy_mapping_digest, corpus_digest=digest("d"), prediction_set_digest=digest("e"),
         ),
         metrics=(CategoryMetrics("PII", 3, 1, false_negatives),),
         evaluated_at=datetime(2030, 1, 1, tzinfo=UTC),
@@ -52,6 +57,8 @@ def test_persists_only_verified_aggregate_method_evidence_without_lifecycle_auth
     assert "NO_RELEASE_AUTHORIZATION" in item["limitations"]
     assert item["report"]["digest"] == item["report_digest"]
     assert item["report"]["binding"]["detector_id"] == "rules-v1"
+    assert item["report"]["binding"]["detector_config_digest"] == run["method_config_digest"]
+    assert item["report"]["binding"]["taxonomy_mapping_digest"] == run["taxonomy_mapping_digest"]
     assert "case_id" not in response.text and "reference_digest" not in response.text
     # Benchmark scores cannot progress, qualify, or otherwise modify a run.
     assert client.get(f"/processing-runs/{run['id']}", headers=auth()).json() == run
@@ -59,7 +66,8 @@ def test_persists_only_verified_aggregate_method_evidence_without_lifecycle_auth
     assert actions[-1] == "detector_evaluation_evidence.created"
     stored = client.app.state.store.get_control("detector_evaluation_evidence", item["id"], "tenant-a")["payload"]
     assert set(stored) == {"run_id", "processing_request_digest", "policy_digest", "rights_digest",
-                           "method_id", "idempotency_key", "report"}
+                           "method_id", "method_version", "method_config_digest", "taxonomy_mapping_digest",
+                           "idempotency_key", "report"}
     assert "candidate_digest" not in str(stored)
 
 
@@ -98,12 +106,18 @@ def test_invalid_or_mismatched_report_is_rejected_without_retaining_sensitive_in
     assert response.status_code == 422
     assert secret not in response.text
     assert not client.app.state.store.controls["detector_evaluation_evidence"]
-    mismatch = submit(client, run["id"], report(detector_id="independent-detector"), key="m9-evidence-0002")
-    assert mismatch.status_code == 409
+    for mismatched in (
+        report(detector_id="independent-detector"),
+        report(detector_version="rules-processor-v999"),
+        report(detector_config_digest=digest("f")),
+        report(taxonomy_mapping_digest=digest("f")),
+    ):
+        mismatch = submit(client, run["id"], mismatched, key="m9-evidence-" + str(len(mismatched)))
+        assert mismatch.status_code == 409
     assert not client.app.state.store.controls["detector_evaluation_evidence"]
 
 
-def test_tampered_persisted_report_is_not_rendered(client):
+def test_tampered_persisted_report_or_method_identity_is_not_rendered(client):
     run = registered_run(client)
     item = submit(client, run["id"]).json()
     stored = client.app.state.store.get_control("detector_evaluation_evidence", item["id"], "tenant-a")
@@ -111,6 +125,16 @@ def test_tampered_persisted_report_is_not_rendered(client):
     with pytest.raises(HTTPException) as error:
         detector_evaluation_evidence_view(stored)
     assert error.value.status_code == 503
+    stored = client.app.state.store.get_control("detector_evaluation_evidence", item["id"], "tenant-a")
+    stored["payload"]["method_config_digest"] = digest("f")
+    with pytest.raises(HTTPException) as error:
+        detector_evaluation_evidence_view(stored)
+    assert error.value.status_code == 503
+
+
+def test_method_and_taxonomy_identity_digests_change_when_processing_semantics_drift():
+    assert rules_method_config_digest(algorithm_revision="rules-processing-algorithm-v999") != RULES_METHOD_CONFIG_DIGEST
+    assert rules_taxonomy_mapping_digest({"EMAIL": "PAYMENT"}) != RULES_TAXONOMY_MAPPING_DIGEST
 
 
 def test_dependency_invalidation_removes_method_evidence_with_its_run(client):

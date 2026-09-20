@@ -643,13 +643,17 @@ class DevelopmentStore:
             self._validate_control(data)
             payload = data["payload"]
             expected = {"run_id", "processing_request_digest", "policy_digest", "rights_digest",
-                        "method_id", "idempotency_key", "report"}
+                        "method_id", "method_version", "method_config_digest", "taxonomy_mapping_digest",
+                        "idempotency_key", "report"}
             if (data["kind"] != "detector_evaluation_evidence" or data["tenant"] != tenant
                     or set(payload) != expected or payload.get("run_id") != identifier
                     or payload.get("processing_request_digest") != run["payload"].get("request_digest")
                     or payload.get("policy_digest") != run["payload"].get("policy_digest")
                     or payload.get("rights_digest") != run["payload"].get("rights_digest")
                     or payload.get("method_id") != run["payload"].get("method_id")
+                    or payload.get("method_version") != run["payload"].get("method_version")
+                    or payload.get("method_config_digest") != run["payload"].get("method_config_digest")
+                    or payload.get("taxonomy_mapping_digest") != run["payload"].get("taxonomy_mapping_digest")
                     or data["expires_at"] > run["expires_at"]
                     or type(payload.get("idempotency_key")) is not str
                     or not 1 <= len(payload["idempotency_key"]) <= 200
@@ -660,7 +664,10 @@ class DevelopmentStore:
                 report = ScoredEvaluation.from_record(payload["report"])
             except EvaluationHarnessError:
                 raise unavailable() from None
-            if report.binding.detector_id != payload["method_id"]:
+            if (report.binding.detector_id, report.binding.detector_version,
+                report.binding.detector_config_digest, report.binding.taxonomy_mapping_digest) != (
+                    payload["method_id"], payload["method_version"], payload["method_config_digest"],
+                    payload["taxonomy_mapping_digest"]):
                 raise unavailable()
             for existing in self.controls["detector_evaluation_evidence"].values():
                 existing_payload = existing["payload"]

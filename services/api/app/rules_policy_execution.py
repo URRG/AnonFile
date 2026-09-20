@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+import hashlib
+import json
 from types import MappingProxyType
 from typing import Iterable, Mapping
 
@@ -69,6 +71,19 @@ RULES_LABEL_TO_CATEGORY: Mapping[str, str] = MappingProxyType({
     "BUSINESS_CONFIDENTIAL": "BUSINESS_CONFIDENTIAL",
     "QUASI_IDENTIFIER": "QUASI_IDENTIFIER",
 })
+
+
+def rules_taxonomy_mapping_digest(mapping: Mapping[str, str] = RULES_LABEL_TO_CATEGORY) -> str:
+    """Bind benchmark category scores to this exact processor label mapping."""
+    try:
+        canonical = json.dumps({"schema": "rules-taxonomy-mapping-v1", "mapping": sorted(mapping.items())},
+                               ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("ascii")
+    except (TypeError, ValueError, UnicodeError, OverflowError):
+        _fail()
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
+RULES_TAXONOMY_MAPPING_DIGEST = rules_taxonomy_mapping_digest()
 # Categories for which this implementation has at least one bounded detector.
 # This is useful metadata for an evaluator and must never be interpreted as a
 # release/qualification assertion.

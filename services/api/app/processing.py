@@ -9,6 +9,7 @@ reserved output markers are rejected, not renamed. Offsets refer to original tex
 from __future__ import annotations
 
 from collections import Counter
+import hashlib
 import json
 import math
 import re
@@ -23,6 +24,14 @@ MAX_RECORDS = 10_000
 MAX_DEPTH = 32
 MAX_NODES = 100_000
 MODES = frozenset({"external_anonymized", "restricted_pseudonymized"})
+RULES_METHOD_ID = "rules-v1"
+# Bump ``RULES_METHOD_ALGORITHM_REVISION`` whenever processing behavior changes
+# beyond the declarative inputs below.  The digest is a reproducible identity,
+# not an assertion that these bounded rules are sufficient for release.
+RULES_METHOD_VERSION = "rules-processor-v1"
+RULES_METHOD_ALGORITHM_REVISION = "rules-processing-algorithm-v1"
+RULES_METHOD_BUILD_REVISION = "anonflow-m9"
+_RULES_METHOD_CONFIG_SCHEMA = "rules-processing-config-v1"
 LIMITATIONS = (
     "Rules-only coverage is incomplete; no privacy qualification or release approval.",
     "Free-text names, addresses, health context, business confidentiality and indirect identification are not comprehensively detected.",
@@ -99,6 +108,47 @@ for _names, _kind, _severity in (
 ):
     for _name in _names:
         _FIELD_TYPES[_name] = (_kind, _severity)
+
+
+def _rules_method_identity_config(*, algorithm_revision: str, build_revision: str) -> dict[str, object]:
+    """Canonical, source-free identity for the rules processor semantics.
+
+    Pattern/flag, label, bound and output-operation changes affect the digest.
+    Algorithm revision captures control-flow changes not represented by those
+    declarative values, and must be bumped with such a code change.
+    """
+    patterns = (
+        ("reserved_marker", _RESERVED_MARKER.pattern, _RESERVED_MARKER.flags),
+        ("credential", _CREDENTIAL.pattern, _CREDENTIAL.flags),
+        ("authorization", _AUTH_TOKEN.pattern, _AUTH_TOKEN.flags),
+        ("email", _EMAIL.pattern, _EMAIL.flags), ("pan", _PAN.pattern, _PAN.flags),
+        ("ipv4", _IP.pattern, _IP.flags), ("number", _NUMBER.pattern, _NUMBER.flags),
+        ("health_context", _HEALTH_CONTEXT.pattern, _HEALTH_CONTEXT.flags),
+        ("business_context", _BUSINESS_CONTEXT.pattern, _BUSINESS_CONTEXT.flags),
+        ("quasi_context", _QUASI_CONTEXT.pattern, _QUASI_CONTEXT.flags),
+    )
+    return {
+        "schema": _RULES_METHOD_CONFIG_SCHEMA, "method_id": RULES_METHOD_ID,
+        "method_version": RULES_METHOD_VERSION, "algorithm_revision": algorithm_revision,
+        "build_revision": build_revision, "modes": sorted(MODES),
+        "bounds": {"max_bytes": MAX_BYTES, "max_records": MAX_RECORDS,
+                   "max_depth": MAX_DEPTH, "max_nodes": MAX_NODES},
+        "patterns": patterns, "field_types": sorted((key, *value) for key, value in _FIELD_TYPES.items()),
+        "severity": sorted(SEVERITY.items()), "priority": sorted(PRIORITY.items()),
+        "output_semantics": {"external": "redact", "restricted": "ordinal_alias",
+                             "credential_payment_secret": "redact", "quasi_identifier": "generalize",
+                             "sensitive_numeric_boolean": "nullify"},
+    }
+
+
+def rules_method_config_digest(*, algorithm_revision: str = RULES_METHOD_ALGORITHM_REVISION,
+                               build_revision: str = RULES_METHOD_BUILD_REVISION) -> str:
+    config = _rules_method_identity_config(algorithm_revision=algorithm_revision, build_revision=build_revision)
+    canonical = json.dumps(config, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
+RULES_METHOD_CONFIG_DIGEST = rules_method_config_digest()
 
 
 def _normalized(text: str) -> tuple[str, list[int]]:
