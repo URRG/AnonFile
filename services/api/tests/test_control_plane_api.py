@@ -44,6 +44,13 @@ def setup(monkeypatch, tmp_path, mode="memory"):
         "linkage_key_fields": ["code"], "reference_records": [{"code": "001"}],
         "key": base64.b64encode(b"l" * 32).decode(),
     }]))
+    monkeypatch.setenv("ANONFLOW_RELEASE_CASE_AUTHORITIES", json.dumps([{
+        "tenant": "tenant-a", "issuer_key_id": "development-release-case-a",
+        "expires_at": "2027-06-01T00:00:00Z", "private_key": base64.b64encode(b"c" * 32).decode(),
+        "recipient_commitment_salt": base64.b64encode(b"s" * 32).decode(),
+        "contract_reference": "contract-reference:v1:" + "A" * 43,
+        "contract_digest": "sha256:" + "c" * 64, "contract_expires_at": "2027-06-01T00:00:00Z",
+    }]))
 
 
 @pytest.fixture(params=["memory", "sqlite"])
