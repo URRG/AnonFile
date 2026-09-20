@@ -1,6 +1,15 @@
 """Independent residual-scanner regression tests."""
 from app import processing
-from app.independent_residual import ASSESSED_CATEGORIES, DETECTOR_CONFIG_DIGEST, DETECTOR_ID, scan_residual_candidate
+from app.independent_residual import (
+    ALGORITHM_REVISION,
+    ASSESSED_CATEGORIES,
+    BUILD_REVISION,
+    DETECTOR_CONFIG_DIGEST,
+    DETECTOR_ID,
+    DETECTOR_IDENTITY_CONFIG,
+    _config_digest,
+    scan_residual_candidate,
+)
 from app.main import _residual_detector
 
 
@@ -38,3 +47,18 @@ def test_independent_scanner_explicitly_leaves_nonqualified_taxonomy_unassessed(
 def test_residual_scanner_exposes_a_stable_source_free_configuration_identity():
     assert DETECTOR_ID == "m8-independent-residual"
     assert DETECTOR_CONFIG_DIGEST.startswith("sha256:") and len(DETECTOR_CONFIG_DIGEST) == 71
+    assert DETECTOR_IDENTITY_CONFIG["algorithm_revision"] == ALGORITHM_REVISION
+    assert DETECTOR_IDENTITY_CONFIG["build_revision"] == BUILD_REVISION
+    assert _config_digest(algorithm_revision=ALGORITHM_REVISION + "-patched",
+                          build_revision=BUILD_REVISION) != DETECTOR_CONFIG_DIGEST
+    assert _config_digest(algorithm_revision=ALGORITHM_REVISION,
+                          build_revision=BUILD_REVISION + "-patched") != DETECTOR_CONFIG_DIGEST
+
+
+def test_direct_scanner_cycle_is_an_abstention_not_an_unbounded_walk():
+    cyclic: list[object] = []
+    cyclic.append(cyclic)
+    result = scan_residual_candidate(cyclic)
+    assert dict(result.residual_counts) == {"CREDENTIAL": 0, "PAYMENT": 0, "PII": 0}
+    assert result.scanned_units == 1
+    assert result.abstained_units == 1
