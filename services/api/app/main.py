@@ -1,7 +1,6 @@
 """Fail-closed development API. Synthetic data only; no release qualification."""
 from __future__ import annotations
 import copy
-import hashlib
 import json
 import math
 import os
@@ -27,11 +26,12 @@ from app.rights import RightsError, RightsProfile, evaluate_rights
 from app.runs import ProcessingPlan, RunError, RunRegistry
 from app.candidate import CandidateArtifact, CandidateError, LedgerAction, PayloadKind, SchemaContract
 from app.rules_policy_execution import (ActualOutputOperation as PolicyOutputOperation,
-                                        RULES_LABEL_TO_CATEGORY, RULES_POLICY_COVERED_CATEGORIES, RulesPolicyExecutionError,
+                                        RULES_LABEL_TO_CATEGORY, RulesPolicyExecutionError,
                                         execute_rules_policy)
 from app.residual_eval import (CandidateMetadata as ResidualCandidateMetadata, DetectorIdentity,
                                DetectorResult, EvaluationError, EvaluationProfile,
                                EvidenceStatus, candidate_schema_digest, evaluate_candidate)
+from app.independent_residual import DETECTOR_CONFIG_DIGEST, DETECTOR_ID, scan_residual_candidate
 from app.qualification import (CandidateBinding, CategoryMeasurement, CategoryThreshold,
                                EvaluationReport as QualificationReport, QualificationCriteria,
                                QualificationError, qualify)
@@ -436,34 +436,8 @@ def qualification_view(record: dict[str, Any]) -> QualificationView:
         raise HTTPException(503, "Control integrity verification failed") from None
 
 def _residual_detector(candidate: str | list[dict[str, Any]]) -> DetectorResult:
-    """Rules-based residual pass limited to independently policy-qualified families.
-
-    The new contextual health, business and quasi rules are processing safety
-    measures, not residual-evaluation evidence.  They are deliberately
-    ignored here so this adapter cannot assert all-taxonomy assessment.
-    """
-    counts = {category: 0 for category in sorted(RULES_POLICY_COVERED_CATEGORIES)}
-    def inspect(value: Any, observed: set[str]):
-        if type(value) is str:
-            for finding in detect_text(value):
-                category = RULES_LABEL_TO_CATEGORY.get(finding.entity_type)
-                if category is None:
-                    raise RulesPolicyExecutionError()
-                if category in counts:
-                    observed.add(category)
-        elif type(value) is dict:
-            for child in value.values():
-                inspect(child, observed)
-        elif type(value) is list:
-            for child in value:
-                inspect(child, observed)
-    units = [candidate] if type(candidate) is str else candidate
-    for unit in units:
-        observed: set[str] = set()
-        inspect(unit, observed)
-        for family in observed:
-            counts[family] += 1
-    return DetectorResult(residual_counts=counts, scanned_units=len(units))
+    """Compatibility adapter for the separately configured residual scanner."""
+    return scan_residual_candidate(candidate)
 
 def _policy_output_operations(result) -> tuple[PolicyOutputOperation, ...]:
     """Aggregate operations recorded by the worker into policy families.
@@ -726,7 +700,7 @@ def create_app() -> FastAPI:
         body = private["body"]
         profile = EvaluationProfile.create(profile_id="m3-residual", version="rules-v1",
                                            required_categories=("PII", "HEALTH_SENSITIVE", "PAYMENT", "CREDENTIAL", "BUSINESS_CONFIDENTIAL", "QUASI_IDENTIFIER"))
-        detector = DetectorIdentity(detector_id="m3-rules-residual", config_digest="sha256:" + hashlib.sha256(b"m3-rules-residual-v1").hexdigest())
+        detector = DetectorIdentity(detector_id=DETECTOR_ID, config_digest=DETECTOR_CONFIG_DIGEST)
         metadata = ResidualCandidateMetadata(artifact_digest=private["artifact_digest"], media_type=private["media_type"],
                                               expected_record_count=1 if type(body) is str else len(body),
                                               expected_schema_digest=None if type(body) is str else private["evaluation_schema_digest"])
