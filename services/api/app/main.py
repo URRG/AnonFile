@@ -35,6 +35,7 @@ from app.independent_residual import DETECTOR_CONFIG_DIGEST, DETECTOR_ID, scan_r
 from app.qualification import (CandidateBinding, CategoryMeasurement, CategoryThreshold,
                                EvaluationReport as QualificationReport, QualificationCriteria,
                                QualificationError, qualify)
+from app.evaluation_harness import EvaluationHarnessError, ScoredEvaluation
 from app.policies import TAXONOMY_CATEGORIES
 
 MAX_BODY_BYTES = 2_100_000
@@ -304,6 +305,24 @@ class ResidualEvaluationView(BaseModel):
     category_coverage_percent: int
     utility_checks: list[dict[str, Any]]
 
+class DetectorEvaluationEvidenceCreate(StrictModel):
+    """An aggregate M8 harness report from a trusted processor worker.
+
+    The report contract itself rejects corpus cases, annotations, protected
+    references, predictions, source values, and field paths.  It is method
+    benchmark evidence, not a candidate residual report.
+    """
+    report: dict[str, Any]
+
+class DetectorEvaluationEvidenceView(BaseModel):
+    id: str
+    run_id: str
+    processing_request_digest: str
+    report_digest: str
+    posture: Literal["OBSERVATIONAL_ONLY"]
+    limitations: list[str]
+    report: dict[str, Any]
+
 class QualificationCreate(StrictModel):
     evaluation_id: str = Field(min_length=1, max_length=80)
     max_evaluation_age_seconds: int = Field(default=3600, ge=1, le=2_678_400)
@@ -433,6 +452,24 @@ def qualification_view(record: dict[str, Any]) -> QualificationView:
         return QualificationView(id=record["id"], run_id=payload["run_id"], outcome=payload["outcome"],
                                  reasons=copy.deepcopy(payload["reasons"]), digest=payload["digest"])
     except (KeyError, TypeError, ValueError):
+        raise HTTPException(503, "Control integrity verification failed") from None
+
+def detector_evaluation_evidence_view(record: dict[str, Any]) -> DetectorEvaluationEvidenceView:
+    """Return only a verified M8 aggregate report and safe run binding."""
+    try:
+        payload = record["payload"]
+        report = ScoredEvaluation.from_record(payload["report"])
+        if (set(payload) != {"run_id", "processing_request_digest", "policy_digest", "rights_digest",
+                            "method_id", "idempotency_key", "report"}
+                or payload["report"]["digest"] != report.digest
+                or report.posture.value != "OBSERVATIONAL_ONLY"):
+            raise ValueError
+        return DetectorEvaluationEvidenceView(
+            id=record["id"], run_id=payload["run_id"],
+            processing_request_digest=payload["processing_request_digest"],
+            report_digest=report.digest, posture="OBSERVATIONAL_ONLY",
+            limitations=list(report.limitations), report=report.to_record())
+    except (KeyError, TypeError, ValueError, EvaluationHarnessError):
         raise HTTPException(503, "Control integrity verification failed") from None
 
 def _residual_detector(candidate: str | list[dict[str, Any]]) -> DetectorResult:
@@ -692,6 +729,53 @@ def create_app() -> FastAPI:
     def recover_processing_run(run_id: str, principal: Principal = Depends(require_roles("processor"))):
         """Terminally recover a lease-expired local claim; it never requeues output."""
         return run_view(app.state.store.recover_stale_processing_run(run_id, principal.tenant, principal.subject))
+
+    @app.post("/processing-runs/{run_id}/detector-evaluation-evidence",
+              response_model=DetectorEvaluationEvidenceView, status_code=201)
+    def create_detector_evaluation_evidence(run_id: str, request: DetectorEvaluationEvidenceCreate,
+                                             request_context: Request,
+                                             principal: Principal = Depends(require_roles("processor"))):
+        """Persist source-free method evidence without changing the run lifecycle.
+
+        A report is bound to an existing run only as evidence for that run's
+        configured method.  It does not score the private candidate, alter its
+        state, qualify a release, or become a delivery authorization.
+        """
+        keys = request_context.headers.getlist("idempotency-key")
+        if len(keys) != 1 or not 1 <= len(keys[0]) <= 200 or not keys[0].isascii() or any(c.isspace() for c in keys[0]):
+            raise HTTPException(422, "Request validation failed")
+        try:
+            report = ScoredEvaluation.from_record(request.report)
+        except EvaluationHarnessError:
+            raise HTTPException(422, "Control validation failed") from None
+        run = app.state.store.get_control("processing_run", run_id, principal.tenant)
+        run_payload = run["payload"]
+        # A harness report measures a detector/method; it must never be
+        # attached to an unrelated processing method merely because both are
+        # aggregate-only records.
+        if report.binding.detector_id != run_payload.get("method_id"):
+            raise HTTPException(409, "Detector evidence does not match the processing method")
+        payload = {"run_id": run_id, "processing_request_digest": run_payload["request_digest"],
+                   "policy_digest": run_payload["policy_digest"], "rights_digest": run_payload["rights_digest"],
+                   "method_id": run_payload["method_id"], "idempotency_key": keys[0],
+                   "report": report.to_record()}
+        record = control_record(kind="detector_evaluation_evidence", identifier=str(uuid4()), tenant=principal.tenant,
+                                payload=payload, expires_at=run["expires_at"])
+        persisted, reused = app.state.store.record_detector_evaluation_evidence(
+            run_id, principal.tenant, record, principal.subject)
+        view = detector_evaluation_evidence_view(persisted)
+        if reused:
+            return Response(view.model_dump_json(), status_code=200, media_type="application/json")
+        return view
+
+    @app.get("/processing-runs/{run_id}/detector-evaluation-evidence/{evidence_id}",
+             response_model=DetectorEvaluationEvidenceView)
+    def get_detector_evaluation_evidence(run_id: str, evidence_id: str,
+                                         principal: Principal = Depends(require_roles("processor", "reviewer"))):
+        record = app.state.store.get_control("detector_evaluation_evidence", evidence_id, principal.tenant)
+        if record["payload"].get("run_id") != run_id:
+            raise HTTPException(404, "Control record not found")
+        return detector_evaluation_evidence_view(record)
 
     @app.post("/processing-runs/{run_id}/residual-evaluations", response_model=ResidualEvaluationView, status_code=201)
     def create_residual_evaluation(run_id: str, principal: Principal = Depends(require_roles("reviewer"))):
