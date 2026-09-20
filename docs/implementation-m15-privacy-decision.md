@@ -19,3 +19,9 @@ any drift, expiry, invalidation or source-attestation failure is unavailable.
 Both possible outcomes are `QUARANTINED` and `INSUFFICIENT_EVIDENCE`, with
 `NO_RELEASE_AUTHORIZATION` permanently attached. This increment adds no
 approval, artifact bytes, export, delivery, or download route.
+
+The disclosure adapter uses the native report's `unique_record_count` as a
+maximum-risk measurement. The policy contract reserves zero as invalid for
+that evidence family, so the smallest valid threshold is `1`; deployments
+that require no unique records should continue to hold/quarantine through a
+separate stricter disclosure policy rather than configuring an invalid value.

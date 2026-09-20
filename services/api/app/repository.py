@@ -1100,7 +1100,11 @@ class DevelopmentStore:
                 if old["tenant"] == tenant and previous.get("case_id") == case_id and previous.get("idempotency_key") == payload["idempotency_key"]:
                     try:
                         prior = PrivacyDecision.from_record(previous["decision"])
-                        expected = reassess(case_id, tenant, prior.issued_at, prior.decision_id)
+                        # Reassess at *current* transaction time.  The old
+                        # issue time is immutable provenance, not a licence to
+                        # replay evidence that has since expired, gone stale,
+                        # been revoked, or drifted from policy/configuration.
+                        expected = reassess(case_id, tenant, moment, prior.decision_id)
                         same = (data["id"] == old["id"] and prior.decision_id == old["id"]
                                 and decision_authority.verifies(prior, at=moment)
                                 and type(expected) is PrivacyDecision
@@ -1137,8 +1141,21 @@ class DevelopmentStore:
             # invalid native attestations before anything is made durable.
             try:
                 expected = reassess(case_id, tenant, moment, decision.decision_id)
-                if (type(expected) is not PrivacyDecision or expected.to_record() != decision.to_record()
-                        or expected.evidence_references != decision.evidence_references):
+                # The API captured ``issued_at`` immediately before entering
+                # this transaction.  Crossing a wall-clock second must not
+                # invalidate that correctly signed record; compare every
+                # substantive re-derived field instead of a freshly minted
+                # signature/timestamp, while requiring it not be future-dated.
+                if (type(expected) is not PrivacyDecision or decision.issued_at > moment
+                        or decision.case_id != expected.case_id or decision.case_digest != expected.case_digest
+                        or decision.authority_id != expected.authority_id or decision.issuer_key_id != expected.issuer_key_id
+                        or decision.expires_at != expected.expires_at
+                        or decision.decision.outcome != expected.decision.outcome
+                        or decision.decision.reasons != expected.decision.reasons
+                        or decision.decision.binding != expected.decision.binding
+                        or decision.decision.privacy_evidence_policy_digest != expected.decision.privacy_evidence_policy_digest
+                        or decision.decision.evidence_digests != expected.decision.evidence_digests
+                        or decision.evidence_references != expected.evidence_references):
                     raise ValueError
             except (TypeError, ValueError, PrivacyDecisionError, HTTPException):
                 raise unavailable() from None
@@ -1146,6 +1163,23 @@ class DevelopmentStore:
                 raise HTTPException(409, "Object already exists")
             self._append_event(tenant, "privacy_decision.created", data["id"], actor, record=data)
             self.controls["privacy_decision"][data["id"]] = data
+            if decision.decision.outcome.value == "QUARANTINED":
+                # Quarantine is terminal for this candidate snapshot.  It is
+                # not an informational badge that a future workflow can ignore:
+                # revoke all case/decision handles and make the run sticky
+                # quarantined, without creating an approval or delivery state.
+                run = self._control("processing_run", run_id, tenant)
+                self._invalidate_release_cases_for_run(tenant, run_id)
+                if run["payload"].get("state") == "CANDIDATE":
+                    revised = detached(run)
+                    revised_payload = revised["payload"]
+                    revised_payload["state"] = "QUARANTINED"
+                    self._run_event(revised_payload, state="QUARANTINED", action="QUARANTINED",
+                                    attempt=revised_payload["attempts"], error_code="PRIVACY_EVIDENCE_FAILURE")
+                    revised["size_bytes"] = 0
+                    self._validate_control(revised)
+                    self._append_event(tenant, "processing_run.updated", run_id, actor, record=revised)
+                    self.controls["processing_run"][run_id] = revised
             return detached(data), False
 
     def get_privacy_decision(self, decision_id, tenant, decision_authority, release_authority):
