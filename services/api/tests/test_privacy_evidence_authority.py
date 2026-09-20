@@ -14,11 +14,13 @@ from app.privacy_evidence_authority import (
 from app.privacy_evidence_policy import (
     AttestedPrivacyEvidence,
     EvidenceRequirement,
+    PrivacyEvidenceAttestationProfile,
     PrivacyEvidenceBinding,
     PrivacyEvidenceKind,
     PrivacyEvidenceOutcome,
     PrivacyEvidencePolicy,
     PrivacyEvidencePolicyError,
+    PrivacyEvidenceAuthority,
     PrivacyEvidencePublicVerifier,
     PrivacyEvidenceReason,
     assess_privacy_evidence,
@@ -46,13 +48,17 @@ def authority(kind=PrivacyEvidenceKind.UTILITY, *, tenant="tenant-a", secret=b"s
 def policy(issuer, method=DIGESTS[5]):
     requirements = []
     for index, kind in enumerate(PrivacyEvidenceKind):
+        configured = issuer.get(kind) if type(issuer) is dict else (issuer if kind is PrivacyEvidenceKind.UTILITY else None)
         requirements.append(EvidenceRequirement(
-            kind, issuer.issuer_key_id if kind is PrivacyEvidenceKind.UTILITY else "issuer-" + kind.value.lower(),
+            kind, configured.issuer_key_id if configured else "issuer-" + kind.value.lower(),
             900_000 if kind in {PrivacyEvidenceKind.UTILITY, PrivacyEvidenceKind.BENCHMARK} else 10,
+            authority_id=(configured.authority_id if configured else "privacy-authority:v2:" + chr(65 + index) * 43),
+            public_key_fingerprint=(configured.policy_verifier.public_key_fingerprint if configured else "sha256:" + chr(97 + index) * 64),
         ))
     return PrivacyEvidencePolicy(policy_id="privacy-policy", method_provenance_digest=method,
                                  max_evidence_age_seconds=3600,
-                                 requirements=tuple(sorted(requirements, key=lambda item: item.kind.value)))
+                                 requirements=tuple(sorted(requirements, key=lambda item: item.kind.value)),
+                                 attestation_profile=PrivacyEvidenceAttestationProfile.ED25519_V2)
 
 
 def reference(current_authority=None, current_binding=None, current_policy=None):
@@ -70,11 +76,11 @@ def test_issues_verifies_and_adapts_a_complete_source_safe_reference_for_policy(
     issuer = authority()
     item = reference(issuer)
     assert issuer.verifies(item, at=NOW)
-    assert item.authority_id.startswith("privacy-authority:v1:")
+    assert item.authority_id.startswith("privacy-authority:v2:")
     assert item.digest.startswith("sha256:")
     policy_item = issuer.to_policy_evidence(item, at=NOW)
     verifier = issuer.policy_verifier
-    assert verifier.verifies(policy_item)
+    assert verifier.verifies(policy_item, at=NOW)
     assert type(verifier).__name__ == "PrivacyEvidencePublicVerifier"
     assert not hasattr(verifier, "issue") and not hasattr(verifier, "_private_key")
     with pytest.raises(AttributeError):
@@ -89,7 +95,7 @@ def test_verification_only_capability_cannot_mint_or_accept_arbitrary_five_kind_
     issuers = {kind: authority(kind, secret=bytes([index + 1]) * 32)
                for index, kind in enumerate(PrivacyEvidenceKind)}
     current_binding = binding()
-    current_policy = policy(issuers[PrivacyEvidenceKind.UTILITY], current_binding.method_provenance_digest)
+    current_policy = policy(issuers, current_binding.method_provenance_digest)
     forged = tuple(AttestedPrivacyEvidence(
         kind=kind, evidence_reference="evidence:v1:" + chr(65 + index) * 43,
         evidence_digest="sha256:" + chr(97 + index) * 64, binding_digest=current_binding.digest,
@@ -100,7 +106,7 @@ def test_verification_only_capability_cannot_mint_or_accept_arbitrary_five_kind_
         measured_at=NOW, expires_at=NOW + timedelta(hours=2),
         signature="privacy-evidence-sig:v1:" + "A" * 43,
     ) for index, kind in enumerate(PrivacyEvidenceKind))
-    assert all(not issuers[item.kind].policy_verifier.verifies(item) for item in forged)
+    assert all(not issuers[item.kind].policy_verifier.verifies(item, at=NOW) for item in forged)
     decision = assess_privacy_evidence(decision_id="forged-evidence", binding=current_binding,
                                        policy=current_policy, evidence=forged,
                                        authorities=tuple(item.policy_verifier for item in issuers.values()), at=NOW)
@@ -112,7 +118,7 @@ def test_adapter_output_is_directly_consumable_by_existing_policy_contract():
     issuers = {kind: authority(kind, secret=bytes([index + 1]) * 32)
                for index, kind in enumerate(PrivacyEvidenceKind)}
     current_binding = binding()
-    current_policy = policy(issuers[PrivacyEvidenceKind.UTILITY], current_binding.method_provenance_digest)
+    current_policy = policy(issuers, current_binding.method_provenance_digest)
     records = tuple(issuers[kind].to_policy_evidence(issuers[kind].issue(
         kind=kind, evidence_reference="evidence:v1:" + chr(65 + index) * 43,
         evidence_digest="sha256:" + chr(97 + index) * 64,
@@ -129,7 +135,7 @@ def test_adapter_output_is_directly_consumable_by_existing_policy_contract():
 
 @pytest.mark.parametrize(("field", "value"), [
     ("evidence_digest", DIGESTS[7]), ("observed_value", 950_001), ("issuer_key_id", "issuer-foreign"),
-    ("tenant", "tenant-b"), ("authority_id", "privacy-authority:v1:" + "A" * 43),
+    ("tenant", "tenant-b"), ("authority_id", "privacy-authority:v2:" + "A" * 43),
 ])
 def test_tampering_complete_scope_or_authority_identity_fails_closed(field, value):
     issuer = authority()
@@ -163,7 +169,7 @@ def test_complete_policy_canonical_including_other_issuer_thresholds_is_in_scope
     changed_policy = PrivacyEvidencePolicy(policy_id=item.policy.policy_id,
                                            method_provenance_digest=item.policy.method_provenance_digest,
                                            max_evidence_age_seconds=item.policy.max_evidence_age_seconds,
-                                           requirements=tuple(requirements))
+                                           requirements=tuple(requirements), attestation_profile=item.policy.attestation_profile)
     assert not issuer.verifies(replace(item, policy=changed_policy), at=NOW)
 
 
@@ -175,9 +181,9 @@ def test_every_top_level_policy_field_is_in_the_attested_scope(field, value):
     issuer = authority()
     item = reference(issuer)
     changed_policy = PrivacyEvidencePolicy(policy_id=value if field == "policy_id" else item.policy.policy_id,
-                                           method_provenance_digest=value if field == "method_provenance_digest" else item.policy.method_provenance_digest,
-                                           max_evidence_age_seconds=value if field == "max_evidence_age_seconds" else item.policy.max_evidence_age_seconds,
-                                           requirements=item.policy.requirements)
+                                               method_provenance_digest=value if field == "method_provenance_digest" else item.policy.method_provenance_digest,
+                                               max_evidence_age_seconds=value if field == "max_evidence_age_seconds" else item.policy.max_evidence_age_seconds,
+                                               requirements=item.policy.requirements, attestation_profile=item.policy.attestation_profile)
     assert not issuer.verifies(replace(item, policy=changed_policy), at=NOW)
 
 
@@ -273,11 +279,61 @@ def test_ed25519_key_encodings_are_strict_and_public_verifier_never_accepts_hmac
         PrivacyEvidenceAttestationAuthority(tenant="tenant-key", issuer_key_id="issuer-utility",
                                              expires_at=NOW + timedelta(days=2), private_key_b64="not-base64")
     with pytest.raises(PrivacyEvidencePolicyError):
-        PrivacyEvidencePublicVerifier(key_id="issuer-utility", public_key_b64="A" * 44)
+        PrivacyEvidencePublicVerifier(tenant="tenant-key", key_id="issuer-utility",
+                                      authority_id="privacy-authority:v2:" + "A" * 43,
+                                      public_key_b64="A" * 44, expires_at=NOW + timedelta(days=1))
     issuer = authority()
     item = reference(issuer)
     policy_item = issuer.to_policy_evidence(item, at=NOW)
-    hmac_shaped = replace(policy_item, signature="privacy-evidence-sig:v1:" + "A" * 43)
+    with pytest.raises(PrivacyEvidencePolicyError):
+        replace(policy_item, signature="privacy-evidence-sig:v1:" + "A" * 43)
     malformed = replace(policy_item, signature="privacy-evidence-sig:v2:" + "A" * 86)
-    assert not issuer.policy_verifier.verifies(hmac_shaped)
-    assert not issuer.policy_verifier.verifies(malformed)
+    assert not issuer.policy_verifier.verifies(malformed, at=NOW)
+
+
+def test_expired_old_private_key_cannot_verify_or_directly_forge_for_a_replaced_authority():
+    encoded = base64.b64encode(b"o" * 32).decode("ascii")
+    old = PrivacyEvidenceAttestationAuthority(tenant="tenant-a", issuer_key_id="issuer-utility",
+                                               expires_at=NOW + timedelta(days=1), private_key_b64=encoded)
+    old_policy = policy(old)
+    old_reference = old.issue(kind=PrivacyEvidenceKind.UTILITY, evidence_reference="evidence:v1:" + "O" * 43,
+                              evidence_digest=DIGESTS[6], binding=binding(), policy=old_policy,
+                              observed_value=950_000, measured_at=NOW, expires_at=NOW + timedelta(hours=1), at=NOW)
+    old_evidence = old.to_policy_evidence(old_reference, at=NOW)
+    replacement = PrivacyEvidenceAttestationAuthority(tenant="tenant-a", issuer_key_id="issuer-utility",
+                                                       expires_at=NOW + timedelta(days=2),
+                                                       private_key_b64=base64.b64encode(b"r" * 32).decode("ascii"))
+    assert not old.policy_verifier.verifies(old_evidence, at=NOW + timedelta(hours=1))
+    assert not replacement.policy_verifier.verifies(old_evidence, at=NOW)
+    replacement_policy = policy(replacement)
+    provisional = AttestedPrivacyEvidence(
+        binding_digest=binding().digest, evidence_digest=DIGESTS[6],
+        evidence_policy_digest=replacement_policy.digest, evidence_reference="evidence:v1:" + "F" * 43,
+        issuer_key_id="issuer-utility", kind=PrivacyEvidenceKind.UTILITY,
+        method_provenance_digest=binding().method_provenance_digest, observed_value=950_000,
+        measured_at=NOW, expires_at=NOW + timedelta(hours=1),
+        authority_tenant=replacement.tenant, authority_id=replacement.authority_id,
+        authority_public_key_fingerprint=replacement.policy_verifier.public_key_fingerprint,
+        signature="privacy-evidence-sig:v2:" + "A" * 86,
+    )
+    old_signature = old._private_key.sign(b"privacy-evidence-v2:" + json.dumps(
+        provisional.canonical(), ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("ascii"))
+    forged = replace(provisional, signature="privacy-evidence-sig:v2:" + base64.urlsafe_b64encode(old_signature).decode("ascii").rstrip("="))
+    assert not replacement.policy_verifier.verifies(forged, at=NOW)
+
+
+def test_v2_profile_rejects_legacy_hmac_downgrade_and_legacy_profile_rejects_v2_descriptors():
+    issuer = authority()
+    current_policy = policy(issuer)
+    hmac_authority = PrivacyEvidenceAuthority(key_id=issuer.issuer_key_id, secret=b"h" * 32)
+    hmac_evidence = hmac_authority.issue(kind=PrivacyEvidenceKind.UTILITY, evidence_reference="evidence:v1:" + "H" * 43,
+                                         evidence_digest=DIGESTS[6], binding=binding(), policy=current_policy,
+                                         observed_value=950_000, measured_at=NOW, expires_at=NOW + timedelta(hours=2))
+    decision = assess_privacy_evidence(decision_id="no-downgrade", binding=binding(), policy=current_policy,
+                                       evidence=(hmac_evidence,), authorities=(issuer.policy_verifier,), at=NOW)
+    assert decision.outcome is PrivacyEvidenceOutcome.QUARANTINED
+    with pytest.raises(PrivacyEvidencePolicyError):
+        PrivacyEvidencePolicy(policy_id=current_policy.policy_id,
+                              method_provenance_digest=current_policy.method_provenance_digest,
+                              max_evidence_age_seconds=current_policy.max_evidence_age_seconds,
+                              requirements=current_policy.requirements)

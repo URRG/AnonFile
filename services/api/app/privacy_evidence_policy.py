@@ -30,6 +30,7 @@ _RIGHTS_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _IDENTIFIER = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}\Z")
 _REFERENCE = re.compile(r"evidence:v1:[A-Za-z0-9_-]{43}\Z")
 _SIGNATURE = re.compile(r"(?:privacy-evidence-sig:v1:[A-Za-z0-9_-]{43}|privacy-evidence-sig:v2:[A-Za-z0-9_-]{86})\Z")
+_AUTHORITY_ID = re.compile(r"privacy-authority:v2:[A-Za-z0-9_-]{43}\Z")
 
 
 class PrivacyEvidencePolicyError(ValueError):
@@ -65,6 +66,11 @@ class PrivacyEvidenceKind(StrEnum):
     UTILITY = "UTILITY"
     LINKAGE = "LINKAGE"
     BENCHMARK = "BENCHMARK"
+
+
+class PrivacyEvidenceAttestationProfile(StrEnum):
+    LEGACY_HMAC_V1 = "LEGACY_HMAC_V1"
+    ED25519_V2 = "ED25519_V2"
 
 
 _REQUIRED_KINDS = frozenset(PrivacyEvidenceKind)
@@ -178,18 +184,27 @@ class EvidenceRequirement:
     kind: PrivacyEvidenceKind
     issuer_key_id: str
     threshold: int
+    authority_id: str | None = None
+    public_key_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, PrivacyEvidenceKind):
             _fail()
         object.__setattr__(self, "issuer_key_id", _identifier(self.issuer_key_id))
         object.__setattr__(self, "threshold", _score(self.kind, self.threshold))
+        if self.authority_id is not None:
+            if type(self.authority_id) is not str or not _AUTHORITY_ID.fullmatch(self.authority_id):
+                _fail()
+        if self.public_key_fingerprint is not None:
+            object.__setattr__(self, "public_key_fingerprint", _digest(self.public_key_fingerprint))
 
     def passes(self, observed: int) -> bool:
         return observed <= self.threshold if self.kind in _MAXIMUM_KINDS else observed >= self.threshold
 
     def canonical(self) -> dict[str, object]:
-        return {"issuer_key_id": self.issuer_key_id, "kind": self.kind.value, "threshold": self.threshold}
+        return {"authority_id": self.authority_id, "issuer_key_id": self.issuer_key_id,
+                "kind": self.kind.value, "public_key_fingerprint": self.public_key_fingerprint,
+                "threshold": self.threshold}
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +215,7 @@ class PrivacyEvidencePolicy:
     method_provenance_digest: str
     max_evidence_age_seconds: int
     requirements: tuple[EvidenceRequirement, ...]
+    attestation_profile: PrivacyEvidenceAttestationProfile = PrivacyEvidenceAttestationProfile.LEGACY_HMAC_V1
     digest: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -207,6 +223,7 @@ class PrivacyEvidencePolicy:
         object.__setattr__(self, "method_provenance_digest", _digest(self.method_provenance_digest))
         if (type(self.max_evidence_age_seconds) is not int or isinstance(self.max_evidence_age_seconds, bool)
                 or not 1 <= self.max_evidence_age_seconds <= MAX_EVIDENCE_AGE_SECONDS
+                or type(self.attestation_profile) is not PrivacyEvidenceAttestationProfile
                 or type(self.requirements) is not tuple
                 or any(type(item) is not EvidenceRequirement for item in self.requirements)
                 or len(self.requirements) != len(_REQUIRED_KINDS)
@@ -215,10 +232,17 @@ class PrivacyEvidencePolicy:
         ordered = tuple(sorted(self.requirements, key=lambda item: item.kind.value))
         if ordered != self.requirements or len({item.issuer_key_id for item in self.requirements}) != len(self.requirements):
             _fail()
+        descriptors = [(item.authority_id, item.public_key_fingerprint) for item in self.requirements]
+        if ((self.attestation_profile is PrivacyEvidenceAttestationProfile.ED25519_V2
+             and any(authority is None or fingerprint is None for authority, fingerprint in descriptors))
+                or (self.attestation_profile is PrivacyEvidenceAttestationProfile.LEGACY_HMAC_V1
+                    and any(authority is not None or fingerprint is not None for authority, fingerprint in descriptors))):
+            _fail()
         object.__setattr__(self, "digest", _hash(self.canonical()))
 
     def canonical(self) -> dict[str, object]:
-        return {"max_evidence_age_seconds": self.max_evidence_age_seconds,
+        return {"attestation_profile": self.attestation_profile.value,
+                "max_evidence_age_seconds": self.max_evidence_age_seconds,
                 "method_provenance_digest": self.method_provenance_digest,
                 "policy_id": self.policy_id,
                 "requirements": [item.canonical() for item in self.requirements]}
@@ -239,6 +263,9 @@ class AttestedPrivacyEvidence:
     measured_at: datetime
     expires_at: datetime
     signature: str = field(repr=False)
+    authority_tenant: str | None = field(default=None, repr=False)
+    authority_id: str | None = None
+    authority_public_key_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, PrivacyEvidenceKind):
@@ -252,6 +279,13 @@ class AttestedPrivacyEvidence:
         object.__setattr__(self, "observed_value", _score(self.kind, self.observed_value))
         object.__setattr__(self, "measured_at", _time(self.measured_at))
         object.__setattr__(self, "expires_at", _time(self.expires_at))
+        if type(self.signature) is str and self.signature.startswith("privacy-evidence-sig:v2:"):
+            object.__setattr__(self, "authority_tenant", _identifier(self.authority_tenant))
+            if type(self.authority_id) is not str or not _AUTHORITY_ID.fullmatch(self.authority_id):
+                _fail()
+            object.__setattr__(self, "authority_public_key_fingerprint", _digest(self.authority_public_key_fingerprint))
+        elif self.authority_tenant is not None or self.authority_id is not None or self.authority_public_key_fingerprint is not None:
+            _fail()
         if (self.expires_at <= self.measured_at
                 or (self.expires_at - self.measured_at).total_seconds() > MAX_EVIDENCE_LIFETIME_SECONDS
                 or type(self.signature) is not str or not _SIGNATURE.fullmatch(self.signature)):
@@ -260,6 +294,9 @@ class AttestedPrivacyEvidence:
     def canonical(self) -> dict[str, object]:
         return {
             "binding_digest": self.binding_digest,
+            "authority_id": self.authority_id,
+            "authority_public_key_fingerprint": self.authority_public_key_fingerprint,
+            "authority_tenant": self.authority_tenant,
             "evidence_digest": self.evidence_digest,
             "evidence_policy_digest": self.evidence_policy_digest,
             "evidence_reference": self.evidence_reference,
@@ -307,13 +344,14 @@ class PrivacyEvidenceAuthority:
             "measured_at": _instant(_time(measured_at)),
             "method_provenance_digest": binding.method_provenance_digest,
             "observed_value": _score(kind, observed_value),
+            "authority_id": None, "authority_public_key_fingerprint": None, "authority_tenant": None,
         }
         signature = self._sign(provisional)
         return AttestedPrivacyEvidence(**{**provisional, "kind": kind,
                                           "measured_at": _time(measured_at), "expires_at": _time(expires_at),
                                           "signature": signature})
 
-    def verifies(self, evidence: object) -> bool:
+    def verifies(self, evidence: object, *, at: datetime) -> bool:
         return (type(evidence) is AttestedPrivacyEvidence and evidence.issuer_key_id == self.key_id
                 and hmac.compare_digest(evidence.signature, self._sign(evidence.canonical())))
 
@@ -321,10 +359,15 @@ class PrivacyEvidenceAuthority:
 class PrivacyEvidencePublicVerifier:
     """Ed25519 public-key verifier; deliberately incapable of issuing evidence."""
 
-    __slots__ = ("_public_key", "key_id")
+    __slots__ = ("_public_key", "authority_id", "expires_at", "key_id", "public_key_fingerprint", "tenant")
 
-    def __init__(self, *, key_id: str, public_key_b64: str) -> None:
+    def __init__(self, *, tenant: str, key_id: str, authority_id: str, public_key_b64: str, expires_at: datetime) -> None:
+        self.tenant = _identifier(tenant)
         self.key_id = _identifier(key_id)
+        if type(authority_id) is not str or not _AUTHORITY_ID.fullmatch(authority_id):
+            _fail()
+        self.authority_id = authority_id
+        self.expires_at = _time(expires_at)
         if type(public_key_b64) is not str or len(public_key_b64) != 44:
             _fail()
         try:
@@ -332,18 +375,25 @@ class PrivacyEvidencePublicVerifier:
             if len(raw) != 32 or base64.b64encode(raw).decode("ascii") != public_key_b64:
                 _fail()
             self._public_key = Ed25519PublicKey.from_public_bytes(raw)
+            self.public_key_fingerprint = "sha256:" + hashlib.sha256(raw).hexdigest()
         except (ValueError, UnicodeError):
             _fail()
 
     def __repr__(self) -> str:
         return f"PrivacyEvidencePublicVerifier(key_id={self.key_id!r}, public_key=<redacted>)"
 
-    def verifies(self, evidence: object) -> bool:
+    def verifies(self, evidence: object, *, at: datetime) -> bool:
         if (type(evidence) is not AttestedPrivacyEvidence or evidence.issuer_key_id != self.key_id
                 or type(evidence.signature) is not str
                 or not evidence.signature.startswith("privacy-evidence-sig:v2:")):
             return False
         try:
+            moment = _time(at)
+            if (moment >= self.expires_at or evidence.expires_at > self.expires_at or evidence.expires_at <= moment
+                    or evidence.measured_at > moment or evidence.authority_tenant != self.tenant
+                    or evidence.authority_id != self.authority_id
+                    or evidence.authority_public_key_fingerprint != self.public_key_fingerprint):
+                return False
             signature = base64.urlsafe_b64decode(evidence.signature.split(":", 2)[2] + "==")
             if len(signature) != 64:
                 return False
@@ -464,13 +514,21 @@ def assess_privacy_evidence(*, decision_id: str, binding: PrivacyEvidenceBinding
             reasons.add(PrivacyEvidenceReason.MISSING_EVIDENCE)
             continue
         authority = authority_by_key.get(requirement.issuer_key_id)
-        if authority is None or not authority.verifies(item):
+        if authority is None or not authority.verifies(item, at=instant):
             reasons.add(PrivacyEvidenceReason.EVIDENCE_UNVERIFIED)
             continue
         if (item.binding_digest != binding.digest or item.evidence_policy_digest != policy.digest
                 or item.method_provenance_digest != binding.method_provenance_digest
                 or item.issuer_key_id != requirement.issuer_key_id):
             reasons.add(PrivacyEvidenceReason.BINDING_MISMATCH)
+            continue
+        if policy.attestation_profile is PrivacyEvidenceAttestationProfile.ED25519_V2:
+            if (type(authority) is not PrivacyEvidencePublicVerifier or item.authority_id != requirement.authority_id
+                    or item.authority_public_key_fingerprint != requirement.public_key_fingerprint):
+                reasons.add(PrivacyEvidenceReason.BINDING_MISMATCH)
+                continue
+        elif type(authority) is not PrivacyEvidenceAuthority:
+            reasons.add(PrivacyEvidenceReason.EVIDENCE_UNVERIFIED)
             continue
         if item.measured_at > instant:
             reasons.add(PrivacyEvidenceReason.EVIDENCE_TIME_INVALID)

@@ -29,6 +29,7 @@ from app.privacy_evidence_policy import (
     PPM,
     AttestedPrivacyEvidence,
     PrivacyEvidenceBinding,
+    PrivacyEvidenceAttestationProfile,
     PrivacyEvidenceKind,
     PrivacyEvidencePolicy,
     PrivacyEvidencePolicyError,
@@ -40,7 +41,7 @@ _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _IDENTIFIER = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}\Z")
 _REFERENCE = re.compile(r"evidence:v1:[A-Za-z0-9_-]{43}\Z")
 _SIGNATURE = re.compile(r"privacy-reference-sig:v2:[A-Za-z0-9_-]{86}\Z")
-_AUTHORITY = re.compile(r"privacy-authority:v1:[A-Za-z0-9_-]{43}\Z")
+_AUTHORITY = re.compile(r"privacy-authority:v2:[A-Za-z0-9_-]{43}\Z")
 _MAX_AUTHORITY_LIFETIME_SECONDS = 366 * 24 * 60 * 60
 
 
@@ -226,7 +227,7 @@ class PrivacyEvidenceAttestationAuthority:
         public_raw = private_key.public_key().public_bytes(serialization.Encoding.Raw,
                                                             serialization.PublicFormat.Raw)
         public_key_b64 = base64.b64encode(public_raw).decode("ascii")
-        authority_id = "privacy-authority:v1:" + base64.urlsafe_b64encode(hashlib.sha256(_canonical({
+        authority_id = "privacy-authority:v2:" + base64.urlsafe_b64encode(hashlib.sha256(_canonical({
             "schema": "privacy-evidence-authority-ed25519-v2", "tenant": tenant,
             "issuer_key_id": issuer, "expires_at": _instant(expires), "public_key": public_key_b64,
         })).digest()).decode("ascii").rstrip("=")
@@ -267,7 +268,10 @@ class PrivacyEvidenceAttestationAuthority:
             _fail()
         requirements = {requirement.kind: requirement for requirement in policy.requirements}
         requirement = requirements.get(kind)
-        if requirement is None or requirement.issuer_key_id != self.issuer_key_id:
+        if (policy.attestation_profile is not PrivacyEvidenceAttestationProfile.ED25519_V2
+                or requirement is None or requirement.issuer_key_id != self.issuer_key_id
+                or requirement.authority_id != self.authority_id
+                or requirement.public_key_fingerprint != self.policy_verifier.public_key_fingerprint):
             _fail()
         return kind, binding, policy, measured, expires
 
@@ -324,7 +328,9 @@ class PrivacyEvidenceAttestationAuthority:
     @property
     def policy_verifier(self) -> PrivacyEvidencePublicVerifier:
         """Public-key-only policy verification capability for this issuer."""
-        return PrivacyEvidencePublicVerifier(key_id=self.issuer_key_id, public_key_b64=self._public_key_b64)
+        return PrivacyEvidencePublicVerifier(tenant=self.tenant, key_id=self.issuer_key_id,
+                                             authority_id=self.authority_id, public_key_b64=self._public_key_b64,
+                                             expires_at=self.expires_at)
 
     def to_policy_evidence(self, reference: PrivacyEvidenceReference, *, at: datetime | None = None) -> AttestedPrivacyEvidence:
         """Re-verify a signed reference and emit a public-key-verifiable policy record."""
@@ -337,6 +343,8 @@ class PrivacyEvidenceAttestationAuthority:
             "kind": reference.kind.value, "measured_at": _instant(reference.measured_at),
             "method_provenance_digest": reference.binding.method_provenance_digest,
             "observed_value": reference.observed_value,
+            "authority_tenant": self.tenant, "authority_id": self.authority_id,
+            "authority_public_key_fingerprint": self.policy_verifier.public_key_fingerprint,
         }
         signature = _signature(b"privacy-evidence-v2:", self._private_key, provisional,
                                label="privacy-evidence-sig:v2:")
