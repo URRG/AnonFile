@@ -3,7 +3,7 @@
 Secure processing foundation for a future data-intermediary release-assurance product.
 The target workflow is enterprise source data → intermediary processing and qualification → explicitly approved buyer delivery.
 
-## Current status: M3, synthetic development only
+## Current status: M4, synthetic development only
 
 This is **not production-ready** and must not receive customer data. The current rules do not establish anonymity or data-sale rights. There is no approved release, candidate-output API, buyer download, signature assurance or invented privacy/utility score. All release output is withheld; approval requests fail closed.
 
@@ -15,11 +15,13 @@ M2b adds immutable policy snapshots, explicit supplier rights/purpose/recipient 
 
 M3 adds a processor-only local execution step. It retains an exact transformed candidate only as an encrypted private record, while the API exposes bounded metadata such as digest, byte count and aggregate transformation ledger. A reviewer can request an aggregate-only residual scan and a non-authorizing qualification record bound to the candidate, policy, rights, recipient and purpose. Clean rules-only scans remain `INSUFFICIENT_EVIDENCE`; detected residuals and failed qualification are `QUARANTINED`. There is still no candidate download/preview, approval, buyer authorization or delivery capability.
 
+M4 adds strict contracts for pluggable detector evidence, policy-derived transformation obligations and source-free benchmark evidence. Detector outputs must be aggregate-only and explicitly mapped to the policy taxonomy; unsupported labels, coverage gaps and adapter failures fail closed. Benchmark evidence is always observational and cannot authorize a release. These are domain foundations only: no production detector runtime is wired in this increment.
+
 Default memory storage loses state on restart and is single-worker only. Optional SQLite is a bounded, local development adapter, not a production database or KMS. Expiry is enforced on access after at most one hour; cleanup is not secure deletion or backup erasure. JWT verification is not an OIDC login system, online revocation or automatic key rotation. Set `ANONFLOW_ENV` to anything other than `development` and startup is refused. Synthetic-use restrictions are an operational prerequisite, not a classifier that can recognize real data.
 
 ## Local setup
 
-Use Python 3.12 and Node 22. Copy `.env.example` to an ignored `.env` and configure locally generated random tokens. No credentials are supplied. See the [base development guide](docs/development-m1.md), [M2a setup and limitations](docs/development-m2.md), [M2b control-plane guide](docs/development-m2b.md), and the [M3 private-candidate contract](docs/implementation-m3.md).
+Use Python 3.12 and Node 22. Copy `.env.example` to an ignored `.env` and configure locally generated random tokens. No credentials are supplied. See the [base development guide](docs/development-m1.md), [M2a setup and limitations](docs/development-m2.md), [M2b control-plane guide](docs/development-m2b.md), [M3 private-candidate contract](docs/implementation-m3.md), and the [M4 evidence contract](docs/implementation-m4.md).
 
 With Docker Compose installed, `docker compose up --build` serves localhost ports 3000 (web) and 8000 (API). The default stack deliberately excludes the previous unintegrated database, storage and sleeping-worker scaffolding. No existing infrastructure volumes are deleted. Those capabilities remain future work.
 
@@ -33,4 +35,4 @@ Without Docker, run the API and Vite as described in the development guide. The 
 4. Rights and recipient/purpose controls, immutable approved artifacts, independent signed approval and recipient-bound delivery.
 5. Paid design-partner pilots, external security testing and measurable acceptance criteria.
 
-Do not interpret historical architecture documents as implemented controls. [M1 contract](docs/implementation-m1.md) is historical; [M2a contract](docs/implementation-m2.md), [M2b control-plane contract](docs/implementation-m2b.md), and [M3 contract](docs/implementation-m3.md) describe the current increments. Docker runtime verification remains outstanding on the implementation host; native tests do not substitute for that gate.
+Do not interpret historical architecture documents as implemented controls. [M1 contract](docs/implementation-m1.md) is historical; [M2a contract](docs/implementation-m2.md), [M2b control-plane contract](docs/implementation-m2b.md), [M3 contract](docs/implementation-m3.md), and [M4 contract](docs/implementation-m4.md) describe the current increments. Docker runtime verification remains outstanding on the implementation host; native tests do not substitute for that gate.
