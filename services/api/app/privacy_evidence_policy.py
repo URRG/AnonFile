@@ -315,38 +315,6 @@ class PrivacyEvidenceAuthority:
                 and hmac.compare_digest(evidence.signature, self._sign(evidence.canonical())))
 
 
-class PrivacyEvidenceVerifier:
-    """Verification-only HMAC capability for one policy evidence issuer.
-
-    Unlike :class:`PrivacyEvidenceAuthority`, this object deliberately has no
-    ``issue`` or signing method.  A policy assessor needs only this minimal
-    capability; trusted workers retain issuance behind their own boundary.
-    """
-
-    __slots__ = ("_key", "key_id")
-
-    def __init__(self, *, key_id: str, secret: bytes) -> None:
-        self.key_id = _identifier(key_id)
-        if type(secret) is not bytes or not 32 <= len(secret) <= 64:
-            _fail()
-        self._key = secret
-
-    def __repr__(self) -> str:
-        return f"PrivacyEvidenceVerifier(key_id={self.key_id!r}, secret=<redacted>)"
-
-    def verifies(self, evidence: object) -> bool:
-        if (type(evidence) is not AttestedPrivacyEvidence or evidence.issuer_key_id != self.key_id
-                or type(evidence.signature) is not str or not _SIGNATURE.fullmatch(evidence.signature)):
-            return False
-        try:
-            expected = hmac.new(self._key, b"privacy-evidence-v1:" + _canonical(evidence.canonical()),
-                                hashlib.sha256).digest()
-            supplied = base64.urlsafe_b64decode(evidence.signature.split(":", 2)[2] + "=")
-            return hmac.compare_digest(supplied, expected)
-        except (ValueError, UnicodeError, PrivacyEvidencePolicyError):
-            return False
-
-
 @dataclass(frozen=True, slots=True)
 class PrivacyEvidenceDecision:
     """Immutable source-safe outcome, explicitly without release authority."""
@@ -399,22 +367,21 @@ class PrivacyEvidenceDecision:
         return {**self.canonical(), "digest": self.digest}
 
 
-def _authority_map(authorities: Iterable[PrivacyEvidenceAuthority | PrivacyEvidenceVerifier]) -> dict[str, PrivacyEvidenceAuthority | PrivacyEvidenceVerifier]:
+def _authority_map(authorities: Iterable[PrivacyEvidenceAuthority]) -> dict[str, PrivacyEvidenceAuthority]:
     if isinstance(authorities, (str, bytes)):
         _fail()
     try:
         values = tuple(authorities)
     except TypeError:
         _fail()
-    if (any(type(value) not in {PrivacyEvidenceAuthority, PrivacyEvidenceVerifier} for value in values)
-            or len({value.key_id for value in values}) != len(values)):
+    if any(type(value) is not PrivacyEvidenceAuthority for value in values) or len({value.key_id for value in values}) != len(values):
         _fail()
     return {value.key_id: value for value in values}
 
 
 def assess_privacy_evidence(*, decision_id: str, binding: PrivacyEvidenceBinding,
                             policy: PrivacyEvidencePolicy, evidence: Iterable[AttestedPrivacyEvidence],
-                            authorities: Iterable[PrivacyEvidenceAuthority | PrivacyEvidenceVerifier], at: datetime) -> PrivacyEvidenceDecision:
+                            authorities: Iterable[PrivacyEvidenceAuthority], at: datetime) -> PrivacyEvidenceDecision:
     """Apply exact signed evidence policy without authorizing a release.
 
     Unverifiable or mismatched evidence quarantines.  Missing, stale, future,

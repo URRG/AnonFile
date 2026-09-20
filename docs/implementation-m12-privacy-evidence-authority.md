@@ -12,10 +12,11 @@ age window, all required issuers, and thresholds).
 
 References contain no source bytes, candidate bytes, field names, paths,
 subjects, recipient names, release handles, credentials, or the HMAC key.
-`to_policy_evidence` re-verifies the reference and materialises the existing
-`AttestedPrivacyEvidence` type; its `policy_verifier` is a verification-only
-capability (it deliberately has no issuance/signing API) supplied to
-`assess_privacy_evidence`.  This preserves the M11 policy's fixed outcome:
+`assess_policy` keeps reference verification, transient policy attestation,
+and policy assessment inside the tenant authority boundary.  It returns only
+the existing policy decision: no verifier, key-bearing object, signing
+capability, or separately usable policy attestation is exposed.  This
+preserves the M11 policy's fixed outcome:
 even a complete, valid set is only `INSUFFICIENT_EVIDENCE` and requires an
 independent release authorization.
 

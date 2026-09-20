@@ -36,7 +36,7 @@ def binding(method=DIGESTS[5]):
 
 def authority(kind=PrivacyEvidenceKind.UTILITY, *, tenant="tenant-a", secret=b"s" * 32):
     return PrivacyEvidenceAttestationAuthority(tenant=tenant, issuer_key_id="issuer-" + kind.value.lower(),
-                                               expires_at=NOW + timedelta(days=90), _secret=secret)
+                                               expires_at=NOW + timedelta(days=90), secret=secret)
 
 
 def policy(issuer, method=DIGESTS[5]):
@@ -68,12 +68,11 @@ def test_issues_verifies_and_adapts_a_complete_source_safe_reference_for_policy(
     assert issuer.verifies(item, at=NOW)
     assert item.authority_id.startswith("privacy-authority:v1:")
     assert item.digest.startswith("sha256:")
-    policy_item = issuer.to_policy_evidence(item, at=NOW)
-    assert issuer.policy_verifier.verifies(policy_item)
-    assert type(issuer.policy_verifier).__name__ == "PrivacyEvidenceVerifier"
-    with pytest.raises(AttributeError):
-        getattr(issuer.policy_verifier, "issue")
-    assert policy_item.kind is PrivacyEvidenceKind.UTILITY
+    decision = issuer.assess_policy(binding=item.binding, policy=item.policy, references=(item,), at=NOW)
+    assert decision.outcome is PrivacyEvidenceOutcome.INSUFFICIENT_EVIDENCE
+    assert not hasattr(issuer, "policy_verifier")
+    assert not hasattr(issuer, "to_policy_evidence")
+    assert not hasattr(issuer, "_key") and not hasattr(issuer, "_secret")
     record = json.dumps(item.to_record(), sort_keys=True)
     for forbidden in ("secret", "b'", "alice@example.test", "Spirit Airlines", "recipient-name"):
         assert forbidden not in record
@@ -94,10 +93,8 @@ def test_verification_only_capability_cannot_mint_or_accept_arbitrary_five_kind_
         measured_at=NOW, expires_at=NOW + timedelta(hours=2),
         signature="privacy-evidence-sig:v1:" + "A" * 43,
     ) for index, kind in enumerate(PrivacyEvidenceKind))
-    assert all(not issuers[item.kind].policy_verifier.verifies(item) for item in forged)
-    decision = assess_privacy_evidence(
-        decision_id="forged-evidence", binding=current_binding, policy=current_policy, evidence=forged,
-        authorities=tuple(item.policy_verifier for item in issuers.values()), at=NOW)
+    decision = issuers[PrivacyEvidenceKind.UTILITY].assess_policy(
+        binding=current_binding, policy=current_policy, references=forged, at=NOW)
     assert decision.outcome is PrivacyEvidenceOutcome.QUARANTINED
     assert PrivacyEvidenceReason.EVIDENCE_UNVERIFIED in decision.reasons
 
@@ -107,16 +104,16 @@ def test_adapter_output_is_directly_consumable_by_existing_policy_contract():
                for index, kind in enumerate(PrivacyEvidenceKind)}
     current_binding = binding()
     current_policy = policy(issuers[PrivacyEvidenceKind.UTILITY], current_binding.method_provenance_digest)
-    records = tuple(issuers[kind].to_policy_evidence(
-        issuers[kind].issue(kind=kind, evidence_reference="evidence:v1:" + chr(65 + index) * 43,
-                            evidence_digest="sha256:" + chr(97 + index) * 64,
-                            binding=current_binding, policy=current_policy,
-                            observed_value=(950_000 if kind in {PrivacyEvidenceKind.UTILITY, PrivacyEvidenceKind.BENCHMARK}
-                                            else 10 if kind is PrivacyEvidenceKind.DISCLOSURE_RISK else 0),
-                            measured_at=NOW, expires_at=NOW + timedelta(hours=2), at=NOW), at=NOW)
+    records = tuple(issuers[kind].issue(
+        kind=kind, evidence_reference="evidence:v1:" + chr(65 + index) * 43,
+        evidence_digest="sha256:" + chr(97 + index) * 64,
+        binding=current_binding, policy=current_policy,
+        observed_value=(950_000 if kind in {PrivacyEvidenceKind.UTILITY, PrivacyEvidenceKind.BENCHMARK}
+                        else 10 if kind is PrivacyEvidenceKind.DISCLOSURE_RISK else 0),
+        measured_at=NOW, expires_at=NOW + timedelta(hours=2), at=NOW)
         for index, kind in enumerate(PrivacyEvidenceKind))
-    decision = assess_privacy_evidence(decision_id="m12-decision", binding=current_binding, policy=current_policy,
-                                       evidence=records, authorities=tuple(item.policy_verifier for item in issuers.values()), at=NOW)
+    decision = issuers[PrivacyEvidenceKind.UTILITY].assess_policy(
+        binding=current_binding, policy=current_policy, references=records, at=NOW)
     assert decision.outcome is PrivacyEvidenceOutcome.INSUFFICIENT_EVIDENCE
     assert decision.reasons == (PrivacyEvidenceReason.INDEPENDENT_RELEASE_AUTHORIZATION_REQUIRED,)
 
@@ -130,8 +127,9 @@ def test_tampering_complete_scope_or_authority_identity_fails_closed(field, valu
     item = reference(issuer)
     altered = replace(item, **{field: value})
     assert not issuer.verifies(altered, at=NOW)
-    with pytest.raises(PrivacyEvidenceAuthorityError):
-        issuer.to_policy_evidence(altered, at=NOW)
+    decision = issuer.assess_policy(binding=item.binding, policy=item.policy, references=(altered,), at=NOW)
+    assert decision.outcome is PrivacyEvidenceOutcome.QUARANTINED
+    assert PrivacyEvidenceReason.EVIDENCE_UNVERIFIED in decision.reasons
 
 
 @pytest.mark.parametrize(("field", "value"), [
@@ -183,12 +181,12 @@ def test_foreign_tenant_secret_rotation_expiry_and_subclasses_cannot_verify_or_i
     assert not issuer.verifies(item, at=NOW + timedelta(days=91))
     with pytest.raises(PrivacyEvidenceAuthorityError):
         PrivacyEvidenceAttestationAuthority(tenant="tenant-a", issuer_key_id="issuer-utility",
-                                             expires_at=NOW - timedelta(seconds=1), _secret=b"s" * 32)
+                                             expires_at=NOW - timedelta(seconds=1), secret=b"s" * 32)
 
     # Authority expiry is part of the opaque key commitment, so changing the
     # authority configuration cannot relabel an older attestation.
     same_key_new_expiry = PrivacyEvidenceAttestationAuthority(
-        tenant="tenant-a", issuer_key_id="issuer-utility", expires_at=NOW + timedelta(days=91), _secret=b"s" * 32)
+        tenant="tenant-a", issuer_key_id="issuer-utility", expires_at=NOW + timedelta(days=91), secret=b"s" * 32)
     assert same_key_new_expiry.authority_id != issuer.authority_id
     assert not same_key_new_expiry.verifies(item, at=NOW)
 
@@ -217,7 +215,7 @@ def test_wrong_policy_issuer_or_time_window_cannot_be_issued_and_reference_never
                      measured_at=NOW + timedelta(seconds=1), expires_at=NOW + timedelta(hours=1), at=NOW)
     item = reference(issuer)
     decision = assess_privacy_evidence(decision_id="raw-reference", binding=current_binding, policy=current_policy,
-                                       evidence=(item,), authorities=(issuer.policy_verifier,), at=NOW)
+                                       evidence=(item,), authorities=(), at=NOW)
     assert decision.outcome is PrivacyEvidenceOutcome.QUARANTINED
     assert PrivacyEvidenceReason.EVIDENCE_UNVERIFIED in decision.reasons
 
@@ -246,7 +244,7 @@ def test_default_clock_is_normalized_to_seconds_for_active_issue_and_verify_path
     instant = datetime.now(UTC).replace(microsecond=0)
     issuer = PrivacyEvidenceAttestationAuthority(
         tenant="tenant-live", issuer_key_id="issuer-utility", expires_at=instant + timedelta(minutes=10),
-        _secret=b"z" * 32)
+        secret=b"z" * 32)
     current_binding = PrivacyEvidenceBinding(
         candidate_artifact_digest=DIGESTS[0], processing_policy_digest=DIGESTS[1], rights_digest="c" * 64,
         recipient_reference=DIGESTS[2], purpose_code="external-model-training",
