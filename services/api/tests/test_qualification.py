@@ -75,6 +75,14 @@ def test_over_threshold_residual_quarantines():
     assert result.reasons == (QualificationReason.THRESHOLD_EXCEEDED,)
 
 
+def test_known_threshold_violation_quarantines_even_when_other_categories_are_missing():
+    measurements = (CategoryMeasurement("PII", 1, 100),)
+    result = decision(report=report(measurements=measurements))
+    assert result.outcome is QualificationOutcome.QUARANTINED
+    assert result.reasons == (QualificationReason.MISSING_CATEGORY_MEASUREMENT,
+                              QualificationReason.THRESHOLD_EXCEEDED)
+
+
 def test_stale_future_and_expired_inputs_fail_closed():
     stale = decision(report=report(evaluated_at=NOW - timedelta(seconds=3601)))
     assert stale.outcome is QualificationOutcome.INSUFFICIENT_EVIDENCE

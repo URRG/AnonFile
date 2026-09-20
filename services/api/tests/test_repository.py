@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from fastapi import HTTPException
 
+from app.candidate import CandidateArtifact, PayloadKind, SchemaContract
 from app.durable_repository import DurableStore
 from app.repository import DevelopmentStore
 
@@ -41,13 +42,34 @@ def run_dependencies(store, *, rights_expiry=None):
         rights["expires_at"] = rights_expiry
     rights["payload"] = {"digest": "r" * 64}
     policy = control("policy_snapshot", "policy-1")
-    policy["payload"] = {"digest": "sha256:" + "p" * 64}
+    policy["payload"] = {"digest": "sha256:" + "b" * 64}
     store.add_control(rights, "operator")
     store.add_control(policy, "operator")
     run = control("processing_run", "run-1")
     run["payload"].update({"dataset_id": "d1", "rights_profile_id": "rights-1", "policy_snapshot_id": "policy-1",
-                           "rights_digest": "r" * 64, "policy_digest": "sha256:" + "p" * 64})
+                            "rights_digest": "r" * 64, "policy_digest": "sha256:" + "b" * 64,
+                            "source_digest": "sha256:" + "a" * 64, "state": "REGISTERED", "attempts": 0,
+                            "events": [{"sequence": 1, "state": "REGISTERED", "action": "REGISTERED",
+                                        "occurred_at": TIME, "attempt": 0}]})
     return run, rights, policy
+
+
+def private_candidate(run, dataset, identifier="candidate-1"):
+    """A valid synthetic private artifact for repository lifecycle tests."""
+    body = "SYNTHETIC-QUARANTINED-CANDIDATE"
+    schema = SchemaContract.from_value(body, kind=PayloadKind.TEXT)
+    artifact = CandidateArtifact.create(run_id=run["id"], input_digest=run["payload"]["source_digest"],
+                                         policy_digest=run["payload"]["policy_digest"], transformed=body,
+                                         schema=schema)
+    metadata = artifact.metadata
+    return {"id": identifier, "kind": "private_candidate", "tenant": "tenant-a", "created_at": TIME,
+            "expires_at": dataset["expires_at"], "size_bytes": 0,
+            "payload": {"run_id": metadata.run_id, "input_digest": metadata.input_digest,
+                        "policy_digest": metadata.policy_digest, "artifact_digest": metadata.artifact_digest,
+                        "schema_digest": metadata.schema_digest, "schema_descriptor": schema.private_descriptor,
+                        "evaluation_schema_digest": None, "payload_kind": metadata.payload_kind.value,
+                        "media_type": metadata.media_type, "byte_count": metadata.byte_count, "ledger": [],
+                        "body": artifact.materialize_for_private_worker()}}
 
 
 @pytest.fixture(params=["memory", "sqlite"])
@@ -452,6 +474,47 @@ def test_control_records_are_detached_tenant_scoped_and_idempotent(store):
     fails(409, store.register_run_control, conflict, "operator")
 
 
+def test_digest_bound_nested_failed_residual_evidence_quarantines_run(store):
+    """Current writers nest the status in the immutable report, not its wrapper."""
+    run = control("processing_run", "run-evaluation")
+    run["payload"] = {"state": "CANDIDATE", "attempts": 1,
+                      "policy_digest": "sha256:" + "p" * 64, "rights_digest": "r" * 64,
+                      "events": [{"sequence": 1, "state": "CANDIDATE", "action": "CANDIDATE_CREATED", "attempt": 1}]}
+    private = control("private_candidate", "candidate-evaluation")
+    private["payload"] = {"run_id": run["id"], "artifact_digest": "sha256:" + "c" * 64}
+    evidence = control("evaluation_report", "evaluation-failed")
+    evidence["payload"] = {
+        "run_id": run["id"], "candidate_digest": private["payload"]["artifact_digest"],
+        "policy_digest": run["payload"]["policy_digest"], "rights_digest": run["payload"]["rights_digest"],
+        "report": {"evidence_status": "FAILS_PROFILE", "digest": "sha256:" + "e" * 64},
+    }
+    store.add_control(run, "operator")
+    store.add_control(private, "processor")
+    persisted, revised = store.record_evaluation(run["id"], "tenant-a", evidence, "reviewer")
+    assert persisted["payload"]["report"]["evidence_status"] == "FAILS_PROFILE"
+    assert revised["payload"]["state"] == "QUARANTINED"
+
+
+def test_ambiguous_evaluation_status_cannot_suppress_quarantine(store):
+    run = control("processing_run", "run-ambiguous")
+    run["payload"] = {"state": "CANDIDATE", "attempts": 1,
+                      "policy_digest": "sha256:" + "p" * 64, "rights_digest": "r" * 64,
+                      "events": [{"sequence": 1, "state": "CANDIDATE", "action": "CANDIDATE_CREATED", "attempt": 1}]}
+    private = control("private_candidate", "candidate-ambiguous")
+    private["payload"] = {"run_id": run["id"], "artifact_digest": "sha256:" + "c" * 64}
+    evidence = control("evaluation_report", "evaluation-ambiguous")
+    evidence["payload"] = {
+        "run_id": run["id"], "candidate_digest": private["payload"]["artifact_digest"],
+        "policy_digest": run["payload"]["policy_digest"], "rights_digest": run["payload"]["rights_digest"],
+        "evidence_status": "INSUFFICIENT_EVIDENCE",
+        "report": {"evidence_status": "FAILS_PROFILE", "digest": "sha256:" + "e" * 64},
+    }
+    store.add_control(run, "operator")
+    store.add_control(private, "processor")
+    fails(503, store.record_evaluation, run["id"], "tenant-a", evidence, "reviewer")
+    assert store.get_control("processing_run", run["id"], "tenant-a")["payload"]["state"] == "CANDIDATE"
+
+
 def test_durable_controls_restart_encrypt_and_detect_silent_deletion(tmp_path):
     path = tmp_path / "source.db"
     store = DurableStore(str(path), KEY)
@@ -533,3 +596,52 @@ def test_rights_expiry_invalidates_dependent_run_before_restart(tmp_path, monkey
         assert reopened.verify_audit("tenant-a")
     finally:
         reopened.close()
+
+
+def test_claimed_run_reservation_cannot_block_rights_expiry_or_invalidation(store, monkeypatch):
+    run, rights, _ = run_dependencies(store, rights_expiry=time.time() + 30)
+    store.register_run_control(run, "operator")
+    # The claim reserves exactly STARTED + terminal lifecycle evidence.  Fill
+    # the audit budget to that exact boundary to exercise the former deadlock.
+    store.MAX_AUDIT_EVENTS = store.MAX_AUDIT_EVENTS_PER_TENANT = 7
+    store.claim_processing_run("run-1", "tenant-a", "processor")
+    assert len(store.audit_events("tenant-a")) == 5
+    monkeypatch.setattr("app.repository.time.time", lambda: rights["expires_at"] + 1)
+    assert store.purge() == 1
+    fails(404, store.get_control, "processing_run", "run-1", "tenant-a")
+    assert [event["action"] for event in store.audit_events("tenant-a")[-3:]] == [
+        "processing_run.updated", "processing_run.invalidated", "rights_profile.expired"]
+    assert len(store.audit_events("tenant-a")) == 7
+    assert store.verify_audit("tenant-a")
+
+
+def test_stale_running_run_recovers_to_terminal_failure_and_rejects_late_completion(store):
+    run, _, _ = run_dependencies(store)
+    store.register_run_control(run, "operator")
+    claimed, dataset = store.claim_processing_run("run-1", "tenant-a", "processor")
+    fails(409, store.recover_stale_processing_run, "run-1", "tenant-a", "operator")
+    # A zero-length lease is test-only: the production default is fifteen
+    # minutes. Recovery is terminal, never a requeue of an old worker claim.
+    store.RUN_LEASE_SECONDS = 0
+    recovered = store.recover_stale_processing_run("run-1", "tenant-a", "operator")
+    assert recovered["payload"]["state"] == "FAILED"
+    assert recovered["payload"]["audit_reservation"] == 0
+    assert recovered["payload"]["events"][-1]["error_code"] == "LEASE_EXPIRED"
+    fails(409, store.complete_processing_run, "run-1", "tenant-a", private_candidate(claimed, dataset), "processor")
+    assert [event["action"] for event in store.audit_events("tenant-a")[-2:]] == [
+        "processing_run.updated", "processing_run.updated"]
+    assert store.verify_audit("tenant-a")
+
+
+def test_quarantine_persists_private_evidence_without_marking_a_candidate_available(store):
+    run, _, _ = run_dependencies(store)
+    store.register_run_control(run, "operator")
+    claimed, dataset = store.claim_processing_run("run-1", "tenant-a", "processor")
+    quarantined = store.quarantine_processing_run("run-1", "tenant-a", private_candidate(claimed, dataset),
+                                                   "POLICY_BLOCKED", "processor")
+    assert quarantined["payload"]["state"] == "QUARANTINED"
+    assert quarantined["payload"]["events"][-1]["error_code"] == "POLICY_BLOCKED"
+    private, current = store.private_candidate_for_run("run-1", "tenant-a")
+    assert private["payload"]["run_id"] == "run-1" and current["payload"]["state"] == "QUARANTINED"
+    fails(409, store.complete_processing_run, "run-1", "tenant-a", private_candidate(claimed, dataset, "candidate-2"), "processor")
+    assert store.verify_audit("tenant-a")

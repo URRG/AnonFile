@@ -15,7 +15,8 @@ import re
 import unicodedata
 from typing import Any
 
-from app.contracts import Finding, PayloadError, ProcessingResult, Span
+from app.candidate import LedgerAction
+from app.contracts import ActualOutputOperation, Finding, PayloadError, ProcessingResult, Span
 
 MAX_BYTES = 2_000_000
 MAX_RECORDS = 10_000
@@ -218,17 +219,22 @@ def process_payload(*, content: str | None = None, records: list[dict] | None = 
     if records is not None:
         _validate_records(records)
     counts: Counter[tuple[str, str]] = Counter()
+    operations: Counter[tuple[str, LedgerAction]] = Counter()
     aliases: dict[tuple[str, str], str] = {}
     changed_spans = 0
     redacted_fields = 0
 
-    def marker(kind: str, original: str) -> str:
+    def marker(kind: str, original: str) -> tuple[str, LedgerAction]:
         if mode == "external_anonymized" or kind in {"CREDENTIAL", "PAYMENT_SECRET"}:
-            return f"[REDACTED_{kind}]"
+            return f"[REDACTED_{kind}]", LedgerAction.REDACT
         key = (kind, original)  # exact original; never case-fold identities
         if key not in aliases:
             aliases[key] = f"[{kind}_{len(aliases) + 1:04d}]"
-        return aliases[key]
+        return aliases[key], LedgerAction.PSEUDONYMIZE
+
+    def record(kind: str, severity: str, action: LedgerAction) -> None:
+        counts[(kind, severity)] += 1
+        operations[(kind, action)] += 1
 
     def transform_text(text: str) -> str:
         nonlocal changed_spans
@@ -237,9 +243,10 @@ def process_payload(*, content: str | None = None, records: list[dict] | None = 
         pieces: list[str] = []
         position = 0
         for span in spans:
-            pieces.extend((text[position:span.start], marker(span.entity_type, text[span.start:span.end])))
+            replacement, action = marker(span.entity_type, text[span.start:span.end])
+            pieces.extend((text[position:span.start], replacement))
             position = span.end
-            counts[(span.entity_type, span.severity)] += 1
+            record(span.entity_type, span.severity, action)
             changed_spans += 1
         pieces.append(text[position:])
         return "".join(pieces)
@@ -263,15 +270,19 @@ def process_payload(*, content: str | None = None, records: list[dict] | None = 
                 for span in detect_text(value):
                     if _rank(span.entity_type, span.severity) > _rank(kind, severity):
                         kind, severity = span.entity_type, span.severity
-            counts[(kind, severity)] += 1
             redacted_fields += 1
-            return marker(kind, value) if type(value) is str else None
+            if type(value) is str:
+                replacement, action = marker(kind, value)
+                record(kind, severity, action)
+                return replacement
+            record(kind, severity, LedgerAction.NULLIFY)
+            return None
         if type(value) is str:
             return transform_text(value)
         if type(value) in (int, float) and detect_text(str(value)):
             spans = detect_text(str(value))
             for span in spans:
-                counts[(span.entity_type, span.severity)] += 1
+                record(span.entity_type, span.severity, LedgerAction.NULLIFY)
             redacted_fields += 1
             return None
         return value
@@ -283,6 +294,9 @@ def process_payload(*, content: str | None = None, records: list[dict] | None = 
     if redacted_fields:
         limitations.append("Sensitive numeric and boolean scalar fields are replaced with null; downstream schema validation is required.")
     findings = tuple(Finding(kind, severity, count) for (kind, severity), count in sorted(counts.items()))
+    actual_operations = tuple(ActualOutputOperation(kind, action, count)
+                              for (kind, action), count in sorted(operations.items(), key=lambda item: (item[0][0], item[0][1].value)))
     return ProcessingResult(output=output, findings=findings, limitations=tuple(limitations),
+                            actual_operations=actual_operations,
                             critical_detected=any(f.severity == "critical" for f in findings),
                             changed_spans=changed_spans, redacted_fields=redacted_fields)

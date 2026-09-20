@@ -42,7 +42,8 @@ def detector(result):
 
 def test_zero_findings_never_claims_pass_and_binds_exact_candidate_and_config():
     report = evaluate_candidate(
-        RECORDS, metadata=metadata(), detector=detector(DetectorResult({}, scanned_units=2)),
+        RECORDS, metadata=metadata(), detector=detector(DetectorResult({}, scanned_units=2,
+                                                                        assessed_categories=frozenset({"PII", "PAYMENT"}))),
         detector_identity=DetectorIdentity("rules-evaluator", CONFIG), profile=profile(),
     )
     assert report.evidence_status is EvidenceStatus.INSUFFICIENT_EVIDENCE
@@ -71,6 +72,20 @@ def test_residuals_abstentions_coverage_and_utility_failure_fail_profile():
     )
     assert structural.evidence_status is EvidenceStatus.FAILS_PROFILE
     assert any(not check.passed for check in structural.utility_checks)
+
+
+def test_unassessed_required_categories_are_never_reported_as_clean_or_complete():
+    report = evaluate_candidate(
+        RECORDS, metadata=metadata(), detector=detector(DetectorResult({"PII": 0}, scanned_units=2)),
+        detector_identity=DetectorIdentity("rules-evaluator", CONFIG), profile=profile(),
+    )
+    record = report.to_record()
+    assert report.evidence_status is EvidenceStatus.FAILS_PROFILE
+    assert report.assessed_categories == ("PII",)
+    assert report.category_coverage_percent == 50
+    assert record["residual_counts"] == {"PII": 0}
+    assert "PAYMENT" not in record["residual_counts"]
+    assert record["category_coverage_percent"] == 50
 
 
 @pytest.mark.parametrize("change", [
@@ -123,6 +138,10 @@ def test_detector_result_and_profile_reject_bad_categories_duplicates_and_boolea
     with pytest.raises(EvaluationError):
         DetectorResult({"PII*": 1}, scanned_units=1)
     with pytest.raises(EvaluationError):
+        DetectorResult({"PII": 1}, scanned_units=1, assessed_categories=frozenset({"PAYMENT"}))
+    with pytest.raises(EvaluationError):
+        DetectorResult({}, scanned_units=1, assessed_categories={"PII"})
+    with pytest.raises(EvaluationError):
         EvaluationProfile.create(profile_id="p", version="v1", required_categories=["PII", "PII"])
     with pytest.raises(EvaluationError):
         EvaluationProfile.create(profile_id="p", version="v1", required_categories="PII")
@@ -133,9 +152,11 @@ def test_detector_result_and_profile_reject_bad_categories_duplicates_and_boolea
 
 
 def test_report_digest_changes_on_detector_config_but_contains_no_values():
-    first = evaluate_candidate(RECORDS, metadata=metadata(), detector=detector(DetectorResult({}, scanned_units=2)),
+    first = evaluate_candidate(RECORDS, metadata=metadata(), detector=detector(DetectorResult({}, scanned_units=2,
+                                                                                 assessed_categories=frozenset({"PII", "PAYMENT"}))),
                                detector_identity=DetectorIdentity("rules-evaluator", CONFIG), profile=profile())
-    second = evaluate_candidate(RECORDS, metadata=metadata(), detector=detector(DetectorResult({}, scanned_units=2)),
+    second = evaluate_candidate(RECORDS, metadata=metadata(), detector=detector(DetectorResult({}, scanned_units=2,
+                                                                                  assessed_categories=frozenset({"PII", "PAYMENT"}))),
                                 detector_identity=DetectorIdentity("rules-evaluator", "sha256:" + "d" * 64), profile=profile())
     assert first.digest != second.digest
     serialized = str(second.to_record())
@@ -145,6 +166,7 @@ def test_report_digest_changes_on_detector_config_but_contains_no_values():
 def test_text_candidate_is_evaluable_without_a_source_or_schema():
     candidate = "synthetic transformed text"
     item = CandidateMetadata(artifact_digest=candidate_digest(candidate), media_type="text/plain", expected_record_count=1)
-    result = evaluate_candidate(candidate, metadata=item, detector=detector(DetectorResult({}, scanned_units=1)),
+    result = evaluate_candidate(candidate, metadata=item, detector=detector(DetectorResult({}, scanned_units=1,
+                                                                                              assessed_categories=frozenset({"PII", "PAYMENT"}))),
                                 detector_identity=DetectorIdentity("rules-evaluator", CONFIG), profile=profile())
     assert result.evidence_status is EvidenceStatus.INSUFFICIENT_EVIDENCE

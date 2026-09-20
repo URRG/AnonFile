@@ -32,6 +32,27 @@ def detached(value):
     return json.loads(encoded(value))
 
 
+def _evaluation_evidence_status(payload):
+    """Return the digest-bound report status, rejecting ambiguous metadata.
+
+    The canonical value is ``report.evidence_status`` because it belongs to the
+    immutable residual report.  A top-level mirror is accepted only when it is
+    identical, which keeps future writers compatible without allowing a stale
+    or forged wrapper field to suppress quarantine.
+    """
+    try:
+        report = payload["report"]
+        status = report["evidence_status"]
+    except (KeyError, TypeError):
+        raise unavailable() from None
+    if status not in {"INSUFFICIENT_EVIDENCE", "FAILS_PROFILE"}:
+        raise unavailable()
+    mirrored = payload.get("evidence_status")
+    if mirrored is not None and mirrored != status:
+        raise unavailable()
+    return status
+
+
 class DevelopmentStore:
     MAX_DATASETS = 100
     MAX_DATASETS_PER_TENANT = 25
@@ -45,6 +66,10 @@ class DevelopmentStore:
     MAX_CONTROLS = 1_000
     MAX_CONTROLS_PER_TENANT = 250
     MAX_CONTROL_BYTES = 2_000_000
+    # A claimed run has no durable worker lease.  Treat an abandoned claim as a
+    # terminal failure after this bounded interval rather than allowing an old
+    # worker to complete it indefinitely.  A later retry must be a new run.
+    RUN_LEASE_SECONDS = 15 * 60
     # ``private_candidate`` is deliberately a private worker artifact, never a
     # public control-plane resource.  It shares the encrypted durable-record
     # envelope so plaintext never reaches SQLite, but has no GET/list route.
@@ -135,6 +160,11 @@ class DevelopmentStore:
     def _purge(self):
         expired = [d for d in self.datasets.values() if d["expires_at"] <= time.time()]
         for record in expired:
+            # Invalidate first: a RUNNING child may have reserved the exact
+            # slots needed for its terminal evidence.  Leaving that reservation
+            # in place would make the parent expiry audit write reject at
+            # capacity and roll back the whole cleanup transaction.
+            self._invalidate_runs(record["tenant"], "dataset_id", record["id"])
             self._append_event(record["tenant"], "dataset.expired", record["id"], "system")
             self._delete(record["id"], record["tenant"])
         return len(expired)
@@ -147,10 +177,10 @@ class DevelopmentStore:
             # also present in this precomputed expiry list.
             if identifier not in self.controls[kind]:
                 continue
-            self._append_event(record["tenant"], kind + ".expired", identifier, "system")
-            del self.controls[kind][identifier]
             if kind in {"rights_profile", "policy_snapshot"}:
                 self._invalidate_runs(record["tenant"], kind + "_id", identifier)
+            self._append_event(record["tenant"], kind + ".expired", identifier, "system")
+            del self.controls[kind][identifier]
         return len(expired)
 
     def purge(self):
@@ -169,6 +199,12 @@ class DevelopmentStore:
         for run_id, record in list(self.controls["processing_run"].items()):
             if record["tenant"] != tenant or record["payload"].get(dependency_key) != identifier:
                 continue
+            # A claim reserved capacity for a terminal transition.  This
+            # invalidation *is* that transition, so release the reservation
+            # before appending its authenticated tombstone.  The run is deleted
+            # in this transaction; no transient record state is persisted.
+            if record["payload"].get("state") == "RUNNING":
+                record["payload"]["audit_reservation"] = 0
             for kind in ("qualification", "evaluation_report", "private_candidate"):
                 for evidence_id, evidence in list(self.controls[kind].items()):
                     if evidence["tenant"] == tenant and evidence["payload"].get("run_id") == run_id:
@@ -358,6 +394,25 @@ class DevelopmentStore:
 
     def complete_processing_run(self, identifier, tenant, candidate, actor):
         """Persist an encrypted private candidate and metadata-only run state."""
+        return self._finish_processing_run(identifier, tenant, candidate, actor,
+                                           state="CANDIDATE", action="CANDIDATE_CREATED")
+
+    def quarantine_processing_run(self, identifier, tenant, candidate, code, actor):
+        """Persist a private candidate but terminally quarantine the run.
+
+        Policy enforcement can retain private evidence for authorized review
+        without falsely representing a blocked/review-required transform as a
+        candidate ready for residual evaluation or qualification.
+        """
+        return self._finish_processing_run(identifier, tenant, candidate, actor,
+                                           state="QUARANTINED", action="QUARANTINED",
+                                           error_code=code)
+
+    def _finish_processing_run(self, identifier, tenant, candidate, actor, *, state, action, error_code=None):
+        if state not in {"CANDIDATE", "QUARANTINED"} or type(action) is not str:
+            raise unavailable()
+        if state == "QUARANTINED" and error_code is None:
+            raise unavailable()
         candidate_data = detached(candidate)
         with self._transaction():
             self._purge()
@@ -382,10 +437,10 @@ class DevelopmentStore:
                 raise HTTPException(429, "Development control capacity exceeded")
             revised = detached(current)
             payload = revised["payload"]
-            payload["state"] = "CANDIDATE"
+            payload["state"] = state
             payload["audit_reservation"] = 1
             payload["candidate"] = {key: candidate_payload[key] for key in ("artifact_digest", "byte_count", "media_type", "schema_digest", "payload_kind", "ledger")}
-            self._run_event(payload, state="CANDIDATE", action="CANDIDATE_CREATED", attempt=payload["attempts"])
+            self._run_event(payload, state=state, action=action, attempt=payload["attempts"], error_code=error_code)
             revised["size_bytes"] = 0
             self._validate_control(revised)
             self.controls["processing_run"][identifier] = revised
@@ -467,6 +522,56 @@ class DevelopmentStore:
             self.controls["processing_run"][identifier] = revised
             return detached(revised)
 
+    @staticmethod
+    def _running_started_at(payload):
+        """Return the authenticated RUNNING event time or fail closed."""
+        events = payload.get("events")
+        attempts = payload.get("attempts")
+        if not isinstance(events, list) or not events or type(attempts) is not int:
+            raise unavailable()
+        event = events[-1]
+        if (not isinstance(event, dict) or event.get("state") != "RUNNING"
+                or event.get("action") != "STARTED" or event.get("attempt") != attempts
+                or type(event.get("occurred_at")) is not str):
+            raise unavailable()
+        try:
+            moment = datetime.fromisoformat(event["occurred_at"].replace("Z", "+00:00"))
+            if moment.tzinfo is None or moment.utcoffset() is None:
+                raise ValueError
+            return moment.timestamp()
+        except (OverflowError, OSError, ValueError):
+            raise unavailable() from None
+
+    def recover_stale_processing_run(self, identifier, tenant, actor):
+        """Terminally fail an abandoned claim without permitting stale output.
+
+        There is deliberately no requeue here: a worker that still holds an old
+        detached source can no longer complete after this transition.  A caller
+        that wants to retry must register a new, independently audited run.
+        """
+        with self._transaction():
+            self._purge()
+            self._purge_controls()
+            current = self._control("processing_run", identifier, tenant)
+            if current["payload"].get("state") != "RUNNING":
+                raise HTTPException(409, "Processing run is not awaiting recovery")
+            started_at = self._running_started_at(current["payload"])
+            if time.time() - started_at < self.RUN_LEASE_SECONDS:
+                raise HTTPException(409, "Processing run lease has not expired")
+            revised = detached(current)
+            payload = revised["payload"]
+            payload["state"] = "FAILED"
+            # Recovery consumes the terminal slot reserved at claim time.
+            payload["audit_reservation"] = 0
+            self._run_event(payload, state="FAILED", action="LEASE_EXPIRED",
+                            attempt=payload["attempts"], error_code="LEASE_EXPIRED")
+            revised["size_bytes"] = 0
+            self._validate_control(revised)
+            self.controls["processing_run"][identifier] = revised
+            self._append_event(tenant, "processing_run.updated", identifier, actor, record=revised)
+            self.controls["processing_run"][identifier] = revised
+            return detached(revised)
+
     def private_candidate_for_run(self, identifier, tenant):
         """Trusted internal accessor; deliberately not mapped to an API route."""
         with self._transaction():
@@ -508,7 +613,7 @@ class DevelopmentStore:
                 raise HTTPException(429, "Development control capacity exceeded")
             self._append_event(tenant, "evaluation_report.created", data["id"], actor, record=data)
             self.controls["evaluation_report"][data["id"]] = data
-            if payload.get("evidence_status") == "FAILS_PROFILE":
+            if _evaluation_evidence_status(payload) == "FAILS_PROFILE":
                 revised = detached(run)
                 revised_payload = revised["payload"]
                 revised_payload["state"] = "QUARANTINED"
