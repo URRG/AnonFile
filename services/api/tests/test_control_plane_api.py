@@ -15,6 +15,9 @@ def setup(monkeypatch, tmp_path, mode="memory"):
         {"token": TOKENS["processor"], "subject": "processor", "tenant": "tenant-a", "roles": ["processor"]},
         {"token": TOKENS["reviewer"], "subject": "reviewer", "tenant": "tenant-a", "roles": ["reviewer"]},
         {"token": TOKENS["other"], "subject": "other", "tenant": "tenant-b", "roles": ["processor"]},
+        {"token": TOKENS["evaluator"], "subject": "evaluator", "tenant": "tenant-a", "roles": ["evaluator"]},
+        {"token": TOKENS["evaluator-other"], "subject": "evaluator-other", "tenant": "tenant-b", "roles": ["evaluator"]},
+        {"token": TOKENS["dual"], "subject": "dual", "tenant": "tenant-a", "roles": ["processor", "evaluator"]},
     ]
     monkeypatch.setenv("ANONFLOW_ENV", "development")
     monkeypatch.setenv("ANONFLOW_AUTH_MODE", "dev-token")
@@ -22,6 +25,11 @@ def setup(monkeypatch, tmp_path, mode="memory"):
     monkeypatch.setenv("ANONFLOW_DEV_PRINCIPALS", json.dumps(entries))
     monkeypatch.setenv("ANONFLOW_DB_PATH", str(tmp_path / "controls.db"))
     monkeypatch.setenv("ANONFLOW_STORAGE_KEY", base64.b64encode(secrets.token_bytes(32)).decode())
+    monkeypatch.setenv("ANONFLOW_EVALUATOR_AUTHORITIES", json.dumps([{
+        "subject": "evaluator", "tenant": "tenant-a", "evaluator_id": "m8-harness", "evaluator_version": "v1",
+        "evaluator_config_digest": "sha256:" + "a" * 64, "corpus_digests": ["sha256:" + "d" * 64],
+        "key": base64.b64encode(b"e" * 32).decode(),
+    }]))
 
 
 @pytest.fixture(params=["memory", "sqlite"])

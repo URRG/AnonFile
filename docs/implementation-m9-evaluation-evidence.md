@@ -4,8 +4,15 @@ M9 makes the M8 evaluation-harness aggregate report operationally retainable.
 It is intentionally distinct from M3/M8 residual candidate evaluation:
 
 - `POST /processing-runs/{run_id}/detector-evaluation-evidence` accepts a
-  verified `ScoredEvaluation` record from a processor worker, with one
-  `Idempotency-Key`; processors may submit and processors/reviewers may read.
+  verified `ScoredEvaluation` record only from a distinct `evaluator` service
+  principal, with one `Idempotency-Key`; processors/reviewers may read.
+- Admission is fail-closed.  `ANONFLOW_EVALUATOR_AUTHORITIES` configures each
+  evaluator subject/tenant, evaluator ID/version/configuration digest, allowed
+  corpus digests and a private HMAC key.  The evaluator signs the run request
+  digest and immutable report digest.  A self-consistent caller-provided score
+  without that signature and allowlist match is rejected; signatures/keys are
+  never returned.  A principal that created a processing run cannot self-attest
+  it even if accidentally assigned both roles.
 - The record contains only M8's immutable aggregate category counts, derived
   metrics, detector/evaluator/taxonomy/corpus/prediction digests and fixed
   limitations.  It rejects corpus cases, annotations, protected references,
@@ -24,7 +31,6 @@ It is intentionally distinct from M3/M8 residual candidate evaluation:
 
 The in-memory/SQLite development store authenticates the control record in its
 audit chain and invalidates it when the parent run is invalidated.  The store
-is still a development adapter: its HMAC audit key is local, worker identity
-is a development processor role rather than an independently attested
-evaluator, no corpus is provided here, and the evidence is not a production
-benchmark-governance or release gate.
+is still a development adapter: evaluator keys are environment configuration
+rather than KMS-held workload identities, no corpus is provided here, and the
+evidence is not a production benchmark-governance or release gate.

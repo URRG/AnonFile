@@ -19,6 +19,7 @@ from fastapi import HTTPException
 from app.candidate import (CandidateError, LedgerAction, LedgerReason, PayloadKind,
                            SchemaContract, TransformLedgerEntry)
 from app.evaluation_harness import EvaluationHarnessError, ScoredEvaluation
+from app.evaluator_authority import EvaluatorAuthority, EvaluatorAuthorityError
 
 
 def unavailable():
@@ -628,7 +629,7 @@ class DevelopmentStore:
                 run = revised
             return detached(data), detached(run)
 
-    def record_detector_evaluation_evidence(self, identifier, tenant, evidence, actor):
+    def record_detector_evaluation_evidence(self, identifier, tenant, evidence, actor, authority):
         """Atomically retain M8 aggregate method evidence, never a run decision.
 
         This differs from ``record_evaluation``: it is benchmark/corpus score
@@ -644,7 +645,8 @@ class DevelopmentStore:
             payload = data["payload"]
             expected = {"run_id", "processing_request_digest", "policy_digest", "rights_digest",
                         "method_id", "method_version", "method_config_digest", "taxonomy_mapping_digest",
-                        "idempotency_key", "report"}
+                        "idempotency_key", "evaluator_subject", "evaluator_authority_id",
+                        "attestation_signature", "report"}
             if (data["kind"] != "detector_evaluation_evidence" or data["tenant"] != tenant
                     or set(payload) != expected or payload.get("run_id") != identifier
                     or payload.get("processing_request_digest") != run["payload"].get("request_digest")
@@ -655,6 +657,9 @@ class DevelopmentStore:
                     or payload.get("method_config_digest") != run["payload"].get("method_config_digest")
                     or payload.get("taxonomy_mapping_digest") != run["payload"].get("taxonomy_mapping_digest")
                     or data["expires_at"] > run["expires_at"]
+                    or type(authority) is not EvaluatorAuthority
+                    or payload.get("evaluator_subject") != authority.subject
+                    or payload.get("evaluator_authority_id") != authority.authority_id
                     or type(payload.get("idempotency_key")) is not str
                     or not 1 <= len(payload["idempotency_key"]) <= 200
                     or not payload["idempotency_key"].isascii()
@@ -662,7 +667,11 @@ class DevelopmentStore:
                 raise unavailable()
             try:
                 report = ScoredEvaluation.from_record(payload["report"])
-            except EvaluationHarnessError:
+                if not authority.verify(subject=payload["evaluator_subject"], tenant=tenant, run_id=identifier,
+                                        processing_request_digest=payload["processing_request_digest"], report=report,
+                                        signature=payload["attestation_signature"]):
+                    raise EvaluatorAuthorityError()
+            except (EvaluationHarnessError, EvaluatorAuthorityError):
                 raise unavailable() from None
             if (report.binding.detector_id, report.binding.detector_version,
                 report.binding.detector_config_digest, report.binding.taxonomy_mapping_digest) != (

@@ -40,7 +40,7 @@ def load_principals() -> tuple[tuple[str, Principal], ...]:
                 raise ValueError
             if any(not isinstance(v, str) or not v.strip() or len(v) > 160 or not v.isprintable() for v in (subject, tenant)):
                 raise ValueError
-            if not isinstance(roles, list) or not roles or any(not isinstance(r, str) or r not in {"processor", "reviewer", "buyer"} for r in roles):
+            if not isinstance(roles, list) or not roles or any(not isinstance(r, str) or r not in {"processor", "reviewer", "buyer", "evaluator"} for r in roles):
                 raise ValueError
             if (tenant, subject) in identities:
                 raise ValueError

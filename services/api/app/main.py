@@ -37,6 +37,8 @@ from app.qualification import (CandidateBinding, CategoryMeasurement, CategoryTh
                                EvaluationReport as QualificationReport, QualificationCriteria,
                                QualificationError, qualify)
 from app.evaluation_harness import EvaluationHarnessError, ScoredEvaluation
+from app.evaluator_authority import (EvaluatorAuthorityError, load_evaluator_authorities,
+                                     matching_authority)
 from app.policies import TAXONOMY_CATEGORIES
 
 MAX_BODY_BYTES = 2_100_000
@@ -317,6 +319,7 @@ class DetectorEvaluationEvidenceCreate(StrictModel):
     benchmark evidence, not a candidate residual report.
     """
     report: dict[str, Any]
+    attestation_signature: str = Field(min_length=54, max_length=54)
 
 class DetectorEvaluationEvidenceView(BaseModel):
     id: str
@@ -476,14 +479,15 @@ def qualification_view(record: dict[str, Any]) -> QualificationView:
     except (KeyError, TypeError, ValueError):
         raise HTTPException(503, "Control integrity verification failed") from None
 
-def detector_evaluation_evidence_view(record: dict[str, Any]) -> DetectorEvaluationEvidenceView:
+def detector_evaluation_evidence_view(record: dict[str, Any], *, evaluator_authorities) -> DetectorEvaluationEvidenceView:
     """Return only a verified M8 aggregate report and safe run binding."""
     try:
         payload = record["payload"]
         report = ScoredEvaluation.from_record(payload["report"])
         if (set(payload) != {"run_id", "processing_request_digest", "policy_digest", "rights_digest",
                             "method_id", "method_version", "method_config_digest", "taxonomy_mapping_digest",
-                            "idempotency_key", "report"}
+                            "idempotency_key", "evaluator_subject", "evaluator_authority_id",
+                            "attestation_signature", "report"}
                 or payload["report"]["digest"] != report.digest
                 or (report.binding.detector_id, report.binding.detector_version,
                     report.binding.detector_config_digest, report.binding.taxonomy_mapping_digest) != (
@@ -491,12 +495,17 @@ def detector_evaluation_evidence_view(record: dict[str, Any]) -> DetectorEvaluat
                         payload["taxonomy_mapping_digest"])
                 or report.posture.value != "OBSERVATIONAL_ONLY"):
             raise ValueError
+        authority = matching_authority(evaluator_authorities, subject=payload["evaluator_subject"], tenant=record["tenant"],
+                                       run_id=payload["run_id"], processing_request_digest=payload["processing_request_digest"],
+                                       report=report, signature=payload["attestation_signature"])
+        if authority.authority_id != payload["evaluator_authority_id"]:
+            raise ValueError
         return DetectorEvaluationEvidenceView(
             id=record["id"], run_id=payload["run_id"],
             processing_request_digest=payload["processing_request_digest"],
             report_digest=report.digest, posture="OBSERVATIONAL_ONLY",
             limitations=list(report.limitations), report=report.to_record())
-    except (KeyError, TypeError, ValueError, EvaluationHarnessError):
+    except (KeyError, TypeError, ValueError, EvaluationHarnessError, EvaluatorAuthorityError):
         raise HTTPException(503, "Control integrity verification failed") from None
 
 def _residual_detector(candidate: str | list[dict[str, Any]]) -> DetectorResult:
@@ -529,6 +538,10 @@ def create_app() -> FastAPI:
     app = FastAPI(title="AnonFlow development API", version="0.3.0", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.router.route_class = StrictJSONRoute
     configure_auth(app)
+    try:
+        app.state.evaluator_authorities = load_evaluator_authorities()
+    except EvaluatorAuthorityError:
+        raise RuntimeError("Invalid evaluator authority configuration") from None
     app.state.store = create_store()
     app.add_middleware(BodyLimitMiddleware)
     origins = [v.strip() for v in os.getenv("WEB_ORIGIN", "http://localhost:3000,http://localhost:5173").split(",") if v.strip()]
@@ -674,7 +687,7 @@ def create_app() -> FastAPI:
                    "taxonomy_mapping_digest": RULES_TAXONOMY_MAPPING_DIGEST,
                    "language": request.language,
                    "rights_digest": profile.digest, "recipient": request.recipient,
-                   "purpose": request.purpose,
+                   "purpose": request.purpose, "processor_subject": principal.subject,
                    "events": [{"sequence": event.sequence, "state": event.state.value, "action": event.action,
                                "occurred_at": event.occurred_at.isoformat(), "attempt": event.attempt}
                               for event in registered.events]}
@@ -763,7 +776,7 @@ def create_app() -> FastAPI:
               response_model=DetectorEvaluationEvidenceView, status_code=201)
     def create_detector_evaluation_evidence(run_id: str, request: DetectorEvaluationEvidenceCreate,
                                              request_context: Request,
-                                             principal: Principal = Depends(require_roles("processor"))):
+                                             principal: Principal = Depends(require_roles("evaluator"))):
         """Persist source-free method evidence without changing the run lifecycle.
 
         A report is bound to an existing run only as evidence for that run's
@@ -779,6 +792,18 @@ def create_app() -> FastAPI:
             raise HTTPException(422, "Control validation failed") from None
         run = app.state.store.get_control("processing_run", run_id, principal.tenant)
         run_payload = run["payload"]
+        if run_payload.get("processor_subject") != principal.subject:
+            try:
+                authority = matching_authority(app.state.evaluator_authorities, subject=principal.subject,
+                                               tenant=principal.tenant, run_id=run_id,
+                                               processing_request_digest=run_payload["request_digest"], report=report,
+                                               signature=request.attestation_signature)
+            except EvaluatorAuthorityError:
+                raise HTTPException(409, "Evaluator attestation is unavailable or invalid") from None
+        else:
+            # An ingestion/processing identity must not self-attest benchmark
+            # metrics, even if it has accidentally been granted evaluator role.
+            raise HTTPException(403, "Independent evaluator required")
         # A harness report measures a detector/method; it must never be
         # attached to an unrelated processing method merely because both are
         # aggregate-only records.
@@ -792,12 +817,14 @@ def create_app() -> FastAPI:
                    "method_id": run_payload["method_id"], "method_version": run_payload["method_version"],
                    "method_config_digest": run_payload["method_config_digest"],
                    "taxonomy_mapping_digest": run_payload["taxonomy_mapping_digest"], "idempotency_key": keys[0],
+                   "evaluator_subject": principal.subject, "evaluator_authority_id": authority.authority_id,
+                   "attestation_signature": request.attestation_signature,
                    "report": report.to_record()}
         record = control_record(kind="detector_evaluation_evidence", identifier=str(uuid4()), tenant=principal.tenant,
                                 payload=payload, expires_at=run["expires_at"])
         persisted, reused = app.state.store.record_detector_evaluation_evidence(
-            run_id, principal.tenant, record, principal.subject)
-        view = detector_evaluation_evidence_view(persisted)
+            run_id, principal.tenant, record, principal.subject, authority)
+        view = detector_evaluation_evidence_view(persisted, evaluator_authorities=app.state.evaluator_authorities)
         if reused:
             return Response(view.model_dump_json(), status_code=200, media_type="application/json")
         return view
@@ -809,7 +836,7 @@ def create_app() -> FastAPI:
         record = app.state.store.get_control("detector_evaluation_evidence", evidence_id, principal.tenant)
         if record["payload"].get("run_id") != run_id:
             raise HTTPException(404, "Control record not found")
-        return detector_evaluation_evidence_view(record)
+        return detector_evaluation_evidence_view(record, evaluator_authorities=app.state.evaluator_authorities)
 
     @app.post("/processing-runs/{run_id}/residual-evaluations", response_model=ResidualEvaluationView, status_code=201)
     def create_residual_evaluation(run_id: str, principal: Principal = Depends(require_roles("reviewer"))):
