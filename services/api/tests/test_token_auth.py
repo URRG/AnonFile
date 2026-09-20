@@ -41,7 +41,8 @@ def config(monkeypatch, tmp_path, private_key):
     monkeypatch.setenv("ANONFLOW_JWT_AUDIENCE", "synthetic-api")
     monkeypatch.setenv("ANONFLOW_JWT_BINDINGS", json.dumps([
         {"subject": "synthetic-subject", "tenant": "server-tenant", "roles": ["processor"]},
-        {"subject": "reviewer-subject", "tenant": "server-tenant", "roles": ["reviewer"]}]))
+        {"subject": "reviewer-subject", "tenant": "server-tenant", "roles": ["reviewer"]},
+        {"subject": "evaluator-subject", "tenant": "server-tenant", "roles": ["evaluator"]}]))
     path = tmp_path / "public-jwks.json"
     path.write_text(json.dumps({"keys": [jwk(private_key)]}), encoding="utf-8")
     monkeypatch.setenv("ANONFLOW_JWKS_PATH", str(path))
@@ -59,6 +60,10 @@ def app():
     @result.get("/processor")
     def processor(principal=Depends(require_roles("processor"))):
         return {"ok": True}
+
+    @result.get("/evaluator")
+    def evaluator(principal=Depends(require_roles("evaluator"))):
+        return {"subject": principal.subject, "roles": sorted(principal.roles)}
 
     return result
 
@@ -98,6 +103,13 @@ def test_valid_token_uses_server_binding_not_token_authority(config, private_key
     response = request(TestClient(app()), value)
     assert response.status_code == 200
     assert response.json() == {"subject": "synthetic-subject", "tenant": "server-tenant", "roles": ["processor"]}
+
+
+def test_evaluator_role_is_accepted_only_from_server_jwt_binding(config, private_key):
+    value = token(private_key, claims(sub="evaluator-subject", roles=["processor"]))
+    response = request(TestClient(app()), value, "/evaluator")
+    assert response.status_code == 200
+    assert response.json() == {"subject": "evaluator-subject", "roles": ["evaluator"]}
 
 
 @pytest.mark.parametrize("missing", ["iss", "aud", "sub", "exp", "iat", "nbf"])

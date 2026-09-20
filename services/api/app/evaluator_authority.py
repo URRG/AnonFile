@@ -130,7 +130,18 @@ def load_evaluator_authorities() -> tuple[EvaluatorAuthority, ...]:
     if len(raw.encode("utf-8")) > _MAX_CONFIG_BYTES:
         _fail()
     try:
-        entries = json.loads(raw)
+        def unique_object(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError
+                result[key] = value
+            return result
+
+        def no_constant(value):
+            raise ValueError
+
+        entries = json.loads(raw, object_pairs_hook=unique_object, parse_constant=no_constant)
         if type(entries) is not list or not entries or len(entries) > 64:
             _fail()
         result = []

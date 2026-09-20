@@ -29,7 +29,7 @@ MAX_TOKEN_BYTES = 16_384
 MAX_CONFIG_BYTES = 32_000
 MAX_JWKS_BYTES = 128_000
 _BASE64URL = re.compile(r"[A-Za-z0-9_-]+\Z")
-_ROLES = frozenset({"processor", "reviewer", "buyer"})
+_ROLES = frozenset({"processor", "reviewer", "buyer", "evaluator"})
 
 
 def _unique_object(pairs):
