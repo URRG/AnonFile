@@ -1437,7 +1437,7 @@ def create_app() -> FastAPI:
             control=privacy_decision_control_for_tenant(app.state.privacy_decision_controls, tenant=principal.tenant, at=moment)
             item, release_authority=assess_case_privacy(case_id, principal.tenant, moment,
                                                         control.decision_identifier(case_id=case_id,idempotency_key=keys[0]))
-        except (PrivacyDecisionError, ReleaseCaseAuthorityError, ReleaseCaseError, HTTPException):
+        except (PrivacyDecisionError, ReleaseCaseAuthorityError, ReleaseCaseError):
             raise HTTPException(409,"Privacy decision scope is unavailable") from None
         record=control_record(kind="privacy_decision", identifier=item.decision_id, tenant=principal.tenant,
             payload={"case_id":case_id,"run_id":ReleaseCase.from_record(app.state.store.get_control("release_case",case_id,principal.tenant)["payload"]["case"]).binding.processing_run_id,

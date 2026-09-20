@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from fastapi.testclient import TestClient
 
 from app.privacy_decision import (PrivacyDecision, PrivacyDecisionControl,
                                   PrivacyDecisionAuthority, PrivacyDecisionError,
@@ -11,9 +12,13 @@ from app.privacy_decision import (PrivacyDecision, PrivacyDecisionControl,
 from app.privacy_evidence_authority import PrivacyEvidenceAttestationAuthority
 from app.privacy_evidence_policy import PrivacyEvidenceBinding, PrivacyEvidenceKind, assess_privacy_evidence
 from app.repository import DevelopmentStore
+from app.main import create_app
+from test_access import auth
+from test_control_plane_api import controls, ingested_dataset, run_request, setup
 
 D = "sha256:" + "a" * 64
 R = "b" * 64
+CASE = "release-case:v1:" + "A" * 43
 
 
 def test_signed_envelope_round_trips_and_rejects_mutation():
@@ -30,15 +35,15 @@ def test_signed_envelope_round_trips_and_rejects_mutation():
     policy = control.policy(binding)
     outcome = assess_privacy_evidence(decision_id="policy-a", binding=binding, policy=policy, evidence=(),
                                       authorities=tuple(item.policy_verifier for _, item in pairs), at=now)
-    item = signer.issue(decision_id=control.decision_identifier(case_id="case-a", idempotency_key="key-a"),
-                        case_id="case-a", case_digest=D, decision=outcome, evidence_references=(),
+    item = signer.issue(decision_id=control.decision_identifier(case_id=CASE, idempotency_key="key-a"),
+                        case_id=CASE, case_digest=D, decision=outcome, evidence_references=(),
                         expires_at=now + timedelta(minutes=30), at=now)
     rebuilt = PrivacyDecision.from_record(item.to_record())
     assert rebuilt == item and signer.verifies(rebuilt, at=now)
     altered = item.to_record(); altered["case_digest"] = "sha256:" + "c" * 64
     with pytest.raises(PrivacyDecisionError):
         PrivacyDecision.from_record(altered)
-    assert control.decision_identifier(case_id="case-a", idempotency_key="key-a") == item.decision_id
+    assert control.decision_identifier(case_id=CASE, idempotency_key="key-a") == item.decision_id
 
 
 def test_documented_m15_configuration_shape_loads_with_valid_disclosure_floor(monkeypatch):
@@ -76,14 +81,31 @@ def test_quarantined_signed_tombstone_is_retrievable_without_a_live_release_case
     policy = control.policy(binding)
     outcome = assess_privacy_evidence(decision_id="policy-a", binding=binding, policy=policy, evidence=(object(),),
                                       authorities=tuple(item.policy_verifier for _, item in pairs), at=now)
-    item = signer.issue(decision_id=control.decision_identifier(case_id="case-a", idempotency_key="key-a"),
-                        case_id="case-a", case_digest=D, decision=outcome, evidence_references=(),
+    item = signer.issue(decision_id=control.decision_identifier(case_id=CASE, idempotency_key="key-a"),
+                        case_id=CASE, case_digest=D, decision=outcome, evidence_references=(),
                         expires_at=now + timedelta(minutes=30), at=now)
     assert item.decision.outcome.value == "QUARANTINED"
     store = DevelopmentStore()
     store.controls["privacy_decision"][item.decision_id] = {
         "id": item.decision_id, "kind": "privacy_decision", "tenant": "tenant-a", "created_at": now.isoformat(),
         "expires_at": item.expires_at.timestamp(), "size_bytes": 0,
-        "payload": {"case_id": "case-a", "run_id": "run-a", "idempotency_key": "key-a", "decision": item.to_record()},
+        "payload": {"case_id": CASE, "run_id": "run-a", "idempotency_key": "key-a", "decision": item.to_record()},
     }
     assert store.get_privacy_decision(item.decision_id, "tenant-a", signer, None)["id"] == item.decision_id
+
+
+def test_api_server_derives_a_case_bound_holding_and_reuses_same_key(monkeypatch, tmp_path):
+    setup(monkeypatch, tmp_path)
+    with TestClient(create_app()) as client:
+        dataset_id = ingested_dataset(client)
+        policy, rights = controls(client)
+        run = client.post("/processing-runs", headers={**auth(), "Idempotency-Key": "m15-run-api"},
+                          json=run_request(dataset_id, policy["id"], rights["id"])).json()
+        assert client.post(f"/processing-runs/{run['id']}/execute", headers=auth()).status_code == 200
+        case = client.post(f"/processing-runs/{run['id']}/release-cases", headers={**auth(), "Idempotency-Key": "m15-case-api"}).json()
+        first = client.post(f"/release-cases/{case['id']}/privacy-decisions", headers={**auth(), "Idempotency-Key": "m15-decision-api"})
+        assert first.status_code == 201, first.text
+        item = first.json()
+        assert item["outcome"] == "INSUFFICIENT_EVIDENCE" and item["posture"] == "NO_RELEASE_AUTHORIZATION"
+        assert client.post(f"/release-cases/{case['id']}/privacy-decisions", headers={**auth(), "Idempotency-Key": "m15-decision-api"}).status_code == 200
+        assert client.get(f"/privacy-decisions/{item['id']}", headers=auth("reviewer")).status_code == 200

@@ -28,6 +28,7 @@ from app.privacy_evidence_authority import PrivacyEvidenceAttestationAuthority, 
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _IDENTIFIER = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}\Z")
 _ID = re.compile(r"privacy-decision:v1:[A-Za-z0-9_-]{43}\Z")
+_CASE_ID = re.compile(r"release-case:v1:[A-Za-z0-9_-]{43}\Z")
 _AUTHORITY = re.compile(r"privacy-decision-authority:v1:[A-Za-z0-9_-]{43}\Z")
 _SIGNATURE = re.compile(r"privacy-decision-sig:v1:[A-Za-z0-9_-]{86}\Z")
 
@@ -81,7 +82,8 @@ class PrivacyDecision:
         if type(self) is not PrivacyDecision: _fail()
         object.__setattr__(self, "tenant", _id(self.tenant))
         if type(self.decision_id) is not str or not _ID.fullmatch(self.decision_id): _fail()
-        object.__setattr__(self, "case_id", _id(self.case_id)); object.__setattr__(self, "case_digest", _digest(self.case_digest))
+        if type(self.case_id) is not str or not _CASE_ID.fullmatch(self.case_id): _fail()
+        object.__setattr__(self, "case_digest", _digest(self.case_digest))
         if type(self.authority_id) is not str or not _AUTHORITY.fullmatch(self.authority_id): _fail()
         object.__setattr__(self, "issuer_key_id", _id(self.issuer_key_id))
         if type(self.decision) is not PrivacyEvidenceDecision: _fail()
@@ -217,7 +219,7 @@ class PrivacyDecisionControl:
         token=hmac.new(raw, b"m15-native-reference-v1:\x00" + _canon({"kind":kind.value,"record_id":record_id,"record_digest":record_digest}), hashlib.sha256).digest()
         return "evidence:v1:" + base64.urlsafe_b64encode(token).decode("ascii").rstrip("=")
     def decision_identifier(self, *, case_id, idempotency_key):
-        _id(case_id)
+        if type(case_id) is not str or not _CASE_ID.fullmatch(case_id): _fail()
         if type(idempotency_key) is not str or not 1 <= len(idempotency_key) <= 200 or not idempotency_key.isascii() or any(x.isspace() for x in idempotency_key): _fail()
         raw=self.decision_authority._key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
         return "privacy-decision:v1:" + base64.urlsafe_b64encode(hmac.new(raw,b"m15-decision-id-v1:\x00"+_canon({"case_id":case_id,"key":idempotency_key}),hashlib.sha256).digest()).decode("ascii").rstrip("=")
