@@ -51,6 +51,20 @@ def setup(monkeypatch, tmp_path, mode="memory"):
         "contract_reference": "contract-reference:v1:" + "A" * 43,
         "contract_digest": "sha256:" + "c" * 64, "contract_expires_at": "2027-06-01T00:00:00Z",
     }]))
+    # M15 remains a non-authorizing hold: native residual/benchmark evidence
+    # is absent in this fixture, but the configured V2 policy is usable.
+    m15_key = lambda char: base64.b64encode(char.encode() * 32).decode()
+    monkeypatch.setenv("ANONFLOW_PRIVACY_DECISION_AUTHORITIES", json.dumps([{
+        "tenant": "tenant-a", "issuer_key_id": "development-privacy-decision-a", "expires_at": "2027-06-01T00:00:00Z",
+        "private_key": m15_key("p"), "max_evidence_age_seconds": 3600,
+        "requirements": [
+            {"kind": "RESIDUAL_SCAN", "threshold": 0, "issuer_key_id": "m15-residual", "key": m15_key("a")},
+            {"kind": "DISCLOSURE_RISK", "threshold": 1, "issuer_key_id": "m15-disclosure", "key": m15_key("b")},
+            {"kind": "UTILITY", "threshold": 1_000_000, "issuer_key_id": "m15-utility", "key": m15_key("c")},
+            {"kind": "LINKAGE", "threshold": 0, "issuer_key_id": "m15-linkage", "key": m15_key("d")},
+            {"kind": "BENCHMARK", "threshold": 1_000_000, "issuer_key_id": "m15-benchmark", "key": m15_key("e")},
+        ],
+    }]))
 
 
 @pytest.fixture(params=["memory", "sqlite"])

@@ -29,6 +29,7 @@ from app.linkage_risk import LinkageRiskError, LinkageRiskReport
 from app.linkage_risk_authority import LinkageRiskAuthorityError, LinkageRiskControlAuthority
 from app.release_case import ReleaseCase, ReleaseCaseError
 from app.release_case_authority import ReleaseCaseControlAuthority
+from app.privacy_decision import PrivacyDecision, PrivacyDecisionAuthority, PrivacyDecisionError
 
 
 def unavailable():
@@ -87,7 +88,7 @@ class DevelopmentStore:
     CONTROL_KINDS = frozenset({"rights_profile", "policy_snapshot", "processing_run", "authorization_request",
                                 "private_candidate", "evaluation_report", "qualification",
                                 "detector_evaluation_evidence", "utility_evidence", "disclosure_risk_evidence",
-                                "linkage_risk_evidence", "release_case"})
+                                "linkage_risk_evidence", "release_case", "privacy_decision"})
     TTL_SECONDS = 3600
 
     def __init__(self):
@@ -218,7 +219,7 @@ class DevelopmentStore:
             # in this transaction; no transient record state is persisted.
             if record["payload"].get("state") == "RUNNING":
                 record["payload"]["audit_reservation"] = 0
-            for kind in ("qualification", "evaluation_report", "detector_evaluation_evidence", "utility_evidence", "disclosure_risk_evidence", "linkage_risk_evidence", "release_case",
+            for kind in ("qualification", "evaluation_report", "detector_evaluation_evidence", "utility_evidence", "disclosure_risk_evidence", "linkage_risk_evidence", "release_case", "privacy_decision",
                          "private_candidate"):
                 for evidence_id, evidence in list(self.controls[kind].items()):
                     if evidence["tenant"] == tenant and evidence["payload"].get("run_id") == run_id:
@@ -227,12 +228,17 @@ class DevelopmentStore:
             self._append_event(tenant, "processing_run.invalidated", run_id, "system")
             del self.controls["processing_run"][run_id]
 
-    def _invalidate_release_cases_for_run(self, tenant, run_id):
+    def _invalidate_release_cases_for_run(self, tenant, run_id, *, retain_privacy_decision_id=None):
         """Tombstone non-authorizing cases when their candidate/run ceases to be current."""
         for case_id, record in list(self.controls["release_case"].items()):
             if record["tenant"] == tenant and record["payload"].get("run_id") == run_id:
                 self._append_event(tenant, "release_case.invalidated", case_id, "system")
                 del self.controls["release_case"][case_id]
+                for decision_id, decision in list(self.controls["privacy_decision"].items()):
+                    if (decision["tenant"] == tenant and decision["payload"].get("case_id") == case_id
+                            and decision_id != retain_privacy_decision_id):
+                        self._append_event(tenant, "privacy_decision.invalidated", decision_id, "system")
+                        del self.controls["privacy_decision"][decision_id]
 
     def _dataset(self, identifier, tenant):
         result = self.datasets.get(identifier)
@@ -1056,6 +1062,150 @@ class DevelopmentStore:
                 raise unavailable()
             self._verify_release_case_scope(data=data, identifier=run_id, tenant=tenant, authority=authority,
                                             moment=datetime.now(UTC).replace(microsecond=0))
+            return detached(data)
+
+    def record_privacy_decision(self, case_id, tenant, decision_record, actor, decision_authority, release_authority, reassess):
+        """Atomically persist one signed, non-authorizing M15 case decision.
+
+        Both the durable release-case provenance and the decision signature are
+        rechecked while holding the store transaction.  A stale case therefore
+        cannot race a decision write, and idempotent replays cannot silently
+        replace a quarantining result with a different record.
+        """
+        data = detached(decision_record)
+        with self._transaction():
+            self._purge(); self._purge_controls()
+            moment = datetime.now(UTC).replace(microsecond=0)
+            case_data = self._control("release_case", case_id, tenant)
+            run_id = case_data.get("payload", {}).get("run_id")
+            if type(run_id) is not str:
+                raise unavailable()
+            case = self._verify_release_case_scope(data=case_data, identifier=run_id, tenant=tenant,
+                                                    authority=release_authority, moment=moment)
+            self._validate_control(data)
+            payload = data.get("payload")
+            if (data["kind"] != "privacy_decision" or data["tenant"] != tenant or not isinstance(payload, dict)
+                    or set(payload) != {"case_id", "run_id", "idempotency_key", "decision"}
+                    or payload["case_id"] != case_id or payload["run_id"] != run_id
+                    or type(payload["idempotency_key"]) is not str or not 1 <= len(payload["idempotency_key"]) <= 200
+                    or not payload["idempotency_key"].isascii() or any(x.isspace() for x in payload["idempotency_key"])
+                    or type(decision_authority) is not PrivacyDecisionAuthority or not decision_authority.is_active(at=moment)
+                    or decision_authority.tenant != tenant or not callable(reassess)):
+                raise unavailable()
+            # A replay is resolved before constructing/comparing a fresh
+            # envelope.  Its immutable issue time is necessarily different
+            # from a later HTTP retry, so comparing a newly signed timestamped
+            # envelope here would turn a safe retry into a conflict.
+            for old in self.controls["privacy_decision"].values():
+                previous = old["payload"]
+                if old["tenant"] == tenant and previous.get("case_id") == case_id and previous.get("idempotency_key") == payload["idempotency_key"]:
+                    try:
+                        prior = PrivacyDecision.from_record(previous["decision"])
+                        # Reassess at *current* transaction time.  The old
+                        # issue time is immutable provenance, not a licence to
+                        # replay evidence that has since expired, gone stale,
+                        # been revoked, or drifted from policy/configuration.
+                        expected = reassess(case_id, tenant, moment, prior.decision_id)
+                        same = (data["id"] == old["id"] and prior.decision_id == old["id"]
+                                and decision_authority.verifies(prior, at=moment)
+                                and type(expected) is PrivacyDecision
+                                and prior.decision.outcome == expected.decision.outcome
+                                and prior.decision.reasons == expected.decision.reasons
+                                and prior.decision.binding == expected.decision.binding
+                                and prior.decision.privacy_evidence_policy_digest == expected.decision.privacy_evidence_policy_digest
+                                and prior.decision.evidence_digests == expected.decision.evidence_digests
+                                and prior.evidence_references == expected.evidence_references)
+                    except (KeyError, TypeError, ValueError, PrivacyDecisionError, HTTPException):
+                        raise unavailable() from None
+                    if not same:
+                        raise HTTPException(409, "Idempotency key conflicts with a different request")
+                    return detached(old), True
+            try:
+                decision = PrivacyDecision.from_record(payload["decision"])
+                valid = (decision.decision_id == data["id"] and decision.case_id == case_id
+                         and decision.case_digest == case.digest and decision.expires_at.timestamp() == data["expires_at"]
+                         and decision.decision.binding.candidate_artifact_digest == case.binding.candidate_artifact_digest
+                         and decision.decision.binding.processing_policy_digest == case.binding.processing_policy_digest
+                         and decision.decision.binding.rights_digest == case.binding.rights_digest
+                         and decision.decision.binding.purpose_code == case.binding.purpose_code
+                         and decision.decision.binding.method_provenance_digest == case.binding.method_provenance_digest
+                         and decision.decision.binding.recipient_reference == "sha256:" + hashlib.sha256(
+                             case.binding.recipient_commitment.encode("ascii")).hexdigest()
+                         and decision_authority.verifies(decision, at=moment))
+            except (KeyError, TypeError, ValueError, PrivacyDecisionError):
+                raise unavailable() from None
+            if not valid:
+                raise unavailable()
+            # The envelope is not sufficient on its own: re-derive the exact
+            # server-selected native evidence while the same store lock is
+            # held.  This rejects injected/swapped refs, key/policy drift and
+            # invalid native attestations before anything is made durable.
+            try:
+                expected = reassess(case_id, tenant, moment, decision.decision_id)
+                # The API captured ``issued_at`` immediately before entering
+                # this transaction.  Crossing a wall-clock second must not
+                # invalidate that correctly signed record; compare every
+                # substantive re-derived field instead of a freshly minted
+                # signature/timestamp, while requiring it not be future-dated.
+                if (type(expected) is not PrivacyDecision or decision.issued_at > moment
+                        or decision.case_id != expected.case_id or decision.case_digest != expected.case_digest
+                        or decision.authority_id != expected.authority_id or decision.issuer_key_id != expected.issuer_key_id
+                        or decision.expires_at != expected.expires_at
+                        or decision.decision.outcome != expected.decision.outcome
+                        or decision.decision.reasons != expected.decision.reasons
+                        or decision.decision.binding != expected.decision.binding
+                        or decision.decision.privacy_evidence_policy_digest != expected.decision.privacy_evidence_policy_digest
+                        or decision.decision.evidence_digests != expected.decision.evidence_digests
+                        or decision.evidence_references != expected.evidence_references):
+                    raise ValueError
+            except (TypeError, ValueError, PrivacyDecisionError, HTTPException):
+                raise unavailable() from None
+            if data["id"] in self.controls["privacy_decision"] or self._used_identifier(data["id"], "privacy_decision"):
+                raise HTTPException(409, "Object already exists")
+            self._append_event(tenant, "privacy_decision.created", data["id"], actor, record=data)
+            self.controls["privacy_decision"][data["id"]] = data
+            if decision.decision.outcome.value == "QUARANTINED":
+                # Quarantine is terminal for this candidate snapshot.  It is
+                # not an informational badge that a future workflow can ignore:
+                # revoke all case/decision handles and make the run sticky
+                # quarantined, without creating an approval or delivery state.
+                run = self._control("processing_run", run_id, tenant)
+                self._invalidate_release_cases_for_run(tenant, run_id, retain_privacy_decision_id=data["id"])
+                if run["payload"].get("state") == "CANDIDATE":
+                    revised = detached(run)
+                    revised_payload = revised["payload"]
+                    revised_payload["state"] = "QUARANTINED"
+                    self._run_event(revised_payload, state="QUARANTINED", action="QUARANTINED",
+                                    attempt=revised_payload["attempts"], error_code="PRIVACY_EVIDENCE_FAILURE")
+                    revised["size_bytes"] = 0
+                    self._validate_control(revised)
+                    self._append_event(tenant, "processing_run.updated", run_id, actor, record=revised)
+                    self.controls["processing_run"][run_id] = revised
+            return detached(data), False
+
+    def get_privacy_decision(self, decision_id, tenant, decision_authority, release_authority):
+        with self._transaction():
+            self._purge(); self._purge_controls()
+            data = self._control("privacy_decision", decision_id, tenant)
+            case_id = data.get("payload", {}).get("case_id")
+            if type(case_id) is not str: raise unavailable()
+            try:
+                decision = PrivacyDecision.from_record(data["payload"]["decision"])
+                if decision.decision_id != decision_id or not decision_authority.verifies(decision, at=datetime.now(UTC).replace(microsecond=0)):
+                    raise ValueError
+            except (KeyError, TypeError, ValueError, PrivacyDecisionError): raise unavailable() from None
+            # A quarantined tombstone intentionally survives release-case
+            # invalidation so audit can explain the sticky hold.  It is not an
+            # actionable case or a release path; do not require the deleted
+            # case to be live merely to render this source-safe outcome.
+            if decision.decision.outcome.value == "QUARANTINED":
+                return detached(data)
+            case_data = self._control("release_case", case_id, tenant)
+            run_id = case_data.get("payload", {}).get("run_id")
+            if type(run_id) is not str: raise unavailable()
+            case = self._verify_release_case_scope(data=case_data, identifier=run_id, tenant=tenant, authority=release_authority,
+                                                    moment=datetime.now(UTC).replace(microsecond=0))
+            if decision.case_digest != case.digest: raise unavailable()
             return detached(data)
 
     def record_qualification(self, identifier, tenant, qualification, evaluation_id, actor):
