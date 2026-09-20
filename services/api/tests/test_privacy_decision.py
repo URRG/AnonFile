@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
+from concurrent.futures import ThreadPoolExecutor
 
 from app.privacy_decision import (PrivacyDecision, PrivacyDecisionControl,
                                   PrivacyDecisionAuthority, PrivacyDecisionError,
@@ -109,3 +110,60 @@ def test_api_server_derives_a_case_bound_holding_and_reuses_same_key(monkeypatch
         assert item["outcome"] == "INSUFFICIENT_EVIDENCE" and item["posture"] == "NO_RELEASE_AUTHORIZATION"
         assert client.post(f"/release-cases/{case['id']}/privacy-decisions", headers={**auth(), "Idempotency-Key": "m15-decision-api"}).status_code == 200
         assert client.get(f"/privacy-decisions/{item['id']}", headers=auth("reviewer")).status_code == 200
+
+
+def _case_with_native_utility(client, *, suffix):
+    dataset_id = ingested_dataset(client)
+    policy, rights = controls(client)
+    run = client.post("/processing-runs", headers={**auth(), "Idempotency-Key": "m15-run-" + suffix},
+                      json=run_request(dataset_id, policy["id"], rights["id"])).json()
+    assert client.post(f"/processing-runs/{run['id']}/execute", headers=auth()).status_code == 200
+    utility = client.post(f"/processing-runs/{run['id']}/utility-evidence", headers={**auth(), "Idempotency-Key": "m15-util-" + suffix})
+    assert utility.status_code == 201, utility.text
+    case = client.post(f"/processing-runs/{run['id']}/release-cases", headers={**auth(), "Idempotency-Key": "m15-case-" + suffix})
+    assert case.status_code == 201
+    return run, case.json(), utility.json()
+
+
+def test_m15_same_key_replay_refuses_expired_native_evidence_and_policy_drift(monkeypatch, tmp_path):
+    setup(monkeypatch, tmp_path)
+    with TestClient(create_app()) as client:
+        run, case, utility = _case_with_native_utility(client, suffix="stale")
+        headers = {**auth(), "Idempotency-Key": "m15-decision-stale"}
+        assert client.post(f"/release-cases/{case['id']}/privacy-decisions", headers=headers).status_code == 201
+        native = client.app.state.store.controls["utility_evidence"][utility["id"]]
+        native["expires_at"] = 1
+        assert client.post(f"/release-cases/{case['id']}/privacy-decisions", headers=headers).status_code != 200
+    setup(monkeypatch, tmp_path)
+    with TestClient(create_app()) as client:
+        _, case, _ = _case_with_native_utility(client, suffix="drift")
+        headers = {**auth(), "Idempotency-Key": "m15-decision-drift"}
+        assert client.post(f"/release-cases/{case['id']}/privacy-decisions", headers=headers).status_code == 201
+        control = client.app.state.privacy_decision_controls[0]
+        changed = list(control.thresholds); changed[0] = (changed[0][0], changed[0][1] - 1)
+        client.app.state.privacy_decision_controls = (PrivacyDecisionControl(control.decision_authority, control.max_evidence_age_seconds,
+            tuple(changed), control.evidence_authorities),)
+        assert client.post(f"/release-cases/{case['id']}/privacy-decisions", headers=headers).status_code != 200
+
+
+def test_m15_quarantine_is_sticky_tombstone_and_same_key_race_is_one_record(monkeypatch, tmp_path):
+    setup(monkeypatch, tmp_path)
+    with TestClient(create_app()) as client:
+        run, case, utility = _case_with_native_utility(client, suffix="quarantine")
+        # Corrupt an otherwise originally attested native control; the M15
+        # adapter must quarantine rather than silently omit it.
+        client.app.state.store.controls["utility_evidence"][utility["id"]]["payload"]["attestation_signature"] = "utilsig:v1:" + "A" * 43
+        response = client.post(f"/release-cases/{case['id']}/privacy-decisions", headers={**auth(), "Idempotency-Key": "m15-q"})
+        assert response.status_code == 201, response.text
+        item = response.json(); assert item["outcome"] == "QUARANTINED"
+        assert client.get(f"/release-cases/{case['id']}", headers=auth()).status_code == 404
+        assert client.get(f"/processing-runs/{run['id']}", headers=auth()).json()["state"] == "QUARANTINED"
+        assert client.get(f"/privacy-decisions/{item['id']}", headers=auth("reviewer")).status_code == 200
+        assert "body" not in client.get(f"/privacy-decisions/{item['id']}", headers=auth("reviewer")).text
+    setup(monkeypatch, tmp_path)
+    with TestClient(create_app()) as client:
+        _, case, _ = _case_with_native_utility(client, suffix="race")
+        def post(): return client.post(f"/release-cases/{case['id']}/privacy-decisions", headers={**auth(), "Idempotency-Key": "m15-race"}).status_code
+        with ThreadPoolExecutor(max_workers=4) as pool: codes = list(pool.map(lambda _: post(), range(4)))
+        assert set(codes) <= {200, 201} and codes.count(201) == 1
+        assert len(client.app.state.store.controls["privacy_decision"]) == 1
