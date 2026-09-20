@@ -25,11 +25,11 @@ from app.privacy_evidence_policy import (
     MAX_EVIDENCE_LIFETIME_SECONDS,
     PPM,
     AttestedPrivacyEvidence,
-    PrivacyEvidenceAuthority,
     PrivacyEvidenceBinding,
     PrivacyEvidenceKind,
     PrivacyEvidencePolicy,
     PrivacyEvidencePolicyError,
+    PrivacyEvidenceVerifier,
 )
 
 
@@ -186,7 +186,7 @@ class PrivacyEvidenceAttestationAuthority:
     expires_at: datetime
     _secret: bytes = field(repr=False, compare=False)
     authority_id: str = field(init=False)
-    _policy_authority: PrivacyEvidenceAuthority = field(init=False, repr=False, compare=False)
+    _policy_verifier: PrivacyEvidenceVerifier = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if type(self) is not PrivacyEvidenceAttestationAuthority:
@@ -213,17 +213,17 @@ class PrivacyEvidenceAttestationAuthority:
         if not _AUTHORITY.fullmatch(authority_id):
             _fail()
         object.__setattr__(self, "authority_id", authority_id)
-        # This is used only for the policy adapter.  The policy signature and
-        # the reference signature have different domain-separation prefixes.
-        object.__setattr__(self, "_policy_authority",
-                           PrivacyEvidenceAuthority(key_id=issuer, secret=self._secret))
+        # The policy receives only a verification capability.  The policy and
+        # reference signatures have separate domain prefixes.
+        object.__setattr__(self, "_policy_verifier",
+                           PrivacyEvidenceVerifier(key_id=issuer, secret=self._secret))
 
     def __repr__(self) -> str:
         return ("PrivacyEvidenceAttestationAuthority(tenant=" + repr(self.tenant)
                 + ", issuer_key_id=" + repr(self.issuer_key_id) + ", secret=<redacted>)")
 
     def is_active(self, *, at: datetime | None = None) -> bool:
-        moment = datetime.now(UTC) if at is None else at
+        moment = datetime.now(UTC).replace(microsecond=0) if at is None else at
         try:
             return (isinstance(moment, datetime) and moment.tzinfo is not None and moment.utcoffset() is not None
                     and _time(moment) < self.expires_at)
@@ -245,7 +245,8 @@ class PrivacyEvidenceAttestationAuthority:
         if (binding.method_provenance_digest != policy.method_provenance_digest
                 or expires <= measured
                 or (expires - measured).total_seconds() > MAX_EVIDENCE_LIFETIME_SECONDS
-                or expires > self.expires_at):
+                or measured >= binding.candidate_expires_at
+                or expires > binding.candidate_expires_at or expires > self.expires_at):
             _fail()
         requirements = {requirement.kind: requirement for requirement in policy.requirements}
         requirement = requirements.get(kind)
@@ -257,7 +258,7 @@ class PrivacyEvidenceAttestationAuthority:
               binding: PrivacyEvidenceBinding, policy: PrivacyEvidencePolicy, observed_value: int,
               measured_at: datetime, expires_at: datetime, at: datetime | None = None) -> PrivacyEvidenceReference:
         """Issue a complete scope attestation inside a trusted worker boundary."""
-        moment = datetime.now(UTC) if at is None else at
+        moment = datetime.now(UTC).replace(microsecond=0) if at is None else at
         if not self.is_active(at=moment):
             _fail()
         checked_kind, checked_binding, checked_policy, measured, expires = self._validate_scope(
@@ -284,7 +285,7 @@ class PrivacyEvidenceAttestationAuthority:
     def verifies(self, reference: object, *, at: datetime | None = None) -> bool:
         """Fail closed for foreign tenants, expired authority, or altered scope."""
         try:
-            moment = datetime.now(UTC) if at is None else at
+            moment = datetime.now(UTC).replace(microsecond=0) if at is None else at
             if type(reference) is not PrivacyEvidenceReference or not self.is_active(at=moment):
                 return False
             kind, binding, policy, measured, expires = self._validate_scope(
@@ -293,24 +294,34 @@ class PrivacyEvidenceAttestationAuthority:
             if (kind is not reference.kind or binding is not reference.binding or policy is not reference.policy
                     or measured != reference.measured_at or expires != reference.expires_at
                     or reference.tenant != self.tenant or reference.authority_id != self.authority_id
-                    or reference.issuer_key_id != self.issuer_key_id):
+                    or reference.issuer_key_id != self.issuer_key_id
+                    or measured > _time(moment) or expires <= _time(moment)):
                 return False
             return hmac.compare_digest(reference.signature, self._sign(reference.canonical()))
         except (PrivacyEvidenceAuthorityError, PrivacyEvidencePolicyError, TypeError, ValueError):
             return False
 
     @property
-    def policy_verifier(self) -> PrivacyEvidenceAuthority:
+    def policy_verifier(self) -> PrivacyEvidenceVerifier:
         """Verifier supplied to ``assess_privacy_evidence`` for this issuer only."""
-        return self._policy_authority
+        return self._policy_verifier
 
     def to_policy_evidence(self, reference: PrivacyEvidenceReference, *, at: datetime | None = None) -> AttestedPrivacyEvidence:
         """Re-verify a reference and create the exact policy-consumable record."""
         if not self.verifies(reference, at=at):
             _fail()
-        return self._policy_authority.issue(
-            kind=reference.kind, evidence_reference=reference.evidence_reference,
-            evidence_digest=reference.evidence_digest, binding=reference.binding, policy=reference.policy,
-            observed_value=reference.observed_value, measured_at=reference.measured_at,
-            expires_at=reference.expires_at,
+        provisional = {
+            "binding_digest": reference.binding.digest, "evidence_digest": reference.evidence_digest,
+            "evidence_policy_digest": reference.policy.digest, "evidence_reference": reference.evidence_reference,
+            "expires_at": _instant(reference.expires_at), "issuer_key_id": self.issuer_key_id,
+            "kind": reference.kind.value, "measured_at": _instant(reference.measured_at),
+            "method_provenance_digest": reference.binding.method_provenance_digest,
+            "observed_value": reference.observed_value,
+        }
+        signature = hmac.new(self._secret, b"privacy-evidence-v1:" + _canonical(provisional),
+                             hashlib.sha256).digest()
+        return AttestedPrivacyEvidence(
+            **{**provisional, "kind": reference.kind, "measured_at": reference.measured_at,
+               "expires_at": reference.expires_at,
+               "signature": "privacy-evidence-sig:v1:" + base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")},
         )
