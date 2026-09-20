@@ -85,3 +85,232 @@ export async function requestRelease(request: Request): Promise<ReleaseView> {
     request.signal?.removeEventListener('abort', cancel)
   }
 }
+
+// M6 control-plane workbench -------------------------------------------------
+//
+// This path is deliberately separate from the legacy, non-exporting M1 demo
+// above.  It only talks to the provenance/rights/policy/run APIs and returns a
+// freshly-built metadata view.  In particular, it never requests an artifact
+// body and it never calls the legacy /releases endpoint.
+
+export type ControlPlaneRequest = {
+  apiBase: string
+  token: string
+  content: string
+  recipient: string
+  purpose: string
+  mode: Mode
+  format?: SourceFormat
+  language?: 'en' | 'und'
+  signal?: AbortSignal
+}
+
+export type CandidateLedgerMetadata = {
+  entityType: string
+  action: string
+  reason: string
+  count: number
+}
+
+export type CandidateMetadataView = {
+  artifactDigest: string
+  schemaDigest: string
+  payloadKind: 'text' | 'structured'
+  mediaType: 'text/plain' | 'application/json'
+  byteCount: number
+  ledger: readonly CandidateLedgerMetadata[]
+}
+
+export type ControlPlaneView = {
+  datasetId: string
+  runId: string
+  state: 'REGISTERED' | 'RUNNING' | 'CANDIDATE' | 'QUARANTINED' | 'FAILED'
+  attempts: number
+  policy: { id: string; key: string; digest: string }
+  rights: { id: string; profileId: string; digest: string; expiresAt: string }
+  candidate: CandidateMetadataView | null
+  message: string
+}
+
+/** A source-independent, UI-safe failure from the metadata-only workflow. */
+export class ControlPlaneFailure extends Error {
+  constructor(message: string) { super(message); this.name = 'ControlPlaneFailure' }
+}
+
+export const DEFAULT_POLICY_NOTICE = 'The comprehensive policy covers PII, health-sensitive, payment, credential, business-confidential, and quasi-identifier data. rules-v1 only covers PII, payment, and credentials, so this workflow is expected to quarantine rather than produce an eligible candidate.'
+
+const CONTROL_POLICY = {
+  policy_id: 'workbench-baseline',
+  version: 'v1',
+  release_modes: ['external_anonymized', 'restricted_pseudonymized'],
+  formats: ['csv', 'json', 'jsonl', 'text'],
+  languages: ['en', 'und'],
+  rules: [
+    { category: 'CREDENTIAL', action: 'block', priority: 0 },
+    { category: 'PAYMENT', action: 'suppress', priority: 10 },
+    { category: 'HEALTH_SENSITIVE', action: 'suppress', priority: 20 },
+    { category: 'PII', action: 'suppress', priority: 30 },
+    { category: 'BUSINESS_CONFIDENTIAL', action: 'review', priority: 40 },
+    { category: 'QUASI_IDENTIFIER', action: 'generalize', priority: 50 },
+  ],
+} as const
+
+const CONTROL_STATES = new Set<ControlPlaneView['state']>(['REGISTERED', 'RUNNING', 'CANDIDATE', 'QUARANTINED', 'FAILED'])
+// Candidate, policy and request identities are explicitly algorithm-labelled.
+// The pre-existing rights-profile contract uses a bare SHA-256 hex digest;
+// retain that distinction rather than silently accepting either form everywhere.
+const DIGEST = /^sha256:[0-9a-f]{64}$/
+const RIGHTS_DIGEST = /^[0-9a-f]{64}$/
+const LABEL = /^[a-z0-9][a-z0-9._:-]{0,127}$/
+const LEDGER_ENTITY = /^[A-Z][A-Z0-9_]{0,63}$/
+const LEDGER_ACTIONS = new Set(['REDACT', 'PSEUDONYMIZE', 'GENERALIZE', 'SUPPRESS', 'NULLIFY'])
+const LEDGER_REASONS = new Set(['POLICY_RULE', 'DETECTOR_FINDING', 'SCHEMA_SAFE_NULL'])
+// Python's canonical ``datetime.isoformat`` may retain six fractional digits;
+// accept only that RFC 3339 UTC representation (not arbitrary date strings).
+const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/
+
+const controlInvalid = () => new ControlPlaneFailure('The API returned invalid control-plane metadata. No candidate body was returned or released.')
+const nonEmpty = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 160
+const sameStrings = (actual: unknown, expected: readonly string[]) => Array.isArray(actual) && actual.length === expected.length && actual.every((value, index) => value === expected[index])
+
+function safeControlId(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9-]{1,128}$/.test(value)
+}
+
+function metadataPostPath(runId: string): string { return `/processing-runs/${encodeURIComponent(runId)}/execute` }
+
+async function postControl(base: string, path: string, token: string, body: unknown, signal: AbortSignal, idempotencyKey?: string): Promise<unknown> {
+  signal.throwIfAborted()
+  let response: Response
+  try {
+    response = await fetch(base.replace(/\/$/, '') + path, {
+      method: 'POST', credentials: 'omit', redirect: 'error', cache: 'no-store', signal,
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) },
+      body: JSON.stringify(body),
+    })
+  } catch {
+    throw new ControlPlaneFailure('Cannot reach the API. No local fallback, candidate body, or release was produced.')
+  }
+  if (!response.ok) {
+    const messages: Record<number, string> = { 401: 'Authentication required.', 403: 'This action is not permitted.', 409: 'The request conflicts with control-plane safeguards.', 413: 'Input exceeds the processing limit.', 422: 'The request did not pass validation.', 429: 'Development capacity reached.', 503: 'The development service is not configured or is unavailable.' }
+    throw new ControlPlaneFailure((messages[response.status] || 'The control-plane request failed.') + ' No candidate body was returned or released.')
+  }
+  try {
+    const value: unknown = await response.json()
+    signal.throwIfAborted()
+    return value
+  } catch {
+    throw controlInvalid()
+  }
+}
+
+function candidateMetadata(value: unknown): CandidateMetadataView | null {
+  if (value === null) return null
+  if (!object(value) || Object.keys(value).length !== 6 || !DIGEST.test(String(value.artifact_digest)) || !DIGEST.test(String(value.schema_digest)) ||
+      (value.payload_kind !== 'text' && value.payload_kind !== 'structured') ||
+      (value.media_type !== 'text/plain' && value.media_type !== 'application/json') ||
+      !Number.isSafeInteger(value.byte_count) || (value.byte_count as number) < 0 || !Array.isArray(value.ledger)) throw controlInvalid()
+  const ledger = value.ledger.map(entry => {
+    // The private artifact contract has a fixed source-free ledger vocabulary.
+    // Do not display arbitrary server strings here: those could carry source
+    // content if an upstream service were misconfigured or compromised.
+    if (!object(entry) || Object.keys(entry).length !== 4 || typeof entry.entity_type !== 'string' || !LEDGER_ENTITY.test(entry.entity_type) ||
+        typeof entry.action !== 'string' || !LEDGER_ACTIONS.has(entry.action) ||
+        typeof entry.reason !== 'string' || !LEDGER_REASONS.has(entry.reason) ||
+        !Number.isSafeInteger(entry.count) || (entry.count as number) < 1) throw controlInvalid()
+    return { entityType: entry.entity_type, action: entry.action, reason: entry.reason, count: entry.count as number }
+  })
+  return {
+    artifactDigest: value.artifact_digest as string, schemaDigest: value.schema_digest as string,
+    payloadKind: value.payload_kind, mediaType: value.media_type,
+    byteCount: value.byte_count as number, ledger,
+  }
+}
+
+function controlRunView(value: unknown, expected: { datasetId: string; policyDigest: string; rightsDigest: string; recipient: string; purpose: string }): Omit<ControlPlaneView, 'policy' | 'rights' | 'message'> {
+  if (!object(value) || !safeControlId(value.id) || value.dataset_id !== expected.datasetId || !CONTROL_STATES.has(value.state as ControlPlaneView['state']) ||
+      !Number.isSafeInteger(value.attempts) || (value.attempts as number) < 0 || (value.attempts as number) > 3 ||
+      !DIGEST.test(String(value.request_digest)) || value.method_id !== 'rules-v1' || (value.language !== 'en' && value.language !== 'und') ||
+      value.policy_digest !== expected.policyDigest || value.rights_digest !== expected.rightsDigest || value.recipient !== expected.recipient || value.purpose !== expected.purpose ||
+      !Array.isArray(value.events)) throw controlInvalid()
+  // Validate events but intentionally do not return them: an API event stream
+  // is not part of the compact workbench contract.
+  for (const event of value.events) {
+    if (!object(event) || !Number.isSafeInteger(event.sequence) || !nonEmpty(event.state) || !nonEmpty(event.action) ||
+        !nonEmpty(event.occurred_at) || !Number.isSafeInteger(event.attempt)) throw controlInvalid()
+  }
+  return { datasetId: expected.datasetId, runId: value.id, state: value.state as ControlPlaneView['state'], attempts: value.attempts as number, candidate: candidateMetadata(value.candidate) }
+}
+
+function newIdempotencyKey(): string {
+  const id = globalThis.crypto?.randomUUID?.()
+  if (typeof id !== 'string' || !id) throw new ControlPlaneFailure('Secure browser randomness is required to register a processing run.')
+  return id
+}
+
+/**
+ * Create a strict ingestion, a resale rights profile, a comprehensive policy,
+ * a processing run, and execute it. This is metadata-only: it neither fetches
+ * candidate bytes nor creates a release/export request.
+ */
+export async function runControlPlane(request: ControlPlaneRequest): Promise<ControlPlaneView> {
+  const format = request.format ?? 'text'
+  const language = request.language ?? 'en'
+  const token = request.token.trim()
+  const recipient = request.recipient.trim()
+  const purpose = request.purpose.trim()
+  if (!['text', 'json', 'jsonl', 'csv'].includes(format)) throw new ControlPlaneFailure('Unsupported source format.')
+  if (!token || !request.content.trim() || !recipient || !purpose || !['external_anonymized', 'restricted_pseudonymized'].includes(request.mode)) throw new ControlPlaneFailure('A token, synthetic input, recipient, purpose, and valid mode are required.')
+  if (!LABEL.test(recipient) || !LABEL.test(purpose)) throw new ControlPlaneFailure('Recipient and purpose must be lowercase control-plane labels.')
+  if (new TextEncoder().encode(request.content).length > 2_000_000) throw new ControlPlaneFailure('Input exceeds the processing limit. No candidate body was returned or released.')
+
+  const controller = new AbortController()
+  let timedOut = false
+  const cancel = () => controller.abort()
+  request.signal?.addEventListener('abort', cancel, { once: true })
+  if (request.signal?.aborted) cancel()
+  const timer = setTimeout(() => { if (!controller.signal.aborted) { timedOut = true; controller.abort() } }, REQUEST_TIMEOUT_MS)
+  try {
+    return await abortable(async () => {
+      const signal = controller.signal
+      const ingestion = await postControl(request.apiBase, '/ingestions', token, {
+        format, name: 'synthetic-workbench', content: request.content, owner: 'development', jurisdiction: 'unspecified',
+        intended_use: purpose, recipient, retention_days: 1,
+      }, signal)
+      if (!object(ingestion) || !safeControlId(ingestion.id)) throw controlInvalid()
+      const datasetId = ingestion.id
+      const rights = await postControl(request.apiBase, '/rights-profiles', token, {
+      profile_id: 'workbench-rights', version: 'v1', permitted_purposes: [purpose], permitted_recipients: [recipient],
+        expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), resale_allowed: true,
+      }, signal)
+  if (!object(rights) || !safeControlId(rights.id) || rights.profile_id !== 'workbench-rights' || rights.version !== 'v1' || !RIGHTS_DIGEST.test(String(rights.digest)) ||
+          typeof rights.expires_at !== 'string' || !ISO_TIME.test(rights.expires_at) || rights.resale_allowed !== true ||
+          !sameStrings(rights.permitted_purposes, [purpose]) || !sameStrings(rights.permitted_recipients, [recipient])) throw controlInvalid()
+      const policy = await postControl(request.apiBase, '/policy-snapshots', token, CONTROL_POLICY, signal)
+      if (!object(policy) || !safeControlId(policy.id) || policy.key !== 'workbench-baseline::v1' || !DIGEST.test(String(policy.digest)) ||
+          !sameStrings(policy.formats, CONTROL_POLICY.formats) || !sameStrings(policy.languages, CONTROL_POLICY.languages) ||
+          !sameStrings(policy.release_modes, CONTROL_POLICY.release_modes)) throw controlInvalid()
+      const run = await postControl(request.apiBase, '/processing-runs', token, {
+        dataset_id: datasetId, rights_profile_id: rights.id, policy_snapshot_id: policy.id, recipient, purpose,
+        release_mode: request.mode, language, method_id: 'rules-v1',
+      }, signal, newIdempotencyKey())
+      const registered = controlRunView(run, { datasetId, policyDigest: policy.digest as string, rightsDigest: rights.digest as string, recipient, purpose })
+      if (registered.state !== 'REGISTERED' || registered.candidate !== null) throw controlInvalid()
+      const executed = controlRunView(await postControl(request.apiBase, metadataPostPath(registered.runId), token, {}, signal), {
+        datasetId, policyDigest: policy.digest as string, rightsDigest: rights.digest as string, recipient, purpose,
+      })
+      return {
+        ...executed,
+        policy: { id: policy.id, key: policy.key, digest: policy.digest as string },
+        rights: { id: rights.id, profileId: rights.profile_id, digest: rights.digest as string, expiresAt: rights.expires_at },
+        message: executed.state === 'QUARANTINED' ? DEFAULT_POLICY_NOTICE : 'Processing completed without returning candidate content.',
+      }
+    }, controller.signal)
+  } catch (cause) {
+    if (controller.signal.aborted) throw new ControlPlaneFailure((timedOut ? 'Request timed out after 30 seconds.' : 'Request cancelled.') + ' No candidate body was returned or released. Cancellation does not undo data already received or stop server-side processing.')
+    throw cause
+  } finally {
+    clearTimeout(timer)
+    request.signal?.removeEventListener('abort', cancel)
+  }
+}

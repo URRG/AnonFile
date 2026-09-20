@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import ts from 'typescript'
 const source = readFileSync(new URL('../src/api.ts', import.meta.url), 'utf8')
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText
-const { requestRelease, validateRelease, REQUEST_TIMEOUT_MS } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
+const { requestRelease, validateRelease, runControlPlane, ControlPlaneFailure, DEFAULT_POLICY_NOTICE, REQUEST_TIMEOUT_MS } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
 const request = { apiBase: 'http://localhost:8000', token: 'test-token', content: 'synthetic', recipient: 'buyer-test', mode: 'external_anonymized' }
 const safe = () => ({ id: 'release-1', dataset_id: 'dataset-1', status: 'evaluation_incomplete', eligibility: 'REVIEW_REQUIRED', output: null, card: { release_id: 'release-1', dataset_id: 'dataset-1', eligibility: 'REVIEW_REQUIRED', policy_version: 'external-release-v1', release_mode: 'external_anonymized', evidence_status: 'INSUFFICIENT_EVIDENCE', scores: null, findings: [], gates: ['EXPORT_DISABLED', 'QUALIFICATION_REQUIRED'], limitations: ['rules-only'] } })
 for (const status of [401, 403, 409, 413, 422, 429, 500, 503]) {
@@ -70,13 +70,14 @@ test('malformed JSON produces fixed error', async t => {
   t.mock.method(globalThis, 'fetch', async () => new Response('raw-secret', { status: 200 }))
   await assert.rejects(requestRelease(request), error => !error.message.includes('raw-secret') && error.message.includes('unsafe response'))
 })
-test('UI has no credential persistence, clipboard export or demo fallback', () => {
+test('UI has no credential persistence, clipboard export, preview or demo fallback', () => {
   const ui = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8')
   assert.doesNotMatch(ui, /localStorage|sessionStorage|clipboard|demoRelease/)
   assert.match(ui, /Synthetic data only/)
-  assert.match(ui, /Do not submit customer data/)
-  assert.match(ui, /accepts and temporarily stores submitted text/)
-  assert.doesNotMatch(ui, /Customer data admission.*disabled/)
+  assert.match(ui, /Do not submit customer, employee, passenger/)
+  assert.match(ui, /receives and temporarily stores submitted content/)
+  assert.match(ui, /never previewed or downloaded here/)
+  assert.match(ui, /token is held only in this page’s memory/)
 })
 
 function shortenDeadline(t) {
@@ -166,15 +167,105 @@ test('successful workflow cleans deadline and external abort listener', async t 
 
 test('UI wires cancellation outside the disabled fieldset and guards late state', () => {
   const ui = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8')
-  assert.match(ui, /<\/fieldset>\s*\{busy && <p><button type="button" onClick=\{\(\) => activeRequest\.current\?\.abort\(\)\}>Cancel request/)
+  assert.match(ui, /<\/fieldset>\s*\{busy && <div className="run-actions"[^>]*>.*onClick=\{cancel\}>Cancel browser request/s)
   assert.match(ui, /signal: controller\.signal/)
   assert.match(ui, /if \(activeRequest\.current\) return/)
   assert.match(ui, /activeRequest\.current === controller && !controller\.signal\.aborted/)
-  assert.match(ui, /activeRequest\.current = null; setBusy\(false\)/)
+  assert.match(ui, /activeRequest\.current = null\s*\r?\n\s*setBusy\(false\)/)
   assert.match(ui, /useEffect\(\(\) => \(\) =>/)
 })
 test('card identity, eligibility and required gates must match safe envelope', () => {
   for (const change of [x => x.card.release_id = 'foreign', x => x.card.dataset_id = 'foreign', x => x.card.eligibility = 'APPROVED_ANONYMIZED', x => x.card.eligibility = 'BLOCKED', x => x.card.gates = [], x => x.status = 'approved', x => x.eligibility = ['REVIEW_REQUIRED'], x => x.card.release_mode = ['external_anonymized']]) {
     const value = safe(); change(value); assert.throws(() => validateRelease(value), /unsafe response/)
   }
+})
+
+const controlRequest = { apiBase: 'http://localhost:8000', token: 'test-token', content: 'synthetic', recipient: 'buyer-test', purpose: 'ai-training-resale', mode: 'external_anonymized' }
+const digest = char => `sha256:${char.repeat(64)}`
+const rightsDigest = char => char.repeat(64)
+const controlRun = (state, candidate = null) => ({
+  id: 'run-1', dataset_id: 'dataset-1', state, attempts: state === 'REGISTERED' ? 0 : 1,
+  request_digest: digest('c'), method_id: 'rules-v1', language: 'en', policy_digest: digest('d'), rights_digest: rightsDigest('e'),
+  recipient: 'buyer-test', purpose: 'ai-training-resale', candidate,
+  events: [{ sequence: 1, state: state === 'REGISTERED' ? 'REGISTERED' : state, action: state === 'REGISTERED' ? 'REGISTERED' : 'QUARANTINED', occurred_at: '2026-09-20T00:00:00Z', attempt: state === 'REGISTERED' ? 0 : 1 }],
+})
+const safeCandidate = () => ({ artifact_digest: digest('a'), schema_digest: digest('b'), payload_kind: 'text', media_type: 'text/plain', byte_count: 12, ledger: [{ entity_type: 'PII', action: 'REDACT', reason: 'POLICY_RULE', count: 1 }] })
+const controlResponses = (state = 'QUARANTINED', candidate = safeCandidate()) => [
+  { id: 'dataset-1' },
+  { id: 'rights-1', profile_id: 'workbench-rights', version: 'v1', digest: rightsDigest('e'), expires_at: '2026-09-20T01:00:00Z', resale_allowed: true, permitted_purposes: ['ai-training-resale'], permitted_recipients: ['buyer-test'] },
+  { id: 'policy-1', key: 'workbench-baseline::v1', digest: digest('d'), formats: ['csv', 'json', 'jsonl', 'text'], languages: ['en', 'und'], release_modes: ['external_anonymized', 'restricted_pseudonymized'] },
+  controlRun('REGISTERED'), controlRun(state, candidate),
+]
+
+test('M6 control plane uses five strict metadata-only requests and never calls legacy releases', async t => {
+  const payloads = []
+  let index = 0
+  const mock = t.mock.method(globalThis, 'fetch', async (url, options) => {
+    payloads.push({ url, options, body: JSON.parse(options.body) })
+    return Response.json(controlResponses()[index++])
+  })
+  const view = await runControlPlane(controlRequest)
+  assert.equal(view.state, 'QUARANTINED')
+  assert.equal(view.candidate?.artifactDigest, digest('a'))
+  assert.equal(view.message, DEFAULT_POLICY_NOTICE)
+  assert.deepEqual(payloads.map(call => call.url), [
+    'http://localhost:8000/ingestions', 'http://localhost:8000/rights-profiles', 'http://localhost:8000/policy-snapshots',
+    'http://localhost:8000/processing-runs', 'http://localhost:8000/processing-runs/run-1/execute',
+  ])
+  assert.equal(mock.mock.calls.length, 5)
+  assert.equal(payloads.some(call => call.url.includes('/releases')), false)
+  assert.equal(payloads[3].options.headers['Idempotency-Key'].length > 0, true)
+  assert.equal(payloads[4].body && Object.keys(payloads[4].body).length, 0)
+  assert.deepEqual(payloads[2].body.rules.map(rule => rule.category), ['CREDENTIAL', 'PAYMENT', 'HEALTH_SENSITIVE', 'PII', 'BUSINESS_CONFIDENTIAL', 'QUASI_IDENTIFIER'])
+  assert.equal(payloads[1].body.permitted_purposes[0], 'ai-training-resale')
+  assert.equal(payloads[1].body.permitted_recipients[0], 'buyer-test')
+})
+
+test('M6 refuses an API candidate body and does not return it', async t => {
+  let index = 0
+  t.mock.method(globalThis, 'fetch', async () => Response.json(controlResponses('CANDIDATE', { ...safeCandidate(), body: 'raw-secret' })[index++]))
+  await assert.rejects(runControlPlane(controlRequest), error => error instanceof ControlPlaneFailure && !error.message.includes('raw-secret') && error.message.includes('invalid control-plane'))
+})
+
+test('M6 refuses non-contract ledger strings that could contain source content', async t => {
+  for (const mutate of [
+    entry => { entry.entity_type = 'alex@example.com' },
+    entry => { entry.action = 'raw-secret' },
+    entry => { entry.reason = 'raw-secret' },
+  ]) {
+    let index = 0
+    const candidate = safeCandidate()
+    mutate(candidate.ledger[0])
+    t.mock.method(globalThis, 'fetch', async () => Response.json(controlResponses('QUARANTINED', candidate)[index++]))
+    await assert.rejects(runControlPlane(controlRequest), error => error instanceof ControlPlaneFailure && !error.message.includes('raw-secret') && !error.message.includes('alex@example.com'))
+    t.mock.reset()
+  }
+})
+
+test('M6 validates recipient and purpose labels before sending source', async t => {
+  const mock = t.mock.method(globalThis, 'fetch', async () => { throw new Error('must not run') })
+  await assert.rejects(runControlPlane({ ...controlRequest, recipient: 'OpenAI' }), /lowercase control-plane labels/)
+  await assert.rejects(runControlPlane({ ...controlRequest, purpose: 'AI training' }), /lowercase control-plane labels/)
+  assert.equal(mock.mock.calls.length, 0)
+})
+
+test('M6 transport failures never echo a response body or create a fallback', async t => {
+  let index = 0
+  t.mock.method(globalThis, 'fetch', async () => index++ === 0 ? Response.json(controlResponses()[0]) : new Response('raw-secret', { status: 500 }))
+  await assert.rejects(runControlPlane(controlRequest), error => error instanceof ControlPlaneFailure && !error.message.includes('raw-secret') && error.message.includes('No candidate body'))
+})
+
+test('M6 cancellation stops client progression before rights or policy requests', async t => {
+  const controller = new AbortController()
+  let begin
+  const started = new Promise(resolve => { begin = resolve })
+  const mock = t.mock.method(globalThis, 'fetch', async () => {
+    begin()
+    return new Promise(() => {})
+  })
+  const result = runControlPlane({ ...controlRequest, signal: controller.signal })
+  await started
+  controller.abort('raw-secret-reason')
+  await assert.rejects(result, error => error instanceof ControlPlaneFailure && error.message.startsWith('Request cancelled.') && !error.message.includes('raw-secret'))
+  assert.equal(mock.mock.calls.length, 1)
 })
