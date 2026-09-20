@@ -11,6 +11,9 @@ It neither accepts nor emits payload bytes, personal data, recipient names,
 contract text, export URLs, credentials, or release handles. Every assertion
 and resulting record is canonical JSON/digest bound. The resulting readiness
 evidence is HMAC-signed and tamper-verifiable only by the private authority.
+Non-quarantined evidence cannot be serialized as a control record until that
+same authority verifies its signature in-process; a structurally forged HMAC
+string is therefore not reusable readiness evidence.
 
 This is deliberately fail-closed. Missing, mismatched, future-dated, expired,
 or unverifiable assertions yield `QUARANTINED`. Complete evidence yields only

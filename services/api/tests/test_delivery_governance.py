@@ -11,6 +11,7 @@ from app.delivery_governance import (
     DeliveryEvidenceAuthority,
     DeliveryGovernanceError,
     DeliveryReadinessReason,
+    DeliveryReadinessEvidence,
     DeliveryReadinessStatus,
     assess_delivery_readiness,
 )
@@ -71,6 +72,31 @@ def test_missing_assertion_and_absent_authority_fail_closed():
     assert DeliveryReadinessReason.MISSING_REQUIRED_ASSERTIONS in result.reasons
     assert DeliveryReadinessReason.ASSERTION_UNVERIFIED in result.reasons
     assert result.signature is None
+
+
+def test_non_quarantined_evidence_cannot_bypass_authority_verification():
+    current_binding, signer = binding(), authority()
+    signed_assertions = assertions(current_binding, signer)
+    with pytest.raises(DeliveryGovernanceError):
+        DeliveryReadinessEvidence(
+            delivery_id="direct-unsigned", binding=current_binding, assertions=signed_assertions,
+            assessed_at=NOW, expires_at=NOW + timedelta(days=1),
+            status=DeliveryReadinessStatus.INDEPENDENT_APPROVAL_REQUIRED,
+            reasons=(DeliveryReadinessReason.INDEPENDENT_RELEASE_AUTHORIZATION_REQUIRED,),
+            issuer_key_id=None, signature=None)
+
+    forged = DeliveryReadinessEvidence(
+        delivery_id="direct-forged", binding=current_binding, assertions=signed_assertions,
+        assessed_at=NOW, expires_at=NOW + timedelta(days=1),
+        status=DeliveryReadinessStatus.INDEPENDENT_APPROVAL_REQUIRED,
+        reasons=(DeliveryReadinessReason.INDEPENDENT_RELEASE_AUTHORIZATION_REQUIRED,),
+        issuer_key_id="delivery-control-v1", signature="hmac-sha256:" + "0" * 64)
+    with pytest.raises(DeliveryGovernanceError):
+        forged.to_record()
+
+    issued = assess_delivery_readiness(delivery_id="authority-issued", binding=current_binding,
+                                       assertions=signed_assertions, at=NOW, authority=signer)
+    assert issued.to_record()["status"] == DeliveryReadinessStatus.INDEPENDENT_APPROVAL_REQUIRED
 
 
 def test_tampering_binding_or_assertion_is_quarantined_and_record_rejects():

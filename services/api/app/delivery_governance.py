@@ -250,6 +250,39 @@ class DeliveryEvidenceAuthority:
                 and evidence.issuer_key_id == self.key_id and evidence.signature is not None
                 and hmac.compare_digest(evidence.signature, self.sign_evidence(evidence.digest)))
 
+    def issue_evidence(self, *, delivery_id: str, binding: "DeliveryBinding",
+                       assertions: tuple["DeliveryAssertion", ...], assessed_at: datetime,
+                       expires_at: datetime, status: "DeliveryReadinessStatus",
+                       reasons: tuple["DeliveryReadinessReason", ...]) -> "DeliveryReadinessEvidence":
+        """Create a sealed evidence record without returning an unsigned one.
+
+        A syntactically valid placeholder exists only inside this factory so
+        the digest can include the issuer key identifier before the final HMAC
+        is calculated.  It is never returned or persisted.
+        """
+        placeholder = "hmac-sha256:" + "0" * 64
+        provisional = DeliveryReadinessEvidence(
+            delivery_id=delivery_id, binding=binding, assertions=assertions, assessed_at=assessed_at,
+            expires_at=expires_at, status=status, reasons=reasons, issuer_key_id=self.key_id,
+            signature=placeholder)
+        evidence = DeliveryReadinessEvidence(
+            delivery_id=provisional.delivery_id, binding=provisional.binding,
+            assertions=provisional.assertions, assessed_at=provisional.assessed_at,
+            expires_at=provisional.expires_at, status=provisional.status,
+            reasons=provisional.reasons, issuer_key_id=self.key_id,
+            signature=self.sign_evidence(provisional.digest))
+        if not self.verifies_evidence(evidence):
+            _fail()
+        object.__setattr__(evidence, "_authority_verified", True)
+        return evidence
+
+    def restore_evidence(self, evidence: object) -> "DeliveryReadinessEvidence":
+        """Mark a parsed record usable only after this authority verifies it."""
+        if not self.verifies_evidence(evidence):
+            _fail()
+        object.__setattr__(evidence, "_authority_verified", True)
+        return evidence
+
 
 @dataclass(frozen=True, slots=True)
 class DeliveryReadinessEvidence:
@@ -266,6 +299,7 @@ class DeliveryReadinessEvidence:
     signature: str | None = field(repr=False)
     posture: str = "NO_DELIVERY_AUTHORIZATION"
     digest: str = field(init=False)
+    _authority_verified: bool = field(init=False, default=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "delivery_id", _identifier(self.delivery_id))
@@ -296,6 +330,9 @@ class DeliveryReadinessEvidence:
             object.__setattr__(self, "issuer_key_id", _identifier(self.issuer_key_id))
             if self.signature is not None:
                 object.__setattr__(self, "signature", _signature(self.signature))
+        if (self.status is DeliveryReadinessStatus.INDEPENDENT_APPROVAL_REQUIRED
+                and (self.issuer_key_id is None or self.signature is None)):
+            _fail()
         object.__setattr__(self, "digest", _hash(self.canonical()))
 
     def canonical(self) -> dict[str, object]:
@@ -309,6 +346,12 @@ class DeliveryReadinessEvidence:
 
     def to_record(self) -> dict[str, object]:
         """Return bounded control metadata only: no payload or delivery handle exists."""
+        # A direct construction can validate structural syntax but cannot
+        # attest HMAC ownership.  Prevent it from becoming a reusable positive
+        # control record unless this authority verified it in this process.
+        if (self.status is DeliveryReadinessStatus.INDEPENDENT_APPROVAL_REQUIRED
+                and not self._authority_verified):
+            _fail()
         return {**self.canonical(), "digest": self.digest, "signature": self.signature}
 
     @classmethod
@@ -352,9 +395,9 @@ class DeliveryReadinessEvidence:
                          status=DeliveryReadinessStatus(value["status"]),
                          reasons=tuple(DeliveryReadinessReason(item) for item in value["reasons"]),
                          issuer_key_id=value["issuer_key_id"], signature=value["signature"], posture=value["posture"])
-            if value["digest"] != record.digest or not authority.verifies_evidence(record):
+            if value["digest"] != record.digest:
                 _fail()
-            return record
+            return authority.restore_evidence(record)
         except (KeyError, TypeError, ValueError, OverflowError):
             _fail()
 
@@ -398,15 +441,10 @@ def assess_delivery_readiness(*, delivery_id: str, binding: DeliveryBinding,
         status = DeliveryReadinessStatus.INDEPENDENT_APPROVAL_REQUIRED
         reasons.append(DeliveryReadinessReason.INDEPENDENT_RELEASE_AUTHORIZATION_REQUIRED)
     expiry = min((binding.candidate_expires_at, *(item.expires_at for item in assertion_values)), default=binding.candidate_expires_at)
-    provisional = DeliveryReadinessEvidence(
-        delivery_id=delivery_id, binding=binding, assertions=assertion_values, assessed_at=instant,
-        expires_at=expiry, status=status, reasons=tuple(reasons),
-        issuer_key_id=authority.key_id if isinstance(authority, DeliveryEvidenceAuthority) else None,
-        signature=None)
     if not isinstance(authority, DeliveryEvidenceAuthority):
-        return provisional
-    return DeliveryReadinessEvidence(
-        delivery_id=provisional.delivery_id, binding=provisional.binding, assertions=provisional.assertions,
-        assessed_at=provisional.assessed_at, expires_at=provisional.expires_at, status=provisional.status,
-        reasons=provisional.reasons, issuer_key_id=authority.key_id,
-        signature=authority.sign_evidence(provisional.digest))
+        return DeliveryReadinessEvidence(
+            delivery_id=delivery_id, binding=binding, assertions=assertion_values, assessed_at=instant,
+            expires_at=expiry, status=status, reasons=tuple(reasons), issuer_key_id=None, signature=None)
+    return authority.issue_evidence(
+        delivery_id=delivery_id, binding=binding, assertions=assertion_values, assessed_at=instant,
+        expires_at=expiry, status=status, reasons=tuple(reasons))
