@@ -55,9 +55,11 @@ def test_policy_block_quarantines_private_candidate_without_exposing_it(client):
     assert client.post(f"/processing-runs/{run['id']}/residual-evaluations", headers=auth("reviewer")).status_code == 409
 
 
-def test_residual_detector_uses_the_same_taxonomy_mapping_as_processing():
-    result = _residual_detector("ABCPD1234E")
-    assert dict(result.residual_counts) == {"PII": 1, "PAYMENT": 0, "CREDENTIAL": 0}
+def test_residual_detector_does_not_claim_unqualified_contextual_rule_coverage():
+    result = _residual_detector("ABCPD1234E; diagnosis: synthetic-condition; internal roadmap: synthetic-roadmap; age: 47")
+    assert dict(result.residual_counts) == {
+        "CREDENTIAL": 0, "PAYMENT": 0, "PII": 1,
+    }
     assert result.assessed_categories == frozenset({"PII", "PAYMENT", "CREDENTIAL"})
 
 

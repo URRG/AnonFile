@@ -45,9 +45,12 @@ def _fail() -> None:
     raise RulesPolicyExecutionError()
 
 
-# This mapping is deliberately narrow.  The rules processor has no health,
-# business-confidential, or quasi-identifier recognizers, so it must not claim
-# coverage for those policy families.
+# Every label below has a concrete bounded recognizer in ``processing``.  That
+# makes the mapping safe for finding/operation accounting, but it does *not*
+# make every family policy-qualified: the new health, business and quasi rules
+# have no calibrated corpus, semantic model, or linkage evaluation.  Keep that
+# distinction explicit so adding a recognizer cannot silently make rules-v1
+# eligible to create an all-taxonomy candidate.
 RULES_LABEL_TO_CATEGORY: Mapping[str, str] = MappingProxyType({
     "AADHAAR": "PII",
     "ADDRESS": "PII",
@@ -56,14 +59,29 @@ RULES_LABEL_TO_CATEGORY: Mapping[str, str] = MappingProxyType({
     "DATE_OF_BIRTH": "PII",
     "EMAIL": "PII",
     "GOVERNMENT_ID": "PII",
+    "HEALTH_SENSITIVE": "HEALTH_SENSITIVE",
     "IP_ADDRESS": "PII",
     "PAN": "PII",
     "PAYMENT_SECRET": "PAYMENT",
     "PERSON_NAME": "PII",
     "PHONE": "PII",
     "SENSITIVE_NUMBER": "PII",
+    "BUSINESS_CONFIDENTIAL": "BUSINESS_CONFIDENTIAL",
+    "QUASI_IDENTIFIER": "QUASI_IDENTIFIER",
 })
-RULES_COVERED_CATEGORIES = frozenset(RULES_LABEL_TO_CATEGORY.values())
+# Categories for which this implementation has at least one bounded detector.
+# This is useful metadata for an evaluator and must never be interpreted as a
+# release/qualification assertion.
+RULES_DETECTED_CATEGORIES = frozenset(RULES_LABEL_TO_CATEGORY.values())
+
+# Categories with the legacy policy bridge support only.  The three new
+# detector families remain deliberately unqualified until they have independent
+# evaluation evidence and governed operational semantics.  M5's fail-closed
+# full-taxonomy execution gate relies on this set, not detector presence.
+RULES_POLICY_COVERED_CATEGORIES = frozenset({"PII", "PAYMENT", "CREDENTIAL"})
+# Backwards-compatible name for callers of the policy bridge.  New code should
+# use the qualified name above or RULES_DETECTED_CATEGORIES as appropriate.
+RULES_COVERED_CATEGORIES = RULES_POLICY_COVERED_CATEGORIES
 
 # A redaction marker, null scalar, or explicit suppression removes the source
 # value and may implement a policy's suppress action.  Generalization and

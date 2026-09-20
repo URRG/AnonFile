@@ -26,15 +26,18 @@ MODES = frozenset({"external_anonymized", "restricted_pseudonymized"})
 LIMITATIONS = (
     "Rules-only coverage is incomplete; no privacy qualification or release approval.",
     "Free-text names, addresses, health context, business confidentiality and indirect identification are not comprehensively detected.",
+    "Health, business-confidential and quasi-identifier recognizers are bounded contextual/field-name rules only; they are detection capabilities, not qualified category coverage.",
     "Only text and JSON records are supported; language, semantic, document, media and linkage coverage are unqualified.",
     "Pattern matches are candidates, not validated identity or payment identifiers; false positives and false negatives remain.",
     "Container-valued sensitive fields and reserved transformation markers in source strings or keys are unsupported and rejected.",
 )
 SEVERITY = {"medium": 1, "high": 2, "critical": 3}
-PRIORITY = {"CREDENTIAL": 9, "PAYMENT_SECRET": 8, "CARD": 7, "AADHAAR": 6,
-            "GOVERNMENT_ID": 6, "SENSITIVE_NUMBER": 5, "PAN": 4, "EMAIL": 3,
+PRIORITY = {"CREDENTIAL": 12, "PAYMENT_SECRET": 11, "CARD": 10, "AADHAAR": 9,
+            "HEALTH_SENSITIVE": 8, "BUSINESS_CONFIDENTIAL": 8, "QUASI_IDENTIFIER": 7,
+            "GOVERNMENT_ID": 6,
+            "SENSITIVE_NUMBER": 5, "PAN": 4, "EMAIL": 3,
             "PHONE": 2, "IP_ADDRESS": 1, "PERSON_NAME": 1, "ADDRESS": 1, "DATE_OF_BIRTH": 1}
-_RESERVED_MARKER = re.compile(r"\[(?:REDACTED_[A-Z_]+|[A-Z][A-Z_]*_[0-9]{4,})\]", re.IGNORECASE)
+_RESERVED_MARKER = re.compile(r"\[(?:REDACTED_[A-Z_]+|GENERALIZED_QUASI_IDENTIFIER|[A-Z][A-Z_]*_[0-9]{4,})\]", re.IGNORECASE)
 
 # Quoted alternatives consume spaces/escaped quotes inside secret values. A
 # malformed/unterminated quoted value is suppressed through the end of its line.
@@ -48,6 +51,31 @@ _EMAIL = re.compile(r"(?<![\w.!#$%&'*+/=?^`{|}~-])[\w.!#$%&'*+/=?^`{|}~-]+@[\w-]
 _PAN = re.compile(r"(?<!\w)[A-Z]{5}[0-9]{4}[A-Z](?!\w)", re.IGNORECASE)
 _IP = re.compile(r"(?<![\w.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![\w.])")
 _NUMBER = re.compile(r"(?<!\w)\+?[0-9](?:[0-9 ()-]*[0-9])?(?!\w)")
+# These are intentionally contextual rules, not vocabulary matches.  A bare
+# word such as "allergy" or "confidential" is not enough to redact prose.
+# A match consumes the entire delimited value.  Truncating at an arbitrary
+# detector cap would redact a prefix then retain an unsafe tail; input-wide byte
+# bounds already cap the work and an unquoted value ends at newline/comma/semicolon.
+_HEALTH_CONTEXT = re.compile(
+    r'''(?ix)\b(?:diagnosis|medical[_\s-]?(?:condition|record(?:[_\s-]?number)?|history)|
+        prescription|medication|treatment[_\s-]?plan|lab[_\s-]?result|allerg(?:y|ies)|
+        disability|mental[_\s-]?health|health[_\s-]?insurance)\b\s*(?:[:=]|is\b)\s*
+        (?:"(?:[^"\\\r\n]|\\.)+"|'(?:[^'\\\r\n]|\\.)+'|[^\r\n,;]+)''',
+    re.MULTILINE,
+)
+_BUSINESS_CONTEXT = re.compile(
+    r'''(?ix)\b(?:trade[_\s-]?secret|confidential(?:[_\s-]?(?:business|internal|commercial))?|
+        internal[_\s-]?(?:project|roadmap|forecast)|pricing[_\s-]?(?:strategy|model)|
+        source[_\s-]?code)\b\s*(?:[:=]|is\b)\s*
+        (?:"(?:[^"\\\r\n]|\\.)+"|'(?:[^'\\\r\n]|\\.)+'|[^\r\n,;]+)''',
+    re.MULTILINE,
+)
+_QUASI_CONTEXT = re.compile(
+    r'''(?ix)\b(?:age|birth[_\s-]?year|postal[_\s-]?code|zip(?:[_\s-]?code)?|postcode|
+        gender|sex|race|ethnicity|nationality|occupation|marital[_\s-]?status|household[_\s-]?size)\b
+        \s*(?:[:=]|is\b)\s*(?:"(?:[^"\\\r\n]|\\.)+"|'(?:[^'\\\r\n]|\\.)+'|[^\r\n,;]+)''',
+    re.MULTILINE,
+)
 _FIELD_TYPES: dict[str, tuple[str, str]] = {}
 for _names, _kind, _severity in (
     (("password", "passwd", "secret", "apikey", "token", "accesstoken", "refreshtoken", "authorization", "privatekey"), "CREDENTIAL", "critical"),
@@ -60,6 +88,14 @@ for _names, _kind, _severity in (
     (("email", "emailaddress"), "EMAIL", "high"),
     (("phone", "phonenumber", "mobile", "mobilenumber", "telephone"), "PHONE", "high"),
     (("dob", "dateofbirth", "birthdate"), "DATE_OF_BIRTH", "high"),
+    (("diagnosis", "medicalcondition", "medicalrecord", "medicalrecordnumber", "medicalhistory",
+      "prescription", "medication", "treatmentplan", "labresult", "allergy", "allergies", "disability",
+      "mentalhealth", "healthinsurance"), "HEALTH_SENSITIVE", "high"),
+    (("tradesecret", "businesssecret", "confidentialbusiness", "confidentialinternal",
+      "internalproject", "internalroadmap", "internalforecast", "pricingstrategy", "pricingmodel",
+      "sourcecode"), "BUSINESS_CONFIDENTIAL", "high"),
+    (("age", "birthyear", "postalcode", "zipcode", "zip", "postcode", "gender", "sex", "race",
+      "ethnicity", "nationality", "occupation", "maritalstatus", "householdsize"), "QUASI_IDENTIFIER", "medium"),
 ):
     for _name in _names:
         _FIELD_TYPES[_name] = (_kind, _severity)
@@ -109,7 +145,10 @@ def detect_text(text: str) -> tuple[Span, ...]:
 
     for pattern, kind, severity in ((_CREDENTIAL, "CREDENTIAL", "critical"),
                                     (_AUTH_TOKEN, "CREDENTIAL", "critical"),
-                                    (_EMAIL, "EMAIL", "high"), (_PAN, "PAN", "high")):
+                                    (_EMAIL, "EMAIL", "high"), (_PAN, "PAN", "high"),
+                                    (_HEALTH_CONTEXT, "HEALTH_SENSITIVE", "high"),
+                                    (_BUSINESS_CONTEXT, "BUSINESS_CONFIDENTIAL", "high"),
+                                    (_QUASI_CONTEXT, "QUASI_IDENTIFIER", "medium")):
         for match in pattern.finditer(normalized):
             add(match.start(), match.end(), kind, severity)
     for match in _IP.finditer(normalized):
@@ -225,6 +264,11 @@ def process_payload(*, content: str | None = None, records: list[dict] | None = 
     redacted_fields = 0
 
     def marker(kind: str, original: str) -> tuple[str, LedgerAction]:
+        # This is an intentionally total generalization: no source characters
+        # survive, and all quasi values are mapped to one broad equivalence
+        # class.  It is not presented as a utility-preserving generalization.
+        if kind == "QUASI_IDENTIFIER":
+            return "[GENERALIZED_QUASI_IDENTIFIER]", LedgerAction.GENERALIZE
         if mode == "external_anonymized" or kind in {"CREDENTIAL", "PAYMENT_SECRET"}:
             return f"[REDACTED_{kind}]", LedgerAction.REDACT
         key = (kind, original)  # exact original; never case-fold identities
