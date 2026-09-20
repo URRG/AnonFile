@@ -58,6 +58,9 @@ from app.release_case import ReleaseCase, ReleaseCaseError
 from app.release_case_authority import (ReleaseCaseAuthorityError,
                                         authority_for_tenant as release_case_authority_for_tenant,
                                         load_release_case_authorities)
+from app.privacy_decision import (PrivacyDecision, PrivacyDecisionError, control_for_tenant as privacy_decision_control_for_tenant,
+                                  load_privacy_decision_controls)
+from app.privacy_evidence_policy import (PrivacyEvidenceBinding, PrivacyEvidenceKind, assess_privacy_evidence)
 from app.policies import TAXONOMY_CATEGORIES
 
 MAX_BODY_BYTES = 2_100_000
@@ -393,6 +396,19 @@ class ReleaseCaseView(BaseModel):
     posture: Literal["NO_RELEASE_AUTHORIZATION"]
     limitations: list[str]
 
+class PrivacyDecisionView(BaseModel):
+    """Signed evidence holding/quarantine only; never a release authorization."""
+    id: str
+    case_id: str
+    case_digest: str
+    outcome: Literal["QUARANTINED", "INSUFFICIENT_EVIDENCE"]
+    reasons: list[str]
+    decision_digest: str
+    evidence: list[dict[str, str]]
+    expires_at: datetime
+    posture: Literal["NO_RELEASE_AUTHORIZATION"]
+    limitations: list[str]
+
 class QualificationCreate(StrictModel):
     evaluation_id: str = Field(min_length=1, max_length=80)
     max_evaluation_age_seconds: int = Field(default=3600, ge=1, le=2_678_400)
@@ -703,6 +719,19 @@ def release_case_view(record: dict[str, Any]) -> ReleaseCaseView:
     except (KeyError, TypeError, ValueError, ReleaseCaseError):
         raise HTTPException(503, "Control integrity verification failed") from None
 
+def privacy_decision_view(record: dict[str, Any]) -> PrivacyDecisionView:
+    try:
+        payload=record["payload"]
+        if set(payload)!={"case_id","run_id","idempotency_key","decision"}: raise ValueError
+        item=PrivacyDecision.from_record(payload["decision"])
+        if item.decision_id != record["id"] or item.tenant != record["tenant"] or item.case_id != payload["case_id"]: raise ValueError
+        return PrivacyDecisionView(id=item.decision_id, case_id=item.case_id, case_digest=item.case_digest,
+            outcome=item.decision.outcome.value, reasons=[x.value for x in item.decision.reasons], decision_digest=item.digest,
+            evidence=[{"kind":kind,"record_id":record_id,"record_digest":digest} for kind,record_id,digest in item.evidence_references],
+            expires_at=item.expires_at, posture="NO_RELEASE_AUTHORIZATION", limitations=["NO_RELEASE_AUTHORIZATION", "A privacy evidence holding or quarantine is not approval, export, delivery, or a download handle."])
+    except (KeyError,TypeError,ValueError,PrivacyDecisionError):
+        raise HTTPException(503,"Control integrity verification failed") from None
+
 def private_candidate_artifact(private: dict[str, Any]) -> CandidateArtifact:
     """Recreate a validated candidate only within a trusted worker boundary."""
     try:
@@ -777,6 +806,10 @@ def create_app() -> FastAPI:
         app.state.release_case_authorities = load_release_case_authorities()
     except ReleaseCaseAuthorityError:
         raise RuntimeError("Invalid release-case authority configuration") from None
+    try:
+        app.state.privacy_decision_controls = load_privacy_decision_controls()
+    except PrivacyDecisionError:
+        raise RuntimeError("Invalid privacy-decision authority configuration") from None
     app.state.store = create_store()
     app.add_middleware(BodyLimitMiddleware)
     origins = [v.strip() for v in os.getenv("WEB_ORIGIN", "http://localhost:3000,http://localhost:5173").split(",") if v.strip()]
@@ -1331,6 +1364,112 @@ def create_app() -> FastAPI:
         except ReleaseCaseAuthorityError:
             raise HTTPException(409, "Release-case authority is unavailable") from None
         return release_case_view(app.state.store.get_release_case(case_id, principal.tenant, authority))
+
+    def assess_case_privacy(case_id: str, tenant: str, moment: datetime, decision_id: str):
+        """Server-only M15 adapter; native report validation precedes M12 V2 issue.
+
+        Residual and benchmark currently have no source-safe candidate-bound
+        attested control appropriate for this gate, so they deliberately remain
+        missing.  They are never converted from a naked digest or aggregate.
+        """
+        authority = release_case_authority_for_tenant(app.state.release_case_authorities, tenant=tenant, at=moment)
+        raw_case = app.state.store.get_release_case(case_id, tenant, authority)
+        case = ReleaseCase.from_record(raw_case["payload"]["case"])
+        control = privacy_decision_control_for_tenant(app.state.privacy_decision_controls, tenant=tenant, at=moment)
+        binding = PrivacyEvidenceBinding(candidate_artifact_digest=case.binding.candidate_artifact_digest,
+            processing_policy_digest=case.binding.processing_policy_digest, rights_digest=case.binding.rights_digest,
+            recipient_reference="sha256:" + hashlib.sha256(case.binding.recipient_commitment.encode("ascii")).hexdigest(),
+            purpose_code=case.binding.purpose_code, method_provenance_digest=case.binding.method_provenance_digest,
+            candidate_expires_at=case.binding.candidate_expires_at)
+        policy = control.policy(binding)
+        candidates = {
+            PrivacyEvidenceKind.UTILITY: ("utility_evidence", utility_evidence_view, app.state.utility_evidence_authorities),
+            PrivacyEvidenceKind.DISCLOSURE_RISK: ("disclosure_risk_evidence", disclosure_risk_evidence_view, app.state.disclosure_risk_authorities),
+            PrivacyEvidenceKind.LINKAGE: ("linkage_risk_evidence", linkage_risk_evidence_view, app.state.linkage_risk_authorities),
+        }
+        evidence=[]; refs=[]; expiry=min(case.expires_at, control.decision_authority.expires_at)
+        for kind, (storage_kind, renderer, authorities) in candidates.items():
+            records=[record for record in app.state.store.list_controls(storage_kind, tenant)
+                     if record.get("payload",{}).get("run_id") == case.binding.processing_run_id]
+            if len(records) != 1:
+                if len(records) > 1: evidence.append(object()) # ambiguous source selection quarantines
+                continue
+            record=records[0]
+            try:
+                view=renderer(record, **({"utility_evidence_authorities": authorities} if kind is PrivacyEvidenceKind.UTILITY else
+                                           {"disclosure_risk_authorities": authorities} if kind is PrivacyEvidenceKind.DISCLOSURE_RISK else
+                                           {"linkage_risk_authorities": authorities}))
+                report=view.report
+                if (view.candidate_artifact_digest != case.binding.candidate_artifact_digest
+                        or view.processing_request_digest != case.binding.processing_request_digest): raise ValueError
+                if kind is PrivacyEvidenceKind.UTILITY:
+                    if report.get("status") != "ASSESSED": raise ValueError
+                    observed=1_000_000 if report.get("structure_preserved") and report.get("unit_count_preserved") else 0
+                elif kind is PrivacyEvidenceKind.DISCLOSURE_RISK:
+                    if report.get("status") != "ASSESSED" or type(report.get("unique_record_count")) is not int: raise ValueError
+                    observed=report["unique_record_count"]
+                else:
+                    if report.get("status") != "ASSESSED" or type(report.get("unique_match_count")) is not int: raise ValueError
+                    observed=report["unique_match_count"]
+                created=datetime.fromisoformat(record["created_at"].replace("Z","+00:00")).astimezone(UTC).replace(microsecond=0)
+                record_expiry=datetime.fromtimestamp(record["expires_at"], UTC).replace(microsecond=0)
+                item_expiry=min(record_expiry, case.expires_at, control.decision_authority.expires_at)
+                issuer=control.evidence_authority(kind)
+                reference=issuer.issue(kind=kind, evidence_reference=control.opaque_reference(kind=kind, record_id=record["id"], record_digest=view.report_digest),
+                    evidence_digest=view.report_digest, binding=binding, policy=policy, observed_value=observed,
+                    measured_at=created, expires_at=item_expiry, at=moment)
+                evidence.append(issuer.to_policy_evidence(reference, at=moment))
+                refs.append((kind.value, record["id"], view.report_digest)); expiry=min(expiry,item_expiry)
+            except (HTTPException, KeyError, TypeError, ValueError, PrivacyDecisionError):
+                evidence.append(object()) # invalid native evidence is a quarantining policy input
+        assessment=assess_privacy_evidence(decision_id="m15-policy-decision", binding=binding, policy=policy,
+            evidence=tuple(evidence), authorities=tuple(x.policy_verifier for _,x in control.evidence_authorities), at=moment)
+        decision=control.decision_authority.issue(decision_id=decision_id,
+            case_id=case_id, case_digest=case.digest, decision=assessment, evidence_references=tuple(sorted(refs)), expires_at=expiry, at=moment)
+        return decision, authority
+
+    @app.post("/release-cases/{case_id}/privacy-decisions", response_model=PrivacyDecisionView, status_code=201)
+    async def create_privacy_decision(case_id: str, request_context: Request, principal: Principal = Depends(require_roles("processor"))):
+        keys=request_context.headers.getlist("idempotency-key")
+        if len(keys)!=1 or await request_context.body(): raise HTTPException(422,"Request validation failed")
+        moment=now().replace(microsecond=0)
+        try:
+            control=privacy_decision_control_for_tenant(app.state.privacy_decision_controls, tenant=principal.tenant, at=moment)
+            item, release_authority=assess_case_privacy(case_id, principal.tenant, moment,
+                                                        control.decision_identifier(case_id=case_id,idempotency_key=keys[0]))
+        except (PrivacyDecisionError, ReleaseCaseAuthorityError, ReleaseCaseError, HTTPException):
+            raise HTTPException(409,"Privacy decision scope is unavailable") from None
+        record=control_record(kind="privacy_decision", identifier=item.decision_id, tenant=principal.tenant,
+            payload={"case_id":case_id,"run_id":ReleaseCase.from_record(app.state.store.get_control("release_case",case_id,principal.tenant)["payload"]["case"]).binding.processing_run_id,
+                     "idempotency_key":keys[0],"decision":item.to_record()}, expires_at=item.expires_at.timestamp())
+        persisted,reused=app.state.store.record_privacy_decision(case_id,principal.tenant,record,principal.subject,
+            control.decision_authority,release_authority,lambda checked_case, checked_tenant, checked_moment, checked_id:
+                assess_case_privacy(checked_case,checked_tenant,checked_moment,checked_id)[0])
+        view=privacy_decision_view(persisted)
+        return Response(view.model_dump_json(),status_code=200,media_type="application/json") if reused else view
+
+    @app.get("/privacy-decisions/{decision_id}", response_model=PrivacyDecisionView)
+    def get_privacy_decision(decision_id: str, principal: Principal = Depends(require_roles("processor","reviewer"))):
+        raw=app.state.store.get_control("privacy_decision",decision_id,principal.tenant)
+        moment=now().replace(microsecond=0)
+        try:
+            control=privacy_decision_control_for_tenant(app.state.privacy_decision_controls,tenant=principal.tenant,at=moment)
+            case_id=raw["payload"]["case_id"]
+            # Reassess live sources; a changed or invalid source must never be
+            # rendered as a still-valid holding decision.
+            stored=PrivacyDecision.from_record(raw["payload"]["decision"])
+            current, release_authority=assess_case_privacy(case_id,principal.tenant,moment,stored.decision_id)
+            # ``decided_at`` is intentionally immutable, while reassessment
+            # happens at read time.  Every substantive binding, policy result,
+            # reason and exact digest/ref map must nevertheless remain equal.
+            if (stored.decision.outcome != current.decision.outcome or stored.decision.reasons != current.decision.reasons
+                    or stored.decision.binding != current.decision.binding
+                    or stored.decision.privacy_evidence_policy_digest != current.decision.privacy_evidence_policy_digest
+                    or stored.decision.evidence_digests != current.decision.evidence_digests
+                    or stored.evidence_references != current.evidence_references): raise ValueError
+            return privacy_decision_view(app.state.store.get_privacy_decision(decision_id,principal.tenant,control.decision_authority,release_authority))
+        except (KeyError,TypeError,ValueError,PrivacyDecisionError,ReleaseCaseAuthorityError,HTTPException):
+            raise HTTPException(503,"Privacy decision is unavailable") from None
 
     @app.post("/processing-runs/{run_id}/residual-evaluations", response_model=ResidualEvaluationView, status_code=201)
     def create_residual_evaluation(run_id: str, principal: Principal = Depends(require_roles("reviewer"))):
