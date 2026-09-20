@@ -1,6 +1,7 @@
 """M15 envelope regressions: parser and stable per-case id only."""
 import base64
 import json
+import types
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -13,6 +14,8 @@ from app.privacy_decision import (PrivacyDecision, PrivacyDecisionControl,
 from app.privacy_evidence_authority import PrivacyEvidenceAttestationAuthority
 from app.privacy_evidence_policy import PrivacyEvidenceBinding, PrivacyEvidenceKind, assess_privacy_evidence
 from app.repository import DevelopmentStore
+import app.main as main_module
+import app.repository as repository_module
 from app.main import create_app
 from test_access import auth
 from test_control_plane_api import controls, ingested_dataset, run_request, setup
@@ -167,3 +170,17 @@ def test_m15_quarantine_is_sticky_tombstone_and_same_key_race_is_one_record(monk
         with ThreadPoolExecutor(max_workers=4) as pool: codes = list(pool.map(lambda _: post(), range(4)))
         assert set(codes) <= {200, 201} and codes.count(201) == 1
         assert len(client.app.state.store.controls["privacy_decision"]) == 1
+
+
+def test_m15_fresh_write_survives_a_cross_second_store_transaction(monkeypatch, tmp_path):
+    """The API's signed timestamp may precede the atomic store clock by 1s."""
+    setup(monkeypatch, tmp_path)
+    with TestClient(create_app()) as client:
+        _, case, _ = _case_with_native_utility(client, suffix="clock")
+        instant = datetime.now(UTC).replace(microsecond=0)
+        monkeypatch.setattr(main_module, "now", lambda: instant)
+        monkeypatch.setattr(repository_module, "datetime", types.SimpleNamespace(
+            now=lambda _tz: instant + timedelta(seconds=1), fromtimestamp=datetime.fromtimestamp))
+        response = client.post(f"/release-cases/{case['id']}/privacy-decisions",
+                               headers={**auth(), "Idempotency-Key": "m15-clock"})
+        assert response.status_code == 201, response.text
