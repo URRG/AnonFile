@@ -54,6 +54,9 @@ from app.linkage_risk import LinkageRiskError, LinkageRiskReport, assess_linkage
 from app.linkage_risk_authority import (LinkageRiskAuthorityError,
                                         authority_for_tenant as linkage_risk_authority_for_tenant,
                                         load_linkage_risk_authorities)
+from app.residual_evidence import IndependentResidualReport, ResidualEvidenceError, scan_independent_residual
+from app.residual_evidence_authority import (ResidualEvidenceAuthorityError,
+    authority_for_tenant as residual_evidence_authority_for_tenant, load_residual_evidence_authorities)
 from app.release_case import ReleaseCase, ReleaseCaseError
 from app.release_case_authority import (ReleaseCaseAuthorityError,
                                         authority_for_tenant as release_case_authority_for_tenant,
@@ -384,6 +387,16 @@ class LinkageRiskEvidenceView(BaseModel):
     limitations: list[str]
     report: dict[str, Any]
 
+class IndependentResidualEvidenceView(BaseModel):
+    id: str
+    run_id: str
+    processing_request_digest: str
+    candidate_artifact_digest: str
+    report_digest: str
+    posture: Literal["OBSERVATIONAL_ONLY"]
+    limitations: list[str]
+    report: dict[str, Any]
+
 class ReleaseCaseView(BaseModel):
     """A signed scope record only; this endpoint cannot approve or deliver data."""
     id: str
@@ -699,6 +712,19 @@ def linkage_risk_evidence_view(record: dict[str, Any], *, linkage_risk_authoriti
     except (KeyError, TypeError, ValueError, LinkageRiskError, LinkageRiskAuthorityError):
         raise HTTPException(503, "Control integrity verification failed") from None
 
+def independent_residual_evidence_view(record: dict[str, Any], *, residual_evidence_authorities) -> IndependentResidualEvidenceView:
+    """Render only an active, V2-attested, aggregate residual observation."""
+    try:
+        payload=record["payload"]
+        expected={"run_id","processing_request_digest","candidate_artifact_digest","policy_digest","rights_digest","method_id","method_version","method_config_digest","taxonomy_mapping_digest","idempotency_key","residual_authority_id","attestation_signature","report"}
+        report=IndependentResidualReport.from_record(payload["report"])
+        if set(payload)!=expected or payload["candidate_artifact_digest"]!=report.candidate_artifact_digest: raise ValueError
+        authority=residual_evidence_authority_for_tenant(residual_evidence_authorities,tenant=record["tenant"])
+        if authority.authority_id!=payload["residual_authority_id"] or not authority.verify(signature=payload["attestation_signature"],tenant=record["tenant"],run_id=payload["run_id"],processing_request_digest=payload["processing_request_digest"],candidate_artifact_digest=payload["candidate_artifact_digest"],policy_digest=payload["policy_digest"],rights_digest=payload["rights_digest"],method_id=payload["method_id"],method_version=payload["method_version"],method_config_digest=payload["method_config_digest"],taxonomy_mapping_digest=payload["taxonomy_mapping_digest"],idempotency_key=payload["idempotency_key"],report=report): raise ValueError
+        return IndependentResidualEvidenceView(id=record["id"],run_id=payload["run_id"],processing_request_digest=payload["processing_request_digest"],candidate_artifact_digest=report.candidate_artifact_digest,report_digest=report.digest,posture="OBSERVATIONAL_ONLY",report=report.to_record(),limitations=["NO_RELEASE_AUTHORIZATION","Only PII, PAYMENT, and CREDENTIAL are scanned; unsupported families, abstentions, and incomplete coverage are not clean evidence.","An in-process issuer is not KMS-backed production custody."])
+    except (KeyError,TypeError,ValueError,ResidualEvidenceError,ResidualEvidenceAuthorityError):
+        raise HTTPException(503,"Control integrity verification failed") from None
+
 def release_case_view(record: dict[str, Any]) -> ReleaseCaseView:
     """Return a source-safe index; scope verification occurs in the repository."""
     try:
@@ -802,6 +828,10 @@ def create_app() -> FastAPI:
         app.state.linkage_risk_authorities = load_linkage_risk_authorities()
     except LinkageRiskAuthorityError:
         raise RuntimeError("Invalid linkage-risk authority configuration") from None
+    try:
+        app.state.residual_evidence_authorities = load_residual_evidence_authorities()
+    except ResidualEvidenceAuthorityError:
+        raise RuntimeError("Invalid residual-evidence authority configuration") from None
     try:
         app.state.release_case_authorities = load_release_case_authorities()
     except ReleaseCaseAuthorityError:
@@ -1297,6 +1327,30 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "Control record not found")
         return linkage_risk_evidence_view(record, linkage_risk_authorities=app.state.linkage_risk_authorities)
 
+    @app.post("/processing-runs/{run_id}/independent-residual-evidence", response_model=IndependentResidualEvidenceView, status_code=201)
+    async def create_independent_residual_evidence(run_id: str, request_context: Request, principal: Principal = Depends(require_roles("processor"))):
+        keys=request_context.headers.getlist("idempotency-key")
+        if len(keys)!=1 or await request_context.body(): raise HTTPException(422,"Request validation failed")
+        candidate_record,run=app.state.store.private_candidate_for_run(run_id,principal.tenant)
+        if run["payload"].get("processor_subject")!=principal.subject: raise HTTPException(403,"Processing-run owner required")
+        try:
+            moment=now().replace(microsecond=0)
+            authority=residual_evidence_authority_for_tenant(app.state.residual_evidence_authorities,tenant=principal.tenant,at=moment)
+            artifact=private_candidate_artifact(candidate_record["payload"]); report=scan_independent_residual(candidate=artifact)
+            payload={"run_id":run_id,"processing_request_digest":run["payload"]["request_digest"],"candidate_artifact_digest":artifact.metadata.artifact_digest,"policy_digest":run["payload"]["policy_digest"],"rights_digest":run["payload"]["rights_digest"],"method_id":run["payload"]["method_id"],"method_version":run["payload"]["method_version"],"method_config_digest":run["payload"]["method_config_digest"],"taxonomy_mapping_digest":run["payload"]["taxonomy_mapping_digest"],"idempotency_key":keys[0],"residual_authority_id":authority.authority_id,"report":report.to_record()}
+            payload["attestation_signature"]=authority.sign_for_worker(at=moment,tenant=principal.tenant,run_id=run_id,processing_request_digest=payload["processing_request_digest"],candidate_artifact_digest=payload["candidate_artifact_digest"],policy_digest=payload["policy_digest"],rights_digest=payload["rights_digest"],method_id=payload["method_id"],method_version=payload["method_version"],method_config_digest=payload["method_config_digest"],taxonomy_mapping_digest=payload["taxonomy_mapping_digest"],idempotency_key=keys[0],report=report)
+        except (ResidualEvidenceAuthorityError,ResidualEvidenceError,CandidateError,KeyError,TypeError,ValueError): raise HTTPException(503,"Independent residual evidence is unavailable") from None
+        record=control_record(kind="independent_residual_evidence",identifier=str(uuid4()),tenant=principal.tenant,payload=payload,expires_at=min(run["expires_at"],candidate_record["expires_at"],authority.expires_at.timestamp()))
+        persisted,reused=app.state.store.record_independent_residual_evidence(run_id,principal.tenant,record,principal.subject,authority)
+        view=independent_residual_evidence_view(persisted,residual_evidence_authorities=app.state.residual_evidence_authorities)
+        return Response(view.model_dump_json(),status_code=200,media_type="application/json") if reused else view
+
+    @app.get("/processing-runs/{run_id}/independent-residual-evidence/{evidence_id}", response_model=IndependentResidualEvidenceView)
+    def get_independent_residual_evidence(run_id: str,evidence_id: str,principal: Principal=Depends(require_roles("processor","reviewer"))):
+        record=app.state.store.get_control("independent_residual_evidence",evidence_id,principal.tenant)
+        if record["payload"].get("run_id")!=run_id: raise HTTPException(404,"Control record not found")
+        return independent_residual_evidence_view(record,residual_evidence_authorities=app.state.residual_evidence_authorities)
+
     @app.post("/processing-runs/{run_id}/release-cases", response_model=ReleaseCaseView, status_code=201)
     async def create_release_case(run_id: str, request_context: Request,
                                   principal: Principal = Depends(require_roles("processor"))):
@@ -1368,9 +1422,10 @@ def create_app() -> FastAPI:
     def assess_case_privacy(case_id: str, tenant: str, moment: datetime, decision_id: str):
         """Server-only M15 adapter; native report validation precedes M12 V2 issue.
 
-        Residual and benchmark currently have no source-safe candidate-bound
-        attested control appropriate for this gate, so they deliberately remain
-        missing.  They are never converted from a naked digest or aggregate.
+        Benchmark currently has no source-safe candidate-bound attested
+        control appropriate for this gate, so it deliberately remains missing.
+        Residual evidence is admitted only through M16's complete native V2
+        report, never from a naked digest or aggregate count.
         """
         authority = release_case_authority_for_tenant(app.state.release_case_authorities, tenant=tenant, at=moment)
         raw_case = app.state.store.get_release_case(case_id, tenant, authority)
@@ -1386,6 +1441,7 @@ def create_app() -> FastAPI:
             PrivacyEvidenceKind.UTILITY: ("utility_evidence", utility_evidence_view, app.state.utility_evidence_authorities),
             PrivacyEvidenceKind.DISCLOSURE_RISK: ("disclosure_risk_evidence", disclosure_risk_evidence_view, app.state.disclosure_risk_authorities),
             PrivacyEvidenceKind.LINKAGE: ("linkage_risk_evidence", linkage_risk_evidence_view, app.state.linkage_risk_authorities),
+            PrivacyEvidenceKind.RESIDUAL_SCAN: ("independent_residual_evidence", independent_residual_evidence_view, app.state.residual_evidence_authorities),
         }
         evidence=[]; refs=[]; expiry=min(case.expires_at, control.decision_authority.expires_at)
         for kind, (storage_kind, renderer, authorities) in candidates.items():
@@ -1398,7 +1454,8 @@ def create_app() -> FastAPI:
             try:
                 view=renderer(record, **({"utility_evidence_authorities": authorities} if kind is PrivacyEvidenceKind.UTILITY else
                                            {"disclosure_risk_authorities": authorities} if kind is PrivacyEvidenceKind.DISCLOSURE_RISK else
-                                           {"linkage_risk_authorities": authorities}))
+                                           {"linkage_risk_authorities": authorities} if kind is PrivacyEvidenceKind.LINKAGE else
+                                           {"residual_evidence_authorities": authorities}))
                 report=view.report
                 if (view.candidate_artifact_digest != case.binding.candidate_artifact_digest
                         or view.processing_request_digest != case.binding.processing_request_digest): raise ValueError
@@ -1408,6 +1465,16 @@ def create_app() -> FastAPI:
                 elif kind is PrivacyEvidenceKind.DISCLOSURE_RISK:
                     if report.get("status") != "ASSESSED" or type(report.get("unique_record_count")) is not int: raise ValueError
                     observed=report["unique_record_count"]
+                elif kind is PrivacyEvidenceKind.RESIDUAL_SCAN:
+                    # Only the native worker's full, exact three-family
+                    # contract can become a lower-is-safer M15 observation.
+                    # Raw counts, a digest, partial coverage or an abstention
+                    # are deliberately not substituted for a clean scan.
+                    if (report.get("status") != "ASSESSED" or report.get("abstained_units") != 0
+                            or report.get("assessed_categories") != ["CREDENTIAL", "PAYMENT", "PII"]
+                            or report.get("scanned_units") != report.get("total_units")
+                            or type(report.get("maximum_residual_ppm")) is not int): raise ValueError
+                    observed=report["maximum_residual_ppm"]
                 else:
                     if report.get("status") != "ASSESSED" or type(report.get("unique_match_count")) is not int: raise ValueError
                     observed=report["unique_match_count"]

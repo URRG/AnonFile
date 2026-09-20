@@ -2,13 +2,15 @@
 
 `POST /release-cases/{case_id}/privacy-decisions` accepts no body or evidence
 selection. It reads an active M14 case, its tenant-local M15 configuration and
-the native evidence controls entirely server-side. Utility, disclosure and
-linkage controls are reconstructed and their original worker attestations are
+the native evidence controls entirely server-side. Utility, disclosure,
+linkage, and independent residual controls are reconstructed and their original worker attestations are
 re-verified before a distinct M12 Ed25519 V2 issuer can make a scoped policy
 attestation. Ambiguous or altered native controls quarantine; unavailable
-families hold. Residual and benchmark do not presently have a suitable
-candidate-bound native attestation adapter, so they remain missing rather than
-being promoted from an aggregate digest.
+families hold. The residual adapter accepts only an exact, complete scan of
+PII/PAYMENT/CREDENTIAL and maps its lower-is-safer `maximum_residual_ppm` to
+the policy; abstention, partial coverage, config drift, or naked counts/digest
+remain missing. Benchmark remains missing rather than being promoted from an
+aggregate digest.
 
 The stored envelope is Ed25519-signed and binds case digest, full M12 outcome,
 exact source record ID/digest references and the opaque case recipient

@@ -27,6 +27,8 @@ from app.disclosure_risk_authority import DisclosureRiskAuthorityError, Disclosu
 from app.linkage_risk import METHODOLOGY_DIGEST as LINKAGE_METHODOLOGY_DIGEST
 from app.linkage_risk import LinkageRiskError, LinkageRiskReport
 from app.linkage_risk_authority import LinkageRiskAuthorityError, LinkageRiskControlAuthority
+from app.residual_evidence import IndependentResidualReport, ResidualEvidenceError
+from app.residual_evidence_authority import ResidualEvidenceAuthorityError, ResidualEvidenceControlAuthority
 from app.release_case import ReleaseCase, ReleaseCaseError
 from app.release_case_authority import ReleaseCaseControlAuthority
 from app.privacy_decision import PrivacyDecision, PrivacyDecisionAuthority, PrivacyDecisionError
@@ -88,7 +90,7 @@ class DevelopmentStore:
     CONTROL_KINDS = frozenset({"rights_profile", "policy_snapshot", "processing_run", "authorization_request",
                                 "private_candidate", "evaluation_report", "qualification",
                                 "detector_evaluation_evidence", "utility_evidence", "disclosure_risk_evidence",
-                                "linkage_risk_evidence", "release_case", "privacy_decision"})
+                                "linkage_risk_evidence", "independent_residual_evidence", "release_case", "privacy_decision"})
     TTL_SECONDS = 3600
 
     def __init__(self):
@@ -219,7 +221,7 @@ class DevelopmentStore:
             # in this transaction; no transient record state is persisted.
             if record["payload"].get("state") == "RUNNING":
                 record["payload"]["audit_reservation"] = 0
-            for kind in ("qualification", "evaluation_report", "detector_evaluation_evidence", "utility_evidence", "disclosure_risk_evidence", "linkage_risk_evidence", "release_case", "privacy_decision",
+            for kind in ("qualification", "evaluation_report", "detector_evaluation_evidence", "utility_evidence", "disclosure_risk_evidence", "linkage_risk_evidence", "independent_residual_evidence", "release_case", "privacy_decision",
                          "private_candidate"):
                 for evidence_id, evidence in list(self.controls[kind].items()):
                     if evidence["tenant"] == tenant and evidence["payload"].get("run_id") == run_id:
@@ -944,6 +946,39 @@ class DevelopmentStore:
             self._append_event(tenant, "linkage_risk_evidence.created", data["id"], actor, record=data)
             self.controls["linkage_risk_evidence"][data["id"]] = data
             return detached(data), False
+
+    def record_independent_residual_evidence(self, identifier, tenant, evidence, actor, authority):
+        """Persist a current V2-attested residual scan without changing run state."""
+        data=detached(evidence)
+        with self._transaction():
+            self._purge(); self._purge_controls()
+            run=self._control("processing_run",identifier,tenant)
+            candidates=[x for x in self.controls["private_candidate"].values() if x["tenant"]==tenant and x["payload"].get("run_id")==identifier]
+            if len(candidates)!=1: raise unavailable()
+            self._validate_control(data); payload=data["payload"]
+            expected={"run_id","processing_request_digest","candidate_artifact_digest","policy_digest","rights_digest","method_id","method_version","method_config_digest","taxonomy_mapping_digest","idempotency_key","residual_authority_id","attestation_signature","report"}
+            if (data["kind"]!="independent_residual_evidence" or data["tenant"]!=tenant or set(payload)!=expected or payload["run_id"]!=identifier
+                    or payload["processing_request_digest"]!=run["payload"].get("request_digest") or payload["candidate_artifact_digest"]!=candidates[0]["payload"].get("artifact_digest")
+                    or payload["policy_digest"]!=run["payload"].get("policy_digest") or payload["rights_digest"]!=run["payload"].get("rights_digest")
+                    or payload["method_id"]!=run["payload"].get("method_id") or payload["method_version"]!=run["payload"].get("method_version")
+                    or payload["method_config_digest"]!=run["payload"].get("method_config_digest") or payload["taxonomy_mapping_digest"]!=run["payload"].get("taxonomy_mapping_digest")
+                    or data["expires_at"]>run["expires_at"] or data["expires_at"]>candidates[0]["expires_at"]
+                    or type(payload["idempotency_key"]) is not str or not 1<=len(payload["idempotency_key"])<=200 or not payload["idempotency_key"].isascii() or any(c.isspace() for c in payload["idempotency_key"])): raise unavailable()
+            try:
+                report=IndependentResidualReport.from_record(payload["report"])
+                moment=datetime.now(UTC).replace(microsecond=0)
+                verified=(type(authority) is ResidualEvidenceControlAuthority and authority.is_active(at=moment) and authority.tenant==tenant and authority.authority_id==payload["residual_authority_id"] and report.candidate_artifact_digest==payload["candidate_artifact_digest"] and authority.verify(at=moment,signature=payload["attestation_signature"],tenant=tenant,run_id=identifier,processing_request_digest=payload["processing_request_digest"],candidate_artifact_digest=payload["candidate_artifact_digest"],policy_digest=payload["policy_digest"],rights_digest=payload["rights_digest"],method_id=payload["method_id"],method_version=payload["method_version"],method_config_digest=payload["method_config_digest"],taxonomy_mapping_digest=payload["taxonomy_mapping_digest"],idempotency_key=payload["idempotency_key"],report=report))
+            except (ResidualEvidenceError,ResidualEvidenceAuthorityError): raise unavailable() from None
+            if not verified: raise unavailable()
+            for existing in self.controls["independent_residual_evidence"].values():
+                old=existing["payload"]
+                if existing["tenant"]==tenant and old.get("run_id")==identifier and old.get("idempotency_key")==payload["idempotency_key"]:
+                    if old.get("report",{}).get("digest")!=report.digest: raise HTTPException(409,"Idempotency key conflicts with a different request")
+                    return detached(existing),True
+            if data["id"] in self.controls["independent_residual_evidence"] or self._used_identifier(data["id"],"independent_residual_evidence"): raise HTTPException(409,"Object already exists")
+            if sum(len(x) for x in self.controls.values())>=self.MAX_CONTROLS or sum(item["tenant"]==tenant for values in self.controls.values() for item in values.values())>=self.MAX_CONTROLS_PER_TENANT: raise HTTPException(429,"Development control capacity exceeded")
+            self._append_event(tenant,"independent_residual_evidence.created",data["id"],actor,record=data); self.controls["independent_residual_evidence"][data["id"]]=data
+            return detached(data),False
 
     @staticmethod
     def _release_case_dataset_provenance_digest(dataset):
