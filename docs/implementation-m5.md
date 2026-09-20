@@ -19,9 +19,13 @@ found a value.
 
 `suppress` can be satisfied by a redaction or safe scalar nullification.
 `generalize` and `tokenize` require their distinct operations. `block`,
-`review`, action mismatch and missing coverage create an encrypted private
-artifact only for controlled evidence retention and place the run in
+`review`, action mismatch and missing coverage create a private artifact only
+for controlled evidence retention and place the run in
 `QUARANTINED`; they do not create a candidate-ready run.
+
+The default development memory adapter is not encrypted at rest. The optional
+durable adapter encrypts private records; neither adapter exposes private
+candidate bodies through the control-plane API.
 
 ## Coverage boundary
 

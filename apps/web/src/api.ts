@@ -162,6 +162,9 @@ const CONTROL_STATES = new Set<ControlPlaneView['state']>(['REGISTERED', 'RUNNIN
 const DIGEST = /^sha256:[0-9a-f]{64}$/
 const RIGHTS_DIGEST = /^[0-9a-f]{64}$/
 const LABEL = /^[a-z0-9][a-z0-9._:-]{0,127}$/
+const LEDGER_ENTITY = /^[A-Z][A-Z0-9_]{0,63}$/
+const LEDGER_ACTIONS = new Set(['REDACT', 'PSEUDONYMIZE', 'GENERALIZE', 'SUPPRESS', 'NULLIFY'])
+const LEDGER_REASONS = new Set(['POLICY_RULE', 'DETECTOR_FINDING', 'SCHEMA_SAFE_NULL'])
 // Python's canonical ``datetime.isoformat`` may retain six fractional digits;
 // accept only that RFC 3339 UTC representation (not arbitrary date strings).
 const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/
@@ -208,7 +211,12 @@ function candidateMetadata(value: unknown): CandidateMetadataView | null {
       (value.media_type !== 'text/plain' && value.media_type !== 'application/json') ||
       !Number.isSafeInteger(value.byte_count) || (value.byte_count as number) < 0 || !Array.isArray(value.ledger)) throw controlInvalid()
   const ledger = value.ledger.map(entry => {
-    if (!object(entry) || Object.keys(entry).length !== 4 || !nonEmpty(entry.entity_type) || !nonEmpty(entry.action) || !nonEmpty(entry.reason) ||
+    // The private artifact contract has a fixed source-free ledger vocabulary.
+    // Do not display arbitrary server strings here: those could carry source
+    // content if an upstream service were misconfigured or compromised.
+    if (!object(entry) || Object.keys(entry).length !== 4 || typeof entry.entity_type !== 'string' || !LEDGER_ENTITY.test(entry.entity_type) ||
+        typeof entry.action !== 'string' || !LEDGER_ACTIONS.has(entry.action) ||
+        typeof entry.reason !== 'string' || !LEDGER_REASONS.has(entry.reason) ||
         !Number.isSafeInteger(entry.count) || (entry.count as number) < 1) throw controlInvalid()
     return { entityType: entry.entity_type, action: entry.action, reason: entry.reason, count: entry.count as number }
   })

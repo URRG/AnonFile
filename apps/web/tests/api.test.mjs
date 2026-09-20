@@ -227,6 +227,21 @@ test('M6 refuses an API candidate body and does not return it', async t => {
   await assert.rejects(runControlPlane(controlRequest), error => error instanceof ControlPlaneFailure && !error.message.includes('raw-secret') && error.message.includes('invalid control-plane'))
 })
 
+test('M6 refuses non-contract ledger strings that could contain source content', async t => {
+  for (const mutate of [
+    entry => { entry.entity_type = 'alex@example.com' },
+    entry => { entry.action = 'raw-secret' },
+    entry => { entry.reason = 'raw-secret' },
+  ]) {
+    let index = 0
+    const candidate = safeCandidate()
+    mutate(candidate.ledger[0])
+    t.mock.method(globalThis, 'fetch', async () => Response.json(controlResponses('QUARANTINED', candidate)[index++]))
+    await assert.rejects(runControlPlane(controlRequest), error => error instanceof ControlPlaneFailure && !error.message.includes('raw-secret') && !error.message.includes('alex@example.com'))
+    t.mock.reset()
+  }
+})
+
 test('M6 validates recipient and purpose labels before sending source', async t => {
   const mock = t.mock.method(globalThis, 'fetch', async () => { throw new Error('must not run') })
   await assert.rejects(runControlPlane({ ...controlRequest, recipient: 'OpenAI' }), /lowercase control-plane labels/)
