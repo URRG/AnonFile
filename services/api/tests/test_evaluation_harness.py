@@ -74,6 +74,21 @@ def test_scores_exact_matches_per_assessed_family_and_preserves_duplicate_predic
     assert "NO_RELEASE_AUTHORIZATION" in result.limitations
 
 
+def test_clean_annotated_case_counts_detector_output_as_a_false_positive():
+    gold = AnnotatedCorpus.create(
+        corpus_id="negative-corpus", corpus_version="v1", source_manifest_digest=digest("a"),
+        annotation_protocol_digest=digest("b"), provenance_digest=digest("c"),
+        assessed_categories=("PII",), cases=(AnnotatedCase("clean-case", ()),),
+    )
+    predictions = PredictionSet.create(corpus_digest=gold.digest, output_digest=digest("1"),
+                                      cases=(PredictionCase("clean-case", (finding("PII", "d"),)),))
+    metric = score(corpus=gold, predictions=predictions, binding=binding(gold, predictions),
+                   evaluated_at=NOW).metrics[0]
+    assert (metric.true_positives, metric.false_positives, metric.false_negatives) == (0, 1, 0)
+    assert metric.precision_ppm == 0
+    assert metric.recall_ppm is None
+
+
 @pytest.mark.parametrize("builder", [
     lambda: AnnotatedCase("case-a", (finding("PII", "d"), finding("PII", "d"))),
     lambda: AnnotatedCorpus.create(corpus_id="synthetic-corpus", corpus_version="v1", source_manifest_digest=digest("a"),

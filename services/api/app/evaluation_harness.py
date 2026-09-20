@@ -104,8 +104,9 @@ class AnnotatedCase:
 
     def __post_init__(self) -> None:
         _identifier(self.case_id)
-        if (type(self.findings) is not tuple or not self.findings
-                or len(self.findings) > MAX_FINDINGS_PER_CASE
+        # A clean, annotated negative case is essential for measuring detector
+        # false positives.  The corpus itself remains nonempty and bounded.
+        if (type(self.findings) is not tuple or len(self.findings) > MAX_FINDINGS_PER_CASE
                 or any(not isinstance(item, AnnotatedFinding) for item in self.findings)):
             _fail()
         ordered = tuple(sorted(self.findings, key=lambda item: (item.category, item.reference_digest)))
