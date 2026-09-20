@@ -27,7 +27,7 @@ from app.rights import RightsError, RightsProfile, evaluate_rights
 from app.runs import ProcessingPlan, RunError, RunRegistry
 from app.candidate import CandidateArtifact, CandidateError, LedgerAction, PayloadKind, SchemaContract
 from app.rules_policy_execution import (ActualOutputOperation as PolicyOutputOperation,
-                                        RULES_LABEL_TO_CATEGORY, RulesPolicyExecutionError,
+                                        RULES_DETECTED_CATEGORIES, RULES_LABEL_TO_CATEGORY, RulesPolicyExecutionError,
                                         execute_rules_policy)
 from app.residual_eval import (CandidateMetadata as ResidualCandidateMetadata, DetectorIdentity,
                                DetectorResult, EvaluationError, EvaluationProfile,
@@ -436,8 +436,8 @@ def qualification_view(record: dict[str, Any]) -> QualificationView:
         raise HTTPException(503, "Control integrity verification failed") from None
 
 def _residual_detector(candidate: str | list[dict[str, Any]]) -> DetectorResult:
-    """Independent-pass adapter: returns aggregate family counts only."""
-    counts = {category: 0 for category in ("PII", "PAYMENT", "CREDENTIAL")}
+    """Rules-based residual pass; category detection is not qualification evidence."""
+    counts = {category: 0 for category in sorted(RULES_DETECTED_CATEGORIES)}
     def inspect(value: Any, observed: set[str]):
         if type(value) is str:
             for finding in detect_text(value):

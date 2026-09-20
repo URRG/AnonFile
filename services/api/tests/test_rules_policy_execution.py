@@ -8,6 +8,7 @@ from app.processing import process_payload
 from app.rules_policy_execution import (
     ActualOutputOperation,
     RULES_COVERED_CATEGORIES,
+    RULES_DETECTED_CATEGORIES,
     RulesPolicyExecutionError,
     execute_rules_policy,
 )
@@ -101,6 +102,19 @@ def test_default_all_taxonomy_requirement_quarantines_limited_rules_coverage():
     )
     assert execution.disposition is CandidateDisposition.QUARANTINE_REQUIRED
     assert execution.uncovered_categories == frozenset({"HEALTH_SENSITIVE", "BUSINESS_CONFIDENTIAL", "QUASI_IDENTIFIER"})
+    assert not execution.can_create_private_candidate
+
+
+def test_new_bounded_detector_families_are_not_silently_promoted_to_policy_coverage():
+    assert {"HEALTH_SENSITIVE", "BUSINESS_CONFIDENTIAL", "QUASI_IDENTIFIER"} <= RULES_DETECTED_CATEGORIES
+    assert not ({"HEALTH_SENSITIVE", "BUSINESS_CONFIDENTIAL", "QUASI_IDENTIFIER"} & RULES_COVERED_CATEGORIES)
+    result = process_payload(records=[{"diagnosis": "synthetic-condition"}])
+    execution = execute_rules_policy(
+        policy=snapshot(), release_mode="external_anonymized", result=result,
+        actual_operations=(ActualOutputOperation("HEALTH_SENSITIVE", LedgerAction.REDACT, 1),),
+    )
+    assert execution.uncovered_categories == frozenset({"HEALTH_SENSITIVE", "BUSINESS_CONFIDENTIAL", "QUASI_IDENTIFIER"})
+    assert execution.disposition is CandidateDisposition.QUARANTINE_REQUIRED
     assert not execution.can_create_private_candidate
 
 

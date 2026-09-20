@@ -181,7 +181,8 @@ def test_actual_operations_distinguish_redaction_pseudonymization_and_nullificat
 
 
 @pytest.mark.parametrize("marker", ["[EMAIL_0001]", "[PERSON_NAME_10000]", "[email_0001]",
-    "［ＥＭＡＩＬ＿０００１］", "[EMAIL_00\u200b01]", "[REDACTED_CREDENTIAL]"])
+    "［ＥＭＡＩＬ＿０００１］", "[EMAIL_00\u200b01]", "[REDACTED_CREDENTIAL]",
+    "[GENERALIZED_QUASI_IDENTIFIER]"])
 @pytest.mark.parametrize("mode", ["external_anonymized", "restricted_pseudonymized"])
 def test_source_marker_namespace_is_reserved_everywhere(marker, mode):
     for payload in ({"content": f"Existing {marker}, contact ada@example.invalid"},
@@ -218,3 +219,40 @@ def test_unqualified_text_always_carries_explicit_limitations():
 def test_ip_validation_and_pan_candidate():
     assert detect_text("300.400.500.600") == ()
     assert [s.entity_type for s in detect_text("192.0.2.1 ABCDE1234F")] == ["IP_ADDRESS", "PAN"]
+
+
+def test_contextual_health_business_and_quasi_rules_remove_values_without_claiming_semantic_detection():
+    text = "diagnosis: synthetic-condition; internal roadmap: synthetic-roadmap; age: 47"
+    result = process_payload(content=text)
+    assert {finding.entity_type for finding in result.findings} == {
+        "HEALTH_SENSITIVE", "BUSINESS_CONFIDENTIAL", "QUASI_IDENTIFIER",
+    }
+    assert "synthetic-condition" not in result.output
+    assert "synthetic-roadmap" not in result.output
+    assert "47" not in result.output
+    assert "[GENERALIZED_QUASI_IDENTIFIER]" in result.output
+    assert {(item.entity_type, item.action.value) for item in result.actual_operations} == {
+        ("HEALTH_SENSITIVE", "REDACT"),
+        ("BUSINESS_CONFIDENTIAL", "REDACT"),
+        ("QUASI_IDENTIFIER", "GENERALIZE"),
+    }
+    assert "not qualified category coverage" in " ".join(result.limitations)
+
+
+def test_sensitive_structured_fields_apply_bounded_actions_and_preserve_input():
+    records = [{"diagnosis": "synthetic-condition", "trade_secret": "synthetic-plan", "postal_code": "12345"}]
+    before = copy.deepcopy(records)
+    result = process_payload(records=records)
+    assert records == before
+    assert result.output == [{"diagnosis": "[REDACTED_HEALTH_SENSITIVE]",
+                              "trade_secret": "[REDACTED_BUSINESS_CONFIDENTIAL]",
+                              "postal_code": "[GENERALIZED_QUASI_IDENTIFIER]"}]
+    assert {(item.entity_type, item.action.value, item.count) for item in result.actual_operations} == {
+        ("HEALTH_SENSITIVE", "REDACT", 1),
+        ("BUSINESS_CONFIDENTIAL", "REDACT", 1),
+        ("QUASI_IDENTIFIER", "GENERALIZE", 1),
+    }
+
+
+def test_bare_category_words_do_not_create_contextual_findings():
+    assert detect_text("Allergy and confidential planning are ordinary words here.") == ()

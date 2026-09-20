@@ -56,9 +56,14 @@ def test_policy_block_quarantines_private_candidate_without_exposing_it(client):
 
 
 def test_residual_detector_uses_the_same_taxonomy_mapping_as_processing():
-    result = _residual_detector("ABCPD1234E")
-    assert dict(result.residual_counts) == {"PII": 1, "PAYMENT": 0, "CREDENTIAL": 0}
-    assert result.assessed_categories == frozenset({"PII", "PAYMENT", "CREDENTIAL"})
+    result = _residual_detector("ABCPD1234E; diagnosis: synthetic-condition; internal roadmap: synthetic-roadmap; age: 47")
+    assert dict(result.residual_counts) == {
+        "BUSINESS_CONFIDENTIAL": 1, "CREDENTIAL": 0, "HEALTH_SENSITIVE": 1,
+        "PAYMENT": 0, "PII": 1, "QUASI_IDENTIFIER": 1,
+    }
+    assert result.assessed_categories == frozenset({
+        "PII", "PAYMENT", "CREDENTIAL", "HEALTH_SENSITIVE", "BUSINESS_CONFIDENTIAL", "QUASI_IDENTIFIER",
+    })
 
 
 def test_processor_can_terminally_recover_a_lease_expired_run(client):
