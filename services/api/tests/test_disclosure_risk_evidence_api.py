@@ -1,9 +1,11 @@
 """M11 server-owned disclosure-risk evidence control path."""
 from __future__ import annotations
 import json
+from dataclasses import replace
 import pytest
 from fastapi import HTTPException
 from app.main import disclosure_risk_evidence_view
+from app.disclosure_risk import QuasiIdentifierCommitmentAuthority
 from test_access import auth
 from test_control_plane_api import client, controls, ingested_dataset, run_request
 
@@ -56,5 +58,14 @@ def test_tampered_report_signature_or_authority_cannot_render_or_be_admitted(cli
     stored["payload"]["attestation_signature"] = "risksig:v1:" + "A" * 43
     with pytest.raises(HTTPException):
         disclosure_risk_evidence_view(stored, disclosure_risk_authorities=client.app.state.disclosure_risk_authorities)
+    # Same tenant/key/expiry but a changed server-private QID selection is a
+    # different authority. Its opaque keyed revision invalidates stale evidence.
+    authority = client.app.state.disclosure_risk_authorities[0]
+    drifted = replace(authority, _qid_config=QuasiIdentifierCommitmentAuthority.from_secret(
+        authority._secret).create_config(["contact"]))
+    assert drifted.qid_config_revision != authority.qid_config_revision
+    stored = client.app.state.store.get_control("disclosure_risk_evidence", view["id"], "tenant-a")
+    with pytest.raises(HTTPException):
+        disclosure_risk_evidence_view(stored, disclosure_risk_authorities=(drifted,))
     assert client.delete(f"/datasets/{item['dataset_id']}", headers=auth()).status_code == 204
     assert client.get(f"/processing-runs/{item['id']}/disclosure-risk-evidence/{view['id']}", headers=auth()).status_code == 404

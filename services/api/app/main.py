@@ -582,18 +582,18 @@ def disclosure_risk_evidence_view(record: dict[str, Any], *, disclosure_risk_aut
         payload = record["payload"]
         expected = {"run_id", "processing_request_digest", "candidate_artifact_digest", "policy_digest", "rights_digest",
                     "method_id", "method_version", "method_config_digest", "taxonomy_mapping_digest", "idempotency_key",
-                    "risk_authority_id", "attestation_signature", "report"}
+                    "risk_authority_id", "qid_config_revision", "attestation_signature", "report"}
         report = DisclosureRiskReport.from_record(payload["report"])
         if set(payload) != expected or report.candidate_artifact_digest != payload["candidate_artifact_digest"]:
             raise ValueError
         authority = disclosure_risk_authority_for_tenant(disclosure_risk_authorities, tenant=record["tenant"])
-        if (authority.authority_id != payload["risk_authority_id"] or not authority.verify(
+        if (authority.authority_id != payload["risk_authority_id"] or payload["qid_config_revision"] != authority.qid_config_revision or not authority.verify(
                 signature=payload["attestation_signature"], tenant=record["tenant"], run_id=payload["run_id"],
                 processing_request_digest=payload["processing_request_digest"],
                 candidate_artifact_digest=payload["candidate_artifact_digest"], policy_digest=payload["policy_digest"],
                 rights_digest=payload["rights_digest"], method_id=payload["method_id"], method_version=payload["method_version"],
                 method_config_digest=payload["method_config_digest"], taxonomy_mapping_digest=payload["taxonomy_mapping_digest"],
-                idempotency_key=payload["idempotency_key"], report=report)):
+                idempotency_key=payload["idempotency_key"], qid_config_revision=payload["qid_config_revision"], report=report)):
             raise ValueError
         return DisclosureRiskEvidenceView(id=record["id"], run_id=payload["run_id"],
             processing_request_digest=payload["processing_request_digest"], candidate_artifact_digest=report.candidate_artifact_digest,
@@ -1065,14 +1065,15 @@ def create_app() -> FastAPI:
                    "method_id": run["payload"]["method_id"], "method_version": run["payload"]["method_version"],
                    "method_config_digest": run["payload"]["method_config_digest"],
                    "taxonomy_mapping_digest": run["payload"]["taxonomy_mapping_digest"], "idempotency_key": keys[0],
-                   "risk_authority_id": authority.authority_id, "report": report.to_record()}
+                   "risk_authority_id": authority.authority_id, "qid_config_revision": authority.qid_config_revision,
+                   "report": report.to_record()}
         try:
             payload["attestation_signature"] = authority.sign_for_worker(
                 tenant=principal.tenant, run_id=run_id, processing_request_digest=payload["processing_request_digest"],
                 candidate_artifact_digest=payload["candidate_artifact_digest"], policy_digest=payload["policy_digest"],
                 rights_digest=payload["rights_digest"], method_id=payload["method_id"], method_version=payload["method_version"],
                 method_config_digest=payload["method_config_digest"], taxonomy_mapping_digest=payload["taxonomy_mapping_digest"],
-                idempotency_key=keys[0], report=report)
+                idempotency_key=keys[0], qid_config_revision=payload["qid_config_revision"], report=report)
         except DisclosureRiskAuthorityError:
             raise HTTPException(503, "Disclosure-risk evidence is unavailable") from None
         record = control_record(kind="disclosure_risk_evidence", identifier=str(uuid4()), tenant=principal.tenant,

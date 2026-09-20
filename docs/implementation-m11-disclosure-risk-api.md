@@ -8,9 +8,11 @@ supply source/candidate records, QID fields, commitments, reports, or keys.
 `ANONFLOW_DISCLOSURE_RISK_AUTHORITIES` is a server-only JSON list with one
 tenant entry: `tenant`, `key_id`, `expires_at`, base64 32–64 byte `key`, and
 private `quasi_identifier_fields`. QID fields are repr-hidden and never enter
-the authority identity, API response, control report, or audit metadata. The
+an API response, control report, or audit metadata. The
 worker exposes only M8 aggregate equivalence-class evidence and an opaque HMAC
-QID commitment. It HMAC-attests the full report plus tenant, run/request,
+QID commitment. A separate keyed opaque QID-config revision binds the selected
+private fields into the authority identity and attestation without revealing
+them; configuration drift therefore invalidates stale evidence. It HMAC-attests the full report plus tenant, run/request,
 candidate, method, policy, rights and idempotency bindings; admission and
 retrieval re-verify that signature against the active configured authority.
 

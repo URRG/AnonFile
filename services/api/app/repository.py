@@ -801,7 +801,7 @@ class DevelopmentStore:
             self._validate_control(data); payload = data["payload"]
             expected = {"run_id", "processing_request_digest", "candidate_artifact_digest", "policy_digest", "rights_digest",
                         "method_id", "method_version", "method_config_digest", "taxonomy_mapping_digest", "idempotency_key",
-                        "risk_authority_id", "attestation_signature", "report"}
+                        "risk_authority_id", "qid_config_revision", "attestation_signature", "report"}
             valid_id = lambda value: (type(value) is str and len(value) == 71 and value.startswith("sha256:")
                                       and all(char in "0123456789abcdef" for char in value[7:]))
             if (data["kind"] != "disclosure_risk_evidence" or data["tenant"] != tenant or set(payload) != expected
@@ -816,17 +816,21 @@ class DevelopmentStore:
                     or data["expires_at"] > run["expires_at"] or data["expires_at"] > candidates[0]["expires_at"]
                     or type(payload.get("idempotency_key")) is not str or not 1 <= len(payload["idempotency_key"]) <= 200
                     or not payload["idempotency_key"].isascii() or any(char.isspace() for char in payload["idempotency_key"])
-                    or not valid_id(payload.get("risk_authority_id"))):
+                    or not valid_id(payload.get("risk_authority_id"))
+                    or type(payload.get("qid_config_revision")) is not str or not payload["qid_config_revision"].startswith("qidrev:v1:")
+                    or len(payload["qid_config_revision"]) != 53):
                 raise unavailable()
             try:
                 report = DisclosureRiskReport.from_record(payload["report"])
                 verified = (isinstance(authority, DisclosureRiskControlAuthority) and authority.is_active()
                             and authority.tenant == tenant and authority.authority_id == payload["risk_authority_id"]
+                            and authority.qid_config_revision == payload["qid_config_revision"]
                             and authority.verify(signature=payload["attestation_signature"], tenant=tenant, run_id=identifier,
                                 processing_request_digest=payload["processing_request_digest"], candidate_artifact_digest=payload["candidate_artifact_digest"],
                                 policy_digest=payload["policy_digest"], rights_digest=payload["rights_digest"], method_id=payload["method_id"],
                                 method_version=payload["method_version"], method_config_digest=payload["method_config_digest"],
-                                taxonomy_mapping_digest=payload["taxonomy_mapping_digest"], idempotency_key=payload["idempotency_key"], report=report))
+                                taxonomy_mapping_digest=payload["taxonomy_mapping_digest"], idempotency_key=payload["idempotency_key"],
+                                qid_config_revision=payload["qid_config_revision"], report=report))
             except (DisclosureRiskError, DisclosureRiskAuthorityError):
                 raise unavailable() from None
             if not verified or report.candidate_artifact_digest != payload["candidate_artifact_digest"]: raise unavailable()

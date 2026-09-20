@@ -19,6 +19,7 @@ from app.disclosure_risk import (DisclosureRiskError, DisclosureRiskReport,
 _ID = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}\Z")
 _DIGEST = re.compile(r"(?:sha256:)?[0-9a-f]{64}\Z")
 _SIG = re.compile(r"risksig:v1:[A-Za-z0-9_-]{43}\Z")
+_QID_REVISION = re.compile(r"qidrev:v1:[A-Za-z0-9_-]{43}\Z")
 _MAX = 32_000
 
 
@@ -69,6 +70,7 @@ class DisclosureRiskControlAuthority:
     expires_at: datetime
     _qid_config: QuasiIdentifierConfig = field(repr=False, compare=False)
     _secret: bytes = field(repr=False, compare=False)
+    qid_config_revision: str = field(init=False)
     authority_id: str = field(init=False)
 
     def __post_init__(self) -> None:
@@ -77,10 +79,16 @@ class DisclosureRiskControlAuthority:
                 or self.expires_at.utcoffset() is None or not isinstance(self._qid_config, QuasiIdentifierConfig)
                 or type(self._secret) is not bytes or not 32 <= len(self._secret) <= 64):
             _fail()
-        # Fields remain private: public identity is a one-way authority label,
-        # never a QID list or a dictionary-checkable field-name commitment.
+        revision = "qidrev:v1:" + base64.urlsafe_b64encode(hmac.new(
+            self._secret, _canonical({"schema": "disclosure-risk-qid-config-v1", "fields": self._qid_config._fields}),
+            hashlib.sha256).digest()).decode("ascii").rstrip("=")
+        if not _QID_REVISION.fullmatch(revision): _fail()
+        object.__setattr__(self, "qid_config_revision", revision)
+        # Fields remain private: public identity uses a keyed opaque revision,
+        # never a dictionary-checkable field-name commitment.
         public = {"schema": "disclosure-risk-authority-v1", "tenant": self.tenant,
-                  "key_id": self.key_id, "expires_at": self.expires_at.astimezone(UTC).isoformat()}
+                  "key_id": self.key_id, "expires_at": self.expires_at.astimezone(UTC).isoformat(),
+                  "qid_config_revision": self.qid_config_revision}
         object.__setattr__(self, "authority_id", "sha256:" + hashlib.sha256(_canonical(public)).hexdigest())
 
     @property
@@ -101,6 +109,7 @@ class DisclosureRiskControlAuthority:
                  candidate_artifact_digest: str, policy_digest: str, rights_digest: str,
                  method_id: str, method_version: str, method_config_digest: str,
                  taxonomy_mapping_digest: str, idempotency_key: str,
+                 qid_config_revision: str,
                  report: DisclosureRiskReport) -> bytes:
         if not isinstance(report, DisclosureRiskReport) or tenant != self.tenant:
             _fail()
@@ -109,6 +118,7 @@ class DisclosureRiskControlAuthority:
                       method_config_digest, taxonomy_mapping_digest): _digest(value)
         if (type(idempotency_key) is not str or not 1 <= len(idempotency_key) <= 200 or not idempotency_key.isascii()
                 or any(character.isspace() for character in idempotency_key)
+                or qid_config_revision != self.qid_config_revision
                 or report.candidate_artifact_digest != candidate_artifact_digest):
             _fail()
         return _canonical({"schema": "disclosure-risk-attestation-v1", "authority_id": self.authority_id,
@@ -117,6 +127,7 @@ class DisclosureRiskControlAuthority:
                            "rights_digest": rights_digest, "method_id": method_id, "method_version": method_version,
                            "method_config_digest": method_config_digest,
                            "taxonomy_mapping_digest": taxonomy_mapping_digest, "idempotency_key": idempotency_key,
+                           "qid_config_revision": qid_config_revision,
                            "report": report.to_record()})
 
     def sign_for_worker(self, **binding) -> str:
