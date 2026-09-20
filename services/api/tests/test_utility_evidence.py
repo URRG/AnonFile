@@ -157,3 +157,16 @@ def test_direct_report_construction_cannot_claim_metrics_for_an_abstention_or_by
             input_non_null_scalar_count=None, candidate_non_null_scalar_count=None,
             structure_preserved=None, unit_count_preserved=None,
         )
+
+
+def test_persisted_report_rejects_extra_fields_and_metric_or_digest_tampering():
+    report = assess([{"name": "alice"}], artifact([{"name": "<PERSON_1>"}]))
+    persisted = report.to_record()
+    assert DataUtilityReport.from_record(persisted).to_record() == persisted
+    for mutated in (
+        {**persisted, "source_path": "private/customer"},
+        {**persisted, "input_byte_count": persisted["input_byte_count"] + 1},
+        {**persisted, "digest": "sha256:" + "0" * 64},
+    ):
+        with pytest.raises(UtilityEvidenceError):
+            DataUtilityReport.from_record(mutated)

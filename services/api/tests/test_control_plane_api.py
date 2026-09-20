@@ -30,6 +30,10 @@ def setup(monkeypatch, tmp_path, mode="memory"):
         "evaluator_config_digest": "sha256:" + "a" * 64, "corpus_digests": ["sha256:" + "d" * 64],
         "key": base64.b64encode(b"e" * 32).decode(),
     }]))
+    monkeypatch.setenv("ANONFLOW_UTILITY_EVIDENCE_AUTHORITIES", json.dumps([{
+        "tenant": "tenant-a", "key_id": "development-utility-a",
+        "key": base64.b64encode(b"u" * 32).decode(),
+    }]))
 
 
 @pytest.fixture(params=["memory", "sqlite"])

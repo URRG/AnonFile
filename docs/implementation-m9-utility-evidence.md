@@ -21,6 +21,8 @@ Object field names are intentionally removed before the internal shape check;
 the report exposes only whether value-free shape and top-level unit count were
 preserved.  Consequently this is structural evidence, not semantic utility,
 ML-task quality, fairness, privacy, linkage/re-identification evidence, or a
-release/delivery decision.  The authority is in-process only in M9; production
-use needs managed secret custody, durable encrypted evidence storage, policy
-qualification, and independent evaluation before it can influence a release.
+release/delivery decision.  M10 adds bounded local control retention and a
+server-owned authority path; see `implementation-m10-utility-evidence-api.md`.
+Production use still needs managed secret custody, a durable worker boundary,
+policy qualification, and independent evaluation before it can influence a
+release.

@@ -304,6 +304,43 @@ class DataUtilityReport:
         """Detached, aggregate-only record suitable for controlled persistence."""
         return {**self._record_without_digest(), "digest": self.digest}
 
+    @classmethod
+    def from_record(cls, value: object) -> "DataUtilityReport":
+        """Rebuild and integrity-check a persisted aggregate-only report.
+
+        Persistence adapters must not treat a self-described digest as evidence.
+        Reconstructing the frozen type both rejects unexpected fields (which
+        could carry private content) and recomputes every derived invariant.
+        """
+        if not isinstance(value, dict):
+            _fail()
+        expected = set(cls.__dataclass_fields__) - {"digest"}
+        expected.update({"digest", "version"})
+        if (set(value) != expected or type(value.get("digest")) is not str
+                or value.get("version") != _VERSION):
+            _fail()
+        try:
+            status = UtilityEvidenceStatus(value["status"])
+            reason = (None if value["abstention_reason"] is None
+                      else UtilityEvidenceAbstention(value["abstention_reason"]))
+            record = cls(
+                candidate_artifact_digest=value["candidate_artifact_digest"],
+                source_commitment=value["source_commitment"], methodology_digest=value["methodology_digest"],
+                status=status, abstention_reason=reason,
+                input_byte_count=value["input_byte_count"], candidate_byte_count=value["candidate_byte_count"],
+                input_unit_count=value["input_unit_count"], candidate_unit_count=value["candidate_unit_count"],
+                input_node_count=value["input_node_count"], candidate_node_count=value["candidate_node_count"],
+                input_scalar_count=value["input_scalar_count"], candidate_scalar_count=value["candidate_scalar_count"],
+                input_non_null_scalar_count=value["input_non_null_scalar_count"],
+                candidate_non_null_scalar_count=value["candidate_non_null_scalar_count"],
+                structure_preserved=value["structure_preserved"], unit_count_preserved=value["unit_count_preserved"],
+            )
+        except (KeyError, TypeError, ValueError, UtilityEvidenceError):
+            _fail()
+        if not hmac.compare_digest(value["digest"], record.digest):
+            _fail()
+        return record
+
 
 METHODOLOGY_DIGEST = _digest(_canonical(_METHODOLOGY))
 
