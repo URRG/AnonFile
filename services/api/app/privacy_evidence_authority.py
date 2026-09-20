@@ -100,6 +100,14 @@ def _instant(value: datetime) -> str:
     return value.isoformat().replace("+00:00", "Z")
 
 
+def _worker_key(authority: "PrivacyEvidenceAttestationAuthority") -> bytes:
+    """Read key material only inside this module's authority boundary."""
+    secret = _AUTHORITY_KEYS.get(authority)
+    if type(secret) is not bytes:
+        _fail()
+    return secret
+
+
 def _score(kind: PrivacyEvidenceKind, value: object) -> int:
     if type(value) is not int or isinstance(value, bool):
         _fail()
@@ -237,15 +245,9 @@ class PrivacyEvidenceAttestationAuthority:
             return False
 
     def _sign(self, value: object) -> str:
-        digest = hmac.new(self._worker_key(), b"privacy-evidence-reference-v1:" + _canonical(value),
+        digest = hmac.new(_worker_key(self), b"privacy-evidence-reference-v1:" + _canonical(value),
                           hashlib.sha256).digest()
         return "privacy-reference-sig:v1:" + base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
-
-    def _worker_key(self) -> bytes:
-        secret = _AUTHORITY_KEYS.get(self)
-        if type(secret) is not bytes:
-            _fail()
-        return secret
 
     def _validate_scope(self, *, kind: object, binding: object, policy: object,
                         measured_at: object, expires_at: object) -> tuple[PrivacyEvidenceKind, PrivacyEvidenceBinding,
@@ -323,7 +325,7 @@ class PrivacyEvidenceAttestationAuthority:
             "method_provenance_digest": reference.binding.method_provenance_digest,
             "observed_value": reference.observed_value,
         }
-        signature = hmac.new(self._worker_key(), b"privacy-evidence-v1:" + _canonical(provisional),
+        signature = hmac.new(_worker_key(self), b"privacy-evidence-v1:" + _canonical(provisional),
                              hashlib.sha256).digest()
         return AttestedPrivacyEvidence(
             **{**provisional, "kind": reference.kind, "measured_at": reference.measured_at,
@@ -364,7 +366,7 @@ class PrivacyEvidenceAttestationAuthority:
         matching = {authority.issuer_key_id: authority for authority in verified_authorities.values()
                     if authority.issuer_key_id in expected_issuers}
         policy_authorities = tuple(PrivacyEvidenceAuthority(key_id=authority.issuer_key_id,
-                                                             secret=authority._worker_key())
+                                                             secret=_worker_key(authority))
                                    for authority in matching.values())
         return assess_privacy_evidence(decision_id="privacy-evidence-authority", binding=binding,
                                        policy=policy, evidence=evidence,

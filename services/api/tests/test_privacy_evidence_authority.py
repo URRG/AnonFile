@@ -72,7 +72,7 @@ def test_issues_verifies_and_adapts_a_complete_source_safe_reference_for_policy(
     assert decision.outcome is PrivacyEvidenceOutcome.INSUFFICIENT_EVIDENCE
     assert not hasattr(issuer, "policy_verifier")
     assert not hasattr(issuer, "to_policy_evidence")
-    assert not hasattr(issuer, "_key") and not hasattr(issuer, "_secret")
+    assert not hasattr(issuer, "_key") and not hasattr(issuer, "_secret") and not hasattr(issuer, "_worker_key")
     record = json.dumps(item.to_record(), sort_keys=True)
     for forbidden in ("secret", "b'", "alice@example.test", "Spirit Airlines", "recipient-name"):
         assert forbidden not in record
