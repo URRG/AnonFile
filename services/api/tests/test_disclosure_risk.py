@@ -60,6 +60,16 @@ def test_assessment_reports_safe_equivalence_histogram_k_and_unique_percent():
     assert public["digest"].startswith("sha256:")
 
 
+def test_unique_percentage_is_half_up_rounded_to_exactly_two_decimal_places():
+    candidate = structured_candidate([
+        {"age": "20-29", "region": "north"},
+        {"age": "20-29", "region": "north"},
+        {"age": "30-39", "region": "south"},
+    ])
+    report = assess_disclosure_risk(candidate=candidate, quasi_identifiers=qids("age", "region"))
+    assert report.unique_record_percent == "33.33"
+
+
 def test_same_candidate_and_set_have_deterministic_digest_irrespective_of_qid_order():
     candidate = structured_candidate([
         {"age": "30-39", "region": "west"}, {"age": "30-39", "region": "west"},

@@ -25,7 +25,7 @@ MAX_QUASI_IDENTIFIERS = 32
 MAX_FIELD_NAME_BYTES = 128
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _FIELD = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}\Z")
-_PERCENT_SCALE = 10_000  # fixed two decimal places, represented as basis points
+_PERCENT_SCALE = 100  # fixed two decimal places for a percentage value
 
 
 class DisclosureRiskError(ValueError):
