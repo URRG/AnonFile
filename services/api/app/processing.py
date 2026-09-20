@@ -53,25 +53,27 @@ _IP = re.compile(r"(?<![\w.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![\w.])")
 _NUMBER = re.compile(r"(?<!\w)\+?[0-9](?:[0-9 ()-]*[0-9])?(?!\w)")
 # These are intentionally contextual rules, not vocabulary matches.  A bare
 # word such as "allergy" or "confidential" is not enough to redact prose.
-# Their value boundaries are bounded to avoid consuming an entire document.
+# A match consumes the entire delimited value.  Truncating at an arbitrary
+# detector cap would redact a prefix then retain an unsafe tail; input-wide byte
+# bounds already cap the work and an unquoted value ends at newline/comma/semicolon.
 _HEALTH_CONTEXT = re.compile(
     r'''(?ix)\b(?:diagnosis|medical[_\s-]?(?:condition|record(?:[_\s-]?number)?|history)|
         prescription|medication|treatment[_\s-]?plan|lab[_\s-]?result|allerg(?:y|ies)|
         disability|mental[_\s-]?health|health[_\s-]?insurance)\b\s*(?:[:=]|is\b)\s*
-        (?:"(?:[^"\\\r\n]|\\.){1,256}"|'(?:[^'\\\r\n]|\\.){1,256}'|[^\r\n,;]{1,256})''',
+        (?:"(?:[^"\\\r\n]|\\.)+"|'(?:[^'\\\r\n]|\\.)+'|[^\r\n,;]+)''',
     re.MULTILINE,
 )
 _BUSINESS_CONTEXT = re.compile(
     r'''(?ix)\b(?:trade[_\s-]?secret|confidential(?:[_\s-]?(?:business|internal|commercial))?|
         internal[_\s-]?(?:project|roadmap|forecast)|pricing[_\s-]?(?:strategy|model)|
         source[_\s-]?code)\b\s*(?:[:=]|is\b)\s*
-        (?:"(?:[^"\\\r\n]|\\.){1,256}"|'(?:[^'\\\r\n]|\\.){1,256}'|[^\r\n,;]{1,256})''',
+        (?:"(?:[^"\\\r\n]|\\.)+"|'(?:[^'\\\r\n]|\\.)+'|[^\r\n,;]+)''',
     re.MULTILINE,
 )
 _QUASI_CONTEXT = re.compile(
     r'''(?ix)\b(?:age|birth[_\s-]?year|postal[_\s-]?code|zip(?:[_\s-]?code)?|postcode|
         gender|sex|race|ethnicity|nationality|occupation|marital[_\s-]?status|household[_\s-]?size)\b
-        \s*(?:[:=]|is\b)\s*(?:"(?:[^"\\\r\n]|\\.){1,64}"|'(?:[^'\\\r\n]|\\.){1,64}'|[^\r\n,;]{1,64})''',
+        \s*(?:[:=]|is\b)\s*(?:"(?:[^"\\\r\n]|\\.)+"|'(?:[^'\\\r\n]|\\.)+'|[^\r\n,;]+)''',
     re.MULTILINE,
 )
 _FIELD_TYPES: dict[str, tuple[str, str]] = {}

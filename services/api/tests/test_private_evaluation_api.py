@@ -55,15 +55,12 @@ def test_policy_block_quarantines_private_candidate_without_exposing_it(client):
     assert client.post(f"/processing-runs/{run['id']}/residual-evaluations", headers=auth("reviewer")).status_code == 409
 
 
-def test_residual_detector_uses_the_same_taxonomy_mapping_as_processing():
+def test_residual_detector_does_not_claim_unqualified_contextual_rule_coverage():
     result = _residual_detector("ABCPD1234E; diagnosis: synthetic-condition; internal roadmap: synthetic-roadmap; age: 47")
     assert dict(result.residual_counts) == {
-        "BUSINESS_CONFIDENTIAL": 1, "CREDENTIAL": 0, "HEALTH_SENSITIVE": 1,
-        "PAYMENT": 0, "PII": 1, "QUASI_IDENTIFIER": 1,
+        "CREDENTIAL": 0, "PAYMENT": 0, "PII": 1,
     }
-    assert result.assessed_categories == frozenset({
-        "PII", "PAYMENT", "CREDENTIAL", "HEALTH_SENSITIVE", "BUSINESS_CONFIDENTIAL", "QUASI_IDENTIFIER",
-    })
+    assert result.assessed_categories == frozenset({"PII", "PAYMENT", "CREDENTIAL"})
 
 
 def test_processor_can_terminally_recover_a_lease_expired_run(client):

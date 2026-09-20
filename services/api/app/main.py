@@ -27,7 +27,7 @@ from app.rights import RightsError, RightsProfile, evaluate_rights
 from app.runs import ProcessingPlan, RunError, RunRegistry
 from app.candidate import CandidateArtifact, CandidateError, LedgerAction, PayloadKind, SchemaContract
 from app.rules_policy_execution import (ActualOutputOperation as PolicyOutputOperation,
-                                        RULES_DETECTED_CATEGORIES, RULES_LABEL_TO_CATEGORY, RulesPolicyExecutionError,
+                                        RULES_LABEL_TO_CATEGORY, RULES_POLICY_COVERED_CATEGORIES, RulesPolicyExecutionError,
                                         execute_rules_policy)
 from app.residual_eval import (CandidateMetadata as ResidualCandidateMetadata, DetectorIdentity,
                                DetectorResult, EvaluationError, EvaluationProfile,
@@ -436,15 +436,21 @@ def qualification_view(record: dict[str, Any]) -> QualificationView:
         raise HTTPException(503, "Control integrity verification failed") from None
 
 def _residual_detector(candidate: str | list[dict[str, Any]]) -> DetectorResult:
-    """Rules-based residual pass; category detection is not qualification evidence."""
-    counts = {category: 0 for category in sorted(RULES_DETECTED_CATEGORIES)}
+    """Rules-based residual pass limited to independently policy-qualified families.
+
+    The new contextual health, business and quasi rules are processing safety
+    measures, not residual-evaluation evidence.  They are deliberately
+    ignored here so this adapter cannot assert all-taxonomy assessment.
+    """
+    counts = {category: 0 for category in sorted(RULES_POLICY_COVERED_CATEGORIES)}
     def inspect(value: Any, observed: set[str]):
         if type(value) is str:
             for finding in detect_text(value):
                 category = RULES_LABEL_TO_CATEGORY.get(finding.entity_type)
                 if category is None:
                     raise RulesPolicyExecutionError()
-                observed.add(category)
+                if category in counts:
+                    observed.add(category)
         elif type(value) is dict:
             for child in value.values():
                 inspect(child, observed)

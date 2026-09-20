@@ -256,3 +256,18 @@ def test_sensitive_structured_fields_apply_bounded_actions_and_preserve_input():
 
 def test_bare_category_words_do_not_create_contextual_findings():
     assert detect_text("Allergy and confidential planning are ordinary words here.") == ()
+
+
+@pytest.mark.parametrize(("label", "kind", "marker"), [
+    ("diagnosis", "HEALTH_SENSITIVE", "[REDACTED_HEALTH_SENSITIVE]"),
+    ("internal roadmap", "BUSINESS_CONFIDENTIAL", "[REDACTED_BUSINESS_CONFIDENTIAL]"),
+    ("age", "QUASI_IDENTIFIER", "[GENERALIZED_QUASI_IDENTIFIER]"),
+])
+def test_contextual_value_larger_than_legacy_rule_cap_is_wholly_transformed(label, kind, marker):
+    # Regression: a bounded regex prefix once left the remaining tail as raw
+    # candidate text.  The full delimited value must be consumed as one span.
+    value = "x" * 300
+    result = process_payload(content=f"{label}: {value}; safe")
+    assert result.output == f"{marker}; safe"
+    assert value not in result.output
+    assert [(item.entity_type, item.count) for item in result.findings] == [(kind, 1)]
