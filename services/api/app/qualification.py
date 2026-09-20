@@ -289,16 +289,24 @@ def qualify(*, qualification_id: str, candidate: CandidateBinding, report: Evalu
                     if threshold.category in measurements and measurements[threshold.category].examined_items > 0
                     and measurements[threshold.category].observed_residuals * _PPM
                     > threshold.maximum_residual_ppm * measurements[threshold.category].examined_items]
+        # An incomplete report cannot establish readiness, but it must never
+        # mask a residual violation that *was* measured.  Preserve every
+        # applicable evidence-quality reason on the immutable decision.
+        reasons = []
         if missing:
-            outcome, reasons = QualificationOutcome.INSUFFICIENT_EVIDENCE, (QualificationReason.MISSING_CATEGORY_MEASUREMENT,)
-        elif empty:
-            outcome, reasons = QualificationOutcome.INSUFFICIENT_EVIDENCE, (QualificationReason.EMPTY_CATEGORY_SAMPLE,)
-        elif exceeded:
-            outcome, reasons = QualificationOutcome.QUARANTINED, (QualificationReason.THRESHOLD_EXCEEDED,)
+            reasons.append(QualificationReason.MISSING_CATEGORY_MEASUREMENT)
+        if empty:
+            reasons.append(QualificationReason.EMPTY_CATEGORY_SAMPLE)
+        if exceeded:
+            reasons.append(QualificationReason.THRESHOLD_EXCEEDED)
+        if exceeded:
+            outcome = QualificationOutcome.QUARANTINED
+        elif reasons:
+            outcome = QualificationOutcome.INSUFFICIENT_EVIDENCE
         else:
             # Measurements are necessary evidence, but no currently supported
             # suite establishes a deliverable external release.
-            outcome, reasons = QualificationOutcome.INSUFFICIENT_EVIDENCE, (QualificationReason.INDEPENDENT_APPROVAL_REQUIRED,)
-    return QualificationDecision(qualification_id=qualification_id, outcome=outcome, reasons=reasons,
+            outcome, reasons = QualificationOutcome.INSUFFICIENT_EVIDENCE, [QualificationReason.INDEPENDENT_APPROVAL_REQUIRED]
+    return QualificationDecision(qualification_id=qualification_id, outcome=outcome, reasons=tuple(reasons),
                                  candidate=candidate, report=report,
                                  criteria_digest=criteria.digest, decided_at=instant)

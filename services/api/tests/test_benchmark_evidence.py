@@ -73,6 +73,17 @@ def test_coverage_excludes_abstentions_and_is_bounded():
             Coverage(*args)
 
 
+def test_f1_uses_raw_counts_and_reports_zero_for_complete_detection_failure():
+    missed = CategoryMetrics("PII", true_positives=0, false_positives=0, false_negatives=7)
+    assert missed.precision_ppm is None
+    assert missed.recall_ppm == 0
+    assert missed.f1_ppm == 0
+    # The exact count formula differs from the harmonic mean of independently
+    # rounded precision and recall for this deliberately asymmetric example.
+    metric = CategoryMetrics("PII", true_positives=1, false_positives=2, false_negatives=5)
+    assert metric.f1_ppm == (2 * 1 * 1_000_000) // (2 + 2 + 5)
+
+
 @pytest.mark.parametrize("mutate", [
     lambda r: r["binding"].__setitem__("model_version", "v9"),
     lambda r: r["metrics"][0].__setitem__("precision_ppm", 0),

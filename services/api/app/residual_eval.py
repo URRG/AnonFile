@@ -202,6 +202,7 @@ class DetectorResult:
     residual_counts: Mapping[str, int]
     scanned_units: int
     abstained_units: int = 0
+    assessed_categories: frozenset[str] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.residual_counts, Mapping) or len(self.residual_counts) > MAX_CATEGORIES:
@@ -216,7 +217,28 @@ class DetectorResult:
             _error("Invalid detector result")
         if type(self.abstained_units) is not int or isinstance(self.abstained_units, bool) or self.abstained_units < 0:
             _error("Invalid detector result")
+        # A count key is an explicit assertion that this detector assessed the
+        # category, including an asserted zero.  Legacy adapters supplied only
+        # counts, so infer that same conservative meaning when the new field is
+        # omitted.  An empty result therefore claims no category coverage.
+        if self.assessed_categories is None:
+            assessed = frozenset(normalized)
+        else:
+            if isinstance(self.assessed_categories, (str, bytes)):
+                _error("Invalid detector result")
+            try:
+                values = tuple(self.assessed_categories)
+            except TypeError:
+                _error("Invalid detector result")
+            if (not isinstance(self.assessed_categories, frozenset)
+                    or len(values) > MAX_CATEGORIES
+                    or len(values) != len(set(values))):
+                _error("Invalid detector result")
+            assessed = frozenset(_category(value) for value in values)
+        if not set(normalized).issubset(assessed):
+            _error("Invalid detector result")
         object.__setattr__(self, "residual_counts", normalized)
+        object.__setattr__(self, "assessed_categories", assessed)
 
 
 @dataclass(frozen=True, slots=True)
@@ -294,6 +316,8 @@ class EvaluationReport:
     scanned_units: int
     abstained_units: int
     coverage_percent: int
+    assessed_categories: tuple[str, ...]
+    category_coverage_percent: int
     utility_checks: tuple[UtilityCheck, ...]
     evidence_status: EvidenceStatus
     digest: str
@@ -308,6 +332,8 @@ class EvaluationReport:
             "residual_counts": {category: count for category, count in self.residual_counts},
             "total_units": self.total_units, "scanned_units": self.scanned_units,
             "abstained_units": self.abstained_units, "coverage_percent": self.coverage_percent,
+            "assessed_categories": list(self.assessed_categories),
+            "category_coverage_percent": self.category_coverage_percent,
             "utility_checks": [{"code": item.code.value, "passed": item.passed} for item in self.utility_checks],
             "evidence_status": self.evidence_status.value, "digest": self.digest,
         }
@@ -352,24 +378,28 @@ def evaluate_candidate(
         _error("Invalid detector result")
     if detected.scanned_units > total or detected.abstained_units > detected.scanned_units:
         _error("Invalid detector result")
-    # An absent category means no residual finding, but required categories
-    # remain visible as zero-count coverage in the report.
-    categories = sorted(set(profile.required_categories) | set(detected.residual_counts))
+    # An absent category is unsupported, not an asserted zero.  Keep category
+    # assessment separate from record-unit coverage so a partial detector can
+    # never present itself as complete for the policy profile.
+    categories = sorted(detected.assessed_categories)
     counts = tuple((category, detected.residual_counts.get(category, 0)) for category in categories)
     assessed = detected.scanned_units - detected.abstained_units
     coverage = (assessed * 100) // total
+    category_coverage = (len(profile.required_categories & detected.assessed_categories) * 100) // len(profile.required_categories)
     residual_total = sum(count for _, count in counts)
     fails = (residual_total > profile.maximum_residuals or coverage < profile.minimum_coverage_percent
-             or detected.abstained_units > profile.maximum_abstentions or not all(item.passed for item in checks))
+             or category_coverage < 100 or detected.abstained_units > profile.maximum_abstentions
+             or not all(item.passed for item in checks))
     status = EvidenceStatus.FAILS_PROFILE if fails else EvidenceStatus.INSUFFICIENT_EVIDENCE
     payload = {
         "candidate_digest": calculated, "detector_id": detector_identity.detector_id,
         "detector_config_digest": detector_identity.config_digest, "profile_digest": profile.digest,
         "residual_counts": counts, "total_units": total, "scanned_units": detected.scanned_units,
         "abstained_units": detected.abstained_units, "coverage_percent": coverage,
+        "assessed_categories": categories, "category_coverage_percent": category_coverage,
         "utility_checks": [(item.code.value, item.passed) for item in checks],
         "evidence_status": status.value,
     }
     return EvaluationReport(calculated, detector_identity.detector_id, detector_identity.config_digest,
                             profile.digest, counts, total, detected.scanned_units, detected.abstained_units,
-                            coverage, checks, status, _digest_bytes(_canonical(payload)))
+                            coverage, tuple(categories), category_coverage, checks, status, _digest_bytes(_canonical(payload)))

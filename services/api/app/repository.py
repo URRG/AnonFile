@@ -32,6 +32,27 @@ def detached(value):
     return json.loads(encoded(value))
 
 
+def _evaluation_evidence_status(payload):
+    """Return the digest-bound report status, rejecting ambiguous metadata.
+
+    The canonical value is ``report.evidence_status`` because it belongs to the
+    immutable residual report.  A top-level mirror is accepted only when it is
+    identical, which keeps future writers compatible without allowing a stale
+    or forged wrapper field to suppress quarantine.
+    """
+    try:
+        report = payload["report"]
+        status = report["evidence_status"]
+    except (KeyError, TypeError):
+        raise unavailable() from None
+    if status not in {"INSUFFICIENT_EVIDENCE", "FAILS_PROFILE"}:
+        raise unavailable()
+    mirrored = payload.get("evidence_status")
+    if mirrored is not None and mirrored != status:
+        raise unavailable()
+    return status
+
+
 class DevelopmentStore:
     MAX_DATASETS = 100
     MAX_DATASETS_PER_TENANT = 25
@@ -508,7 +529,7 @@ class DevelopmentStore:
                 raise HTTPException(429, "Development control capacity exceeded")
             self._append_event(tenant, "evaluation_report.created", data["id"], actor, record=data)
             self.controls["evaluation_report"][data["id"]] = data
-            if payload.get("evidence_status") == "FAILS_PROFILE":
+            if _evaluation_evidence_status(payload) == "FAILS_PROFILE":
                 revised = detached(run)
                 revised_payload = revised["payload"]
                 revised_payload["state"] = "QUARANTINED"

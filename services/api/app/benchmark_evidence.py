@@ -156,8 +156,12 @@ class CategoryMetrics:
 
     @property
     def f1_ppm(self) -> int | None:
-        precision, recall = self.precision_ppm, self.recall_ppm
-        return None if precision is None or recall is None or precision + recall == 0 else (2 * precision * recall) // (precision + recall)
+        # Derive F1 from the original counts, not from already-rounded
+        # fixed-point precision and recall.  Besides avoiding a second rounding
+        # error, this correctly reports zero when a detector finds no true
+        # positives but does miss annotated entities.
+        return _ratio(2 * self.true_positives,
+                      2 * self.true_positives + self.false_positives + self.false_negatives)
 
     def canonical(self) -> dict[str, int | str]:
         return {"category": self.category, "false_negatives": self.false_negatives,

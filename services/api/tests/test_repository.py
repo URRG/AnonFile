@@ -452,6 +452,45 @@ def test_control_records_are_detached_tenant_scoped_and_idempotent(store):
     fails(409, store.register_run_control, conflict, "operator")
 
 
+def test_digest_bound_nested_failed_residual_evidence_quarantines_run(store):
+    """Current writers nest the status in the immutable report, not its wrapper."""
+    run = control("processing_run", "run-evaluation")
+    run["payload"] = {"state": "CANDIDATE", "attempts": 1,
+                      "policy_digest": "sha256:" + "p" * 64, "rights_digest": "r" * 64}
+    private = control("private_candidate", "candidate-evaluation")
+    private["payload"] = {"run_id": run["id"], "artifact_digest": "sha256:" + "c" * 64}
+    evidence = control("evaluation_report", "evaluation-failed")
+    evidence["payload"] = {
+        "run_id": run["id"], "candidate_digest": private["payload"]["artifact_digest"],
+        "policy_digest": run["payload"]["policy_digest"], "rights_digest": run["payload"]["rights_digest"],
+        "report": {"evidence_status": "FAILS_PROFILE", "digest": "sha256:" + "e" * 64},
+    }
+    store.add_control(run, "operator")
+    store.add_control(private, "processor")
+    persisted, revised = store.record_evaluation(run["id"], "tenant-a", evidence, "reviewer")
+    assert persisted["payload"]["report"]["evidence_status"] == "FAILS_PROFILE"
+    assert revised["payload"]["state"] == "QUARANTINED"
+
+
+def test_ambiguous_evaluation_status_cannot_suppress_quarantine(store):
+    run = control("processing_run", "run-ambiguous")
+    run["payload"] = {"state": "CANDIDATE", "attempts": 1,
+                      "policy_digest": "sha256:" + "p" * 64, "rights_digest": "r" * 64}
+    private = control("private_candidate", "candidate-ambiguous")
+    private["payload"] = {"run_id": run["id"], "artifact_digest": "sha256:" + "c" * 64}
+    evidence = control("evaluation_report", "evaluation-ambiguous")
+    evidence["payload"] = {
+        "run_id": run["id"], "candidate_digest": private["payload"]["artifact_digest"],
+        "policy_digest": run["payload"]["policy_digest"], "rights_digest": run["payload"]["rights_digest"],
+        "evidence_status": "INSUFFICIENT_EVIDENCE",
+        "report": {"evidence_status": "FAILS_PROFILE", "digest": "sha256:" + "e" * 64},
+    }
+    store.add_control(run, "operator")
+    store.add_control(private, "processor")
+    fails(503, store.record_evaluation, run["id"], "tenant-a", evidence, "reviewer")
+    assert store.get_control("processing_run", run["id"], "tenant-a")["payload"]["state"] == "CANDIDATE"
+
+
 def test_durable_controls_restart_encrypt_and_detect_silent_deletion(tmp_path):
     path = tmp_path / "source.db"
     store = DurableStore(str(path), KEY)
