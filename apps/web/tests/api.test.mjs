@@ -70,13 +70,14 @@ test('malformed JSON produces fixed error', async t => {
   t.mock.method(globalThis, 'fetch', async () => new Response('raw-secret', { status: 200 }))
   await assert.rejects(requestRelease(request), error => !error.message.includes('raw-secret') && error.message.includes('unsafe response'))
 })
-test('UI has no credential persistence, clipboard export or demo fallback', () => {
+test('UI has no credential persistence, clipboard export, preview or demo fallback', () => {
   const ui = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8')
   assert.doesNotMatch(ui, /localStorage|sessionStorage|clipboard|demoRelease/)
   assert.match(ui, /Synthetic data only/)
-  assert.match(ui, /Do not submit customer data/)
-  assert.match(ui, /accepts and temporarily stores submitted text/)
-  assert.doesNotMatch(ui, /Customer data admission.*disabled/)
+  assert.match(ui, /Do not submit customer, employee, passenger/)
+  assert.match(ui, /receives and temporarily stores submitted content/)
+  assert.match(ui, /never previewed or downloaded here/)
+  assert.match(ui, /token is held only in this page’s memory/)
 })
 
 function shortenDeadline(t) {
@@ -166,11 +167,11 @@ test('successful workflow cleans deadline and external abort listener', async t 
 
 test('UI wires cancellation outside the disabled fieldset and guards late state', () => {
   const ui = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8')
-  assert.match(ui, /<\/fieldset>\s*\{busy && <p><button type="button" onClick=\{\(\) => activeRequest\.current\?\.abort\(\)\}>Cancel request/)
+  assert.match(ui, /<\/fieldset>\s*\{busy && <div className="run-actions"[^>]*>.*onClick=\{cancel\}>Cancel browser request/s)
   assert.match(ui, /signal: controller\.signal/)
   assert.match(ui, /if \(activeRequest\.current\) return/)
   assert.match(ui, /activeRequest\.current === controller && !controller\.signal\.aborted/)
-  assert.match(ui, /activeRequest\.current = null; setBusy\(false\)/)
+  assert.match(ui, /activeRequest\.current = null\s*\r?\n\s*setBusy\(false\)/)
   assert.match(ui, /useEffect\(\(\) => \(\) =>/)
 })
 test('card identity, eligibility and required gates must match safe envelope', () => {
@@ -181,16 +182,17 @@ test('card identity, eligibility and required gates must match safe envelope', (
 
 const controlRequest = { apiBase: 'http://localhost:8000', token: 'test-token', content: 'synthetic', recipient: 'buyer-test', purpose: 'ai-training-resale', mode: 'external_anonymized' }
 const digest = char => `sha256:${char.repeat(64)}`
+const rightsDigest = char => char.repeat(64)
 const controlRun = (state, candidate = null) => ({
   id: 'run-1', dataset_id: 'dataset-1', state, attempts: state === 'REGISTERED' ? 0 : 1,
-  request_digest: digest('c'), method_id: 'rules-v1', language: 'en', policy_digest: digest('d'), rights_digest: digest('e'),
+  request_digest: digest('c'), method_id: 'rules-v1', language: 'en', policy_digest: digest('d'), rights_digest: rightsDigest('e'),
   recipient: 'buyer-test', purpose: 'ai-training-resale', candidate,
   events: [{ sequence: 1, state: state === 'REGISTERED' ? 'REGISTERED' : state, action: state === 'REGISTERED' ? 'REGISTERED' : 'QUARANTINED', occurred_at: '2026-09-20T00:00:00Z', attempt: state === 'REGISTERED' ? 0 : 1 }],
 })
 const safeCandidate = () => ({ artifact_digest: digest('a'), schema_digest: digest('b'), payload_kind: 'text', media_type: 'text/plain', byte_count: 12, ledger: [{ entity_type: 'PII', action: 'REDACT', reason: 'POLICY_RULE', count: 1 }] })
 const controlResponses = (state = 'QUARANTINED', candidate = safeCandidate()) => [
   { id: 'dataset-1' },
-  { id: 'rights-1', profile_id: 'workbench-rights', version: 'v1', digest: digest('e'), expires_at: '2026-09-20T01:00:00Z', resale_allowed: true, permitted_purposes: ['ai-training-resale'], permitted_recipients: ['buyer-test'] },
+  { id: 'rights-1', profile_id: 'workbench-rights', version: 'v1', digest: rightsDigest('e'), expires_at: '2026-09-20T01:00:00Z', resale_allowed: true, permitted_purposes: ['ai-training-resale'], permitted_recipients: ['buyer-test'] },
   { id: 'policy-1', key: 'workbench-baseline::v1', digest: digest('d'), formats: ['csv', 'json', 'jsonl', 'text'], languages: ['en', 'und'], release_modes: ['external_anonymized', 'restricted_pseudonymized'] },
   controlRun('REGISTERED'), controlRun(state, candidate),
 ]

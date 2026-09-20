@@ -41,7 +41,7 @@ test('real HTTP intake, withholding, independent review and isolation', { timeou
     assert.ok(ready, 'API startup deadline')
     const source = readFileSync(new URL('../src/api.ts', import.meta.url), 'utf8')
     const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText
-    const { requestRelease } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
+    const { requestRelease, runControlPlane } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
     const content = 'Synthetic contact alex@example.com'
     const release = await requestRelease({ apiBase: base, token: processor, content, mode: 'external_anonymized', recipient: 'synthetic-buyer' })
     assert.equal(release.eligibility, 'REVIEW_REQUIRED')
@@ -49,6 +49,14 @@ test('real HTTP intake, withholding, independent review and isolation', { timeou
     assert.equal(release.card.scores, null)
     assert.ok(release.card.findings.some(f => f.entity_type === 'EMAIL'))
     assert.ok(!JSON.stringify(release).includes('alex@example.com'))
+    const controlRun = await runControlPlane({
+      apiBase: base, token: processor, content, recipient: 'synthetic-buyer',
+      purpose: 'model-training', mode: 'external_anonymized',
+    })
+    assert.equal(controlRun.state, 'QUARANTINED')
+    assert.ok(controlRun.candidate, 'private candidate metadata is available for audit only')
+    assert.ok(!JSON.stringify(controlRun).includes('alex@example.com'))
+    assert.equal(controlRun.message.includes('expected to quarantine'), true)
     const call = (path, credential, body) => fetch(base + path, { method: body ? 'POST' : 'GET', headers: { Authorization: `Bearer ${credential}`, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined })
     assert.equal((await call(`/releases/${release.id}`, foreign)).status, 404)
     assert.equal((await call(`/releases/${release.id}`, buyer)).status, 403)

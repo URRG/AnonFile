@@ -156,9 +156,15 @@ const CONTROL_POLICY = {
 } as const
 
 const CONTROL_STATES = new Set<ControlPlaneView['state']>(['REGISTERED', 'RUNNING', 'CANDIDATE', 'QUARANTINED', 'FAILED'])
+// Candidate, policy and request identities are explicitly algorithm-labelled.
+// The pre-existing rights-profile contract uses a bare SHA-256 hex digest;
+// retain that distinction rather than silently accepting either form everywhere.
 const DIGEST = /^sha256:[0-9a-f]{64}$/
+const RIGHTS_DIGEST = /^[0-9a-f]{64}$/
 const LABEL = /^[a-z0-9][a-z0-9._:-]{0,127}$/
-const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/
+// Python's canonical ``datetime.isoformat`` may retain six fractional digits;
+// accept only that RFC 3339 UTC representation (not arbitrary date strings).
+const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/
 
 const controlInvalid = () => new ControlPlaneFailure('The API returned invalid control-plane metadata. No candidate body was returned or released.')
 const nonEmpty = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 160
@@ -266,10 +272,10 @@ export async function runControlPlane(request: ControlPlaneRequest): Promise<Con
       if (!object(ingestion) || !safeControlId(ingestion.id)) throw controlInvalid()
       const datasetId = ingestion.id
       const rights = await postControl(request.apiBase, '/rights-profiles', token, {
-        profile_id: 'workbench-rights', version: 'v1', permitted_purposes: [purpose], permitted_recipients: [recipient],
+      profile_id: 'workbench-rights', version: 'v1', permitted_purposes: [purpose], permitted_recipients: [recipient],
         expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), resale_allowed: true,
       }, signal)
-      if (!object(rights) || !safeControlId(rights.id) || rights.profile_id !== 'workbench-rights' || rights.version !== 'v1' || !DIGEST.test(String(rights.digest)) ||
+  if (!object(rights) || !safeControlId(rights.id) || rights.profile_id !== 'workbench-rights' || rights.version !== 'v1' || !RIGHTS_DIGEST.test(String(rights.digest)) ||
           typeof rights.expires_at !== 'string' || !ISO_TIME.test(rights.expires_at) || rights.resale_allowed !== true ||
           !sameStrings(rights.permitted_purposes, [purpose]) || !sameStrings(rights.permitted_recipients, [recipient])) throw controlInvalid()
       const policy = await postControl(request.apiBase, '/policy-snapshots', token, CONTROL_POLICY, signal)
