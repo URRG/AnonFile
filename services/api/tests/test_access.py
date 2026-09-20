@@ -5,12 +5,16 @@ import pytest
 from fastapi.testclient import TestClient
 from app.main import BodyLimitMiddleware, create_app
 
-TOKENS = {name: name.ljust(40, "-") for name in ("processor", "reviewer", "buyer", "other", "dual")}
+TOKENS = {name: name.ljust(40, "-") for name in ("processor", "reviewer", "buyer", "other", "dual", "evaluator", "evaluator-other")}
 
 @pytest.fixture
 def client(monkeypatch):
-    entries = [{"token": TOKENS[name], "subject": name, "tenant": "tenant-b" if name == "other" else "tenant-a",
-                "roles": ["processor", "reviewer"] if name == "dual" else ["processor" if name == "other" else name]} for name in TOKENS]
+    roles = {"processor": ["processor"], "reviewer": ["reviewer"], "buyer": ["buyer"],
+             "other": ["processor"], "dual": ["processor", "reviewer"],
+             "evaluator": ["evaluator"], "evaluator-other": ["evaluator"]}
+    entries = [{"token": TOKENS[name], "subject": name,
+                "tenant": "tenant-b" if name in {"other", "evaluator-other"} else "tenant-a",
+                "roles": roles[name]} for name in TOKENS]
     monkeypatch.setenv("ANONFLOW_ENV", "development")
     monkeypatch.setenv("ANONFLOW_AUTH_MODE", "dev-token")
     monkeypatch.setenv("ANONFLOW_STORAGE_MODE", "memory")

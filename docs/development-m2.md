@@ -27,7 +27,7 @@ Set `ANONFLOW_AUTH_MODE=jwt` and all of:
 - `ANONFLOW_JWT_ISSUER`: exact trusted issuer string.
 - `ANONFLOW_JWT_AUDIENCE`: exact single-string audience.
 - `ANONFLOW_JWKS_PATH`: ordinary local public-only RSA JWKS file, not a URL.
-- `ANONFLOW_JWT_BINDINGS`: JSON array of `{"subject":"...","tenant":"...","roles":["processor"]}`. Role values are processor/reviewer/buyer; configure distinct review and processing subjects.
+- `ANONFLOW_JWT_BINDINGS`: JSON array of `{"subject":"...","tenant":"...","roles":["processor"]}`. Role values are processor/reviewer/buyer/evaluator; configure distinct review, processing and evaluator subjects.
 
 Accepted tokens require RS256, explicit known `kid`, `typ=at+jwt`, and `iss/aud/sub/exp/iat/nbf`; numeric dates must be finite numbers, not coerced strings/bools. RSA keys must be2048–8192bits. Only the narrow documented JOSE/JWK fields are accepted; token-controlled URLs and unsupported critical headers are rejected. Token tenant/role claims cannot grant access: bindings are authoritative. Invalid tokens return fixed401; unbound subjects/unauthorized roles return403. JWT errors never fall back to development tokens. Do not use ID tokens or paste third-party customer credentials into the workbench.
 
