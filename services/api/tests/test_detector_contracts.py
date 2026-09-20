@@ -116,6 +116,9 @@ def test_direct_construction_checks_identity_mapper_and_evidence_ordering():
     mapping = mapper()
     with pytest.raises(DetectorContractError):
         TaxonomyMapper((("EMAIL", "PII"), ("EMAIL", "PAYMENT")))
+    with pytest.raises(DetectorContractError) as error:
+        TaxonomyMapper((("EMAIL", "PII"), object()))
+    assert str(error.value) == "Invalid detector contract."
     coverage = Coverage.from_result(adapter_result({}, 1, 1))
     with pytest.raises(DetectorContractError):
         Coverage(1, 1, 0, 1, 0, CoverageStatus.COMPLETE, ASSESSED, ABSTAINED)

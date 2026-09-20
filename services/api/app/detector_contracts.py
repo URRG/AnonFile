@@ -159,8 +159,7 @@ class TaxonomyMapper:
         return cls(entries)
 
     def __post_init__(self) -> None:
-        if (type(self.entries) is not tuple or not self.entries or len(self.entries) > MAX_LABELS
-                or tuple(sorted(self.entries)) != self.entries):
+        if type(self.entries) is not tuple or not self.entries or len(self.entries) > MAX_LABELS:
             _fail()
         labels: list[str] = []
         clean: list[tuple[str, str]] = []
@@ -172,7 +171,7 @@ class TaxonomyMapper:
                 _fail()
             labels.append(label)
             clean.append((label, category))
-        if len(labels) != len(set(labels)):
+        if len(labels) != len(set(labels)) or tuple(sorted(clean)) != tuple(clean):
             _fail()
         encoded = canonical_configuration({"taxonomy": [[label, category] for label, category in clean]})
         object.__setattr__(self, "digest", _hash(encoded))
