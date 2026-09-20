@@ -108,6 +108,19 @@ def test_wrong_missing_or_tampered_hmac_reference_inputs_abstain_before_metrics(
         assert report.candidate_record_count is None and report.matched_record_count is None
 
 
+def test_malicious_reference_subclass_cannot_override_verified_empty_reference_metrics():
+    class MisleadingReference(type(prepared([])[1])):
+        @property
+        def record_count(self):
+            return 1
+
+    config, reference = prepared([])
+    misleading = MisleadingReference(reference._tokens, reference._key_commitment, reference._public_commitment)
+    with pytest.raises(LinkageRiskError):
+        assess_linkage_risk(candidate=candidate([{"birth_band": "1980s", "postal_band": "100"}]),
+                            reference=misleading, linkage_keys=config, commitment_verifier=AUTHORITY)
+
+
 def test_candidate_shape_empty_limit_and_linkage_key_failures_are_explicit_no_metric_abstentions():
     config, reference = prepared([{"birth_band": "1980s", "postal_band": "100"}])
     cases = [

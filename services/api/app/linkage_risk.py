@@ -140,11 +140,14 @@ class LinkageCommitmentAuthority:
                                                              prefix="linkcfg:v1:"))
 
     def verifies_key_config(self, config: "LinkageKeyConfig") -> bool:
-        if not isinstance(config, LinkageKeyConfig):
+        # This is a trust boundary.  A subclass could override a public
+        # property after its private fields have been checked, so only the
+        # exact immutable record type is admitted.
+        if type(config) is not LinkageKeyConfig:
             return False
         try:
             expected = self._mac("linkage-key-config", list(config._fields), prefix="linkcfg:v1:")
-            return hmac.compare_digest(expected, config.public_commitment)
+            return hmac.compare_digest(expected, config._public_commitment)
         except LinkageRiskError:
             return False
 
@@ -173,13 +176,13 @@ class LinkageCommitmentAuthority:
                                 _public_commitment=commitment)
 
     def verifies_reference(self, reference: "LinkageReference", *, linkage_keys: "LinkageKeyConfig") -> bool:
-        if (not isinstance(reference, LinkageReference) or not self.verifies_key_config(linkage_keys)
-                or reference._key_commitment != linkage_keys.public_commitment):
+        if (type(reference) is not LinkageReference or not self.verifies_key_config(linkage_keys)
+                or reference._key_commitment != linkage_keys._public_commitment):
             return False
         try:
             token_text = [base64.urlsafe_b64encode(token).rstrip(b"=").decode("ascii") for token in reference._tokens]
             expected = self._mac("linkage-reference", {
-                "key_commitment": linkage_keys.public_commitment,
+                "key_commitment": linkage_keys._public_commitment,
                 "tokens": token_text,
             }, prefix="linkref:v1:")
             return hmac.compare_digest(expected, reference.public_commitment)
@@ -361,8 +364,8 @@ def _abstain(candidate: CandidateArtifact, linkage_keys: LinkageKeyConfig,
     metadata = candidate.metadata
     return LinkageRiskReport(
         candidate_artifact_digest=metadata.artifact_digest, candidate_schema_digest=metadata.schema_digest,
-        linkage_key_commitment=linkage_keys.public_commitment, reference_commitment=reference.public_commitment,
-        linkage_key_count=linkage_keys.field_count, methodology_digest=METHODOLOGY_DIGEST,
+        linkage_key_commitment=linkage_keys._public_commitment, reference_commitment=reference._public_commitment,
+        linkage_key_count=len(linkage_keys._fields), methodology_digest=METHODOLOGY_DIGEST,
         status=LinkageRiskStatus.ABSTAINED, abstention_reason=reason,
         candidate_record_count=None, reference_record_count=None, matched_record_count=None,
         unique_match_count=None, ambiguous_match_count=None, match_coverage_percent=None,
@@ -380,10 +383,10 @@ def assess_linkage_risk(*, candidate: CandidateArtifact, reference: LinkageRefer
     are deterministic aggregate attack-surface measurements only; they do not
     establish anonymity, real-world identity correctness, or release safety.
     """
-    if (not isinstance(candidate, CandidateArtifact) or not isinstance(reference, LinkageReference)
-            or not isinstance(linkage_keys, LinkageKeyConfig)):
+    if (type(candidate) is not CandidateArtifact or type(reference) is not LinkageReference
+            or type(linkage_keys) is not LinkageKeyConfig):
         _fail()
-    if (not isinstance(commitment_verifier, LinkageCommitmentAuthority)
+    if (type(commitment_verifier) is not LinkageCommitmentAuthority
             or not commitment_verifier.verifies_reference(reference, linkage_keys=linkage_keys)):
         return _abstain(candidate, linkage_keys, reference,
                          LinkageRiskAbstention.REFERENCE_COMMITMENT_UNVERIFIED)
@@ -399,7 +402,8 @@ def assess_linkage_risk(*, candidate: CandidateArtifact, reference: LinkageRefer
         return _abstain(candidate, linkage_keys, reference, LinkageRiskAbstention.EMPTY_CANDIDATE)
     if len(payload) > MAX_RECORDS:
         return _abstain(candidate, linkage_keys, reference, LinkageRiskAbstention.CANDIDATE_RECORD_LIMIT_EXCEEDED)
-    if reference.record_count == 0:
+    reference_record_count = len(reference._tokens)
+    if reference_record_count == 0:
         return _abstain(candidate, linkage_keys, reference, LinkageRiskAbstention.EMPTY_REFERENCE)
     try:
         candidate_tokens = _tokenise_records(payload, linkage_keys, commitment_verifier)
@@ -412,10 +416,10 @@ def assess_linkage_risk(*, candidate: CandidateArtifact, reference: LinkageRefer
     metadata = candidate.metadata
     return LinkageRiskReport(
         candidate_artifact_digest=metadata.artifact_digest, candidate_schema_digest=metadata.schema_digest,
-        linkage_key_commitment=linkage_keys.public_commitment, reference_commitment=reference.public_commitment,
-        linkage_key_count=linkage_keys.field_count, methodology_digest=METHODOLOGY_DIGEST,
+        linkage_key_commitment=linkage_keys._public_commitment, reference_commitment=reference._public_commitment,
+        linkage_key_count=len(linkage_keys._fields), methodology_digest=METHODOLOGY_DIGEST,
         status=LinkageRiskStatus.ASSESSED, abstention_reason=None,
-        candidate_record_count=len(payload), reference_record_count=reference.record_count,
+        candidate_record_count=len(payload), reference_record_count=reference_record_count,
         matched_record_count=matched, unique_match_count=unique, ambiguous_match_count=matched - unique,
         match_coverage_percent=_percent(matched, len(payload)),
     )
