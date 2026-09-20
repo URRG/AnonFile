@@ -22,6 +22,8 @@ from app.evaluation_harness import EvaluationHarnessError, ScoredEvaluation
 from app.evaluator_authority import EvaluatorAuthority, EvaluatorAuthorityError
 from app.utility_evidence import DataUtilityReport, UtilityEvidenceError
 from app.utility_evidence_authority import UtilityEvidenceAuthorityError, UtilityEvidenceControlAuthority
+from app.disclosure_risk import DisclosureRiskError, DisclosureRiskReport
+from app.disclosure_risk_authority import DisclosureRiskAuthorityError, DisclosureRiskControlAuthority
 
 
 def unavailable():
@@ -79,7 +81,7 @@ class DevelopmentStore:
     # envelope so plaintext never reaches SQLite, but has no GET/list route.
     CONTROL_KINDS = frozenset({"rights_profile", "policy_snapshot", "processing_run", "authorization_request",
                                 "private_candidate", "evaluation_report", "qualification",
-                                "detector_evaluation_evidence", "utility_evidence"})
+                                "detector_evaluation_evidence", "utility_evidence", "disclosure_risk_evidence"})
     TTL_SECONDS = 3600
 
     def __init__(self):
@@ -210,7 +212,7 @@ class DevelopmentStore:
             # in this transaction; no transient record state is persisted.
             if record["payload"].get("state") == "RUNNING":
                 record["payload"]["audit_reservation"] = 0
-            for kind in ("qualification", "evaluation_report", "detector_evaluation_evidence", "utility_evidence",
+            for kind in ("qualification", "evaluation_report", "detector_evaluation_evidence", "utility_evidence", "disclosure_risk_evidence",
                          "private_candidate"):
                 for evidence_id, evidence in list(self.controls[kind].items()):
                     if evidence["tenant"] == tenant and evidence["payload"].get("run_id") == run_id:
@@ -785,6 +787,67 @@ class DevelopmentStore:
                 raise HTTPException(429, "Development control capacity exceeded")
             self._append_event(tenant, "utility_evidence.created", data["id"], actor, record=data)
             self.controls["utility_evidence"][data["id"]] = data
+            return detached(data), False
+
+    def record_disclosure_risk_evidence(self, identifier, tenant, evidence, actor, authority):
+        """Retain signed aggregate risk evidence; never mutate run lifecycle."""
+        data = detached(evidence)
+        with self._transaction():
+            self._purge(); self._purge_controls()
+            run = self._control("processing_run", identifier, tenant)
+            candidates = [item for item in self.controls["private_candidate"].values()
+                          if item["tenant"] == tenant and item["payload"].get("run_id") == identifier]
+            if len(candidates) != 1: raise unavailable()
+            self._validate_control(data); payload = data["payload"]
+            expected = {"run_id", "processing_request_digest", "candidate_artifact_digest", "policy_digest", "rights_digest",
+                        "method_id", "method_version", "method_config_digest", "taxonomy_mapping_digest", "idempotency_key",
+                        "risk_authority_id", "qid_config_revision", "attestation_signature", "report"}
+            valid_id = lambda value: (type(value) is str and len(value) == 71 and value.startswith("sha256:")
+                                      and all(char in "0123456789abcdef" for char in value[7:]))
+            if (data["kind"] != "disclosure_risk_evidence" or data["tenant"] != tenant or set(payload) != expected
+                    or payload.get("run_id") != identifier or payload.get("processing_request_digest") != run["payload"].get("request_digest")
+                    or payload.get("candidate_artifact_digest") != candidates[0]["payload"].get("artifact_digest")
+                    or payload.get("policy_digest") != run["payload"].get("policy_digest")
+                    or payload.get("rights_digest") != run["payload"].get("rights_digest")
+                    or payload.get("method_id") != run["payload"].get("method_id")
+                    or payload.get("method_version") != run["payload"].get("method_version")
+                    or payload.get("method_config_digest") != run["payload"].get("method_config_digest")
+                    or payload.get("taxonomy_mapping_digest") != run["payload"].get("taxonomy_mapping_digest")
+                    or data["expires_at"] > run["expires_at"] or data["expires_at"] > candidates[0]["expires_at"]
+                    or type(payload.get("idempotency_key")) is not str or not 1 <= len(payload["idempotency_key"]) <= 200
+                    or not payload["idempotency_key"].isascii() or any(char.isspace() for char in payload["idempotency_key"])
+                    or not valid_id(payload.get("risk_authority_id"))
+                    or type(payload.get("qid_config_revision")) is not str or not payload["qid_config_revision"].startswith("qidrev:v1:")
+                    or len(payload["qid_config_revision"]) != 53):
+                raise unavailable()
+            try:
+                report = DisclosureRiskReport.from_record(payload["report"])
+                verified = (isinstance(authority, DisclosureRiskControlAuthority) and authority.is_active()
+                            and authority.tenant == tenant and authority.authority_id == payload["risk_authority_id"]
+                            and authority.qid_config_revision == payload["qid_config_revision"]
+                            and report.quasi_identifier_commitment == authority.quasi_identifiers.public_commitment
+                            and report.quasi_identifier_count == authority.quasi_identifiers.field_count
+                            and authority.verify(signature=payload["attestation_signature"], tenant=tenant, run_id=identifier,
+                                processing_request_digest=payload["processing_request_digest"], candidate_artifact_digest=payload["candidate_artifact_digest"],
+                                policy_digest=payload["policy_digest"], rights_digest=payload["rights_digest"], method_id=payload["method_id"],
+                                method_version=payload["method_version"], method_config_digest=payload["method_config_digest"],
+                                taxonomy_mapping_digest=payload["taxonomy_mapping_digest"], idempotency_key=payload["idempotency_key"],
+                                qid_config_revision=payload["qid_config_revision"], report=report))
+            except (DisclosureRiskError, DisclosureRiskAuthorityError):
+                raise unavailable() from None
+            if not verified or report.candidate_artifact_digest != payload["candidate_artifact_digest"]: raise unavailable()
+            for existing in self.controls["disclosure_risk_evidence"].values():
+                old = existing["payload"]
+                if existing["tenant"] == tenant and old.get("run_id") == identifier and old.get("idempotency_key") == payload["idempotency_key"]:
+                    if old.get("report", {}).get("digest") != report.digest: raise HTTPException(409, "Idempotency key conflicts with a different request")
+                    return detached(existing), True
+            if data["id"] in self.controls["disclosure_risk_evidence"] or self._used_identifier(data["id"], "disclosure_risk_evidence"):
+                raise HTTPException(409, "Object already exists")
+            if (sum(len(items) for items in self.controls.values()) >= self.MAX_CONTROLS
+                    or sum(item["tenant"] == tenant for items in self.controls.values() for item in items.values()) >= self.MAX_CONTROLS_PER_TENANT):
+                raise HTTPException(429, "Development control capacity exceeded")
+            self._append_event(tenant, "disclosure_risk_evidence.created", data["id"], actor, record=data)
+            self.controls["disclosure_risk_evidence"][data["id"]] = data
             return detached(data), False
 
     def record_qualification(self, identifier, tenant, qualification, evaluation_id, actor):

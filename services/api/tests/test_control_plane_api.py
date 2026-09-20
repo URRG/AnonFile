@@ -35,6 +35,10 @@ def setup(monkeypatch, tmp_path, mode="memory"):
         "expires_at": "2030-01-01T00:00:00Z",
         "key": base64.b64encode(b"u" * 32).decode(),
     }]))
+    monkeypatch.setenv("ANONFLOW_DISCLOSURE_RISK_AUTHORITIES", json.dumps([{
+        "tenant": "tenant-a", "key_id": "development-risk-a", "expires_at": "2030-01-01T00:00:00Z",
+        "quasi_identifier_fields": ["code"], "key": base64.b64encode(b"r" * 32).decode(),
+    }]))
 
 
 @pytest.fixture(params=["memory", "sqlite"])
