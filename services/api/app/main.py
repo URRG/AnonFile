@@ -42,6 +42,10 @@ from app.qualification import (CandidateBinding, CategoryMeasurement, CategoryTh
 from app.evaluation_harness import EvaluationHarnessError, ScoredEvaluation
 from app.evaluator_authority import (EvaluatorAuthorityError, load_evaluator_authorities,
                                      matching_authority)
+from app.benchmark_evidence_profile import (BenchmarkEvidenceProfileError,
+                                            BenchmarkEvidenceAssessment,
+                                            load_benchmark_evidence_profiles,
+                                            profile_for_tenant)
 from app.utility_evidence import DataUtilityReport, UtilityEvidenceError, assess_data_utility
 from app.utility_evidence_authority import (UtilityEvidenceAuthorityError, authority_for_tenant,
                                             load_utility_evidence_authorities)
@@ -355,6 +359,18 @@ class DetectorEvaluationEvidenceView(BaseModel):
     limitations: list[str]
     report: dict[str, Any]
 
+class BenchmarkEvidenceView(BaseModel):
+    """M17's aggregate-only, server-derived benchmark policy input."""
+    id: str
+    run_id: str
+    processing_request_digest: str
+    report_digest: str
+    profile_digest: str
+    conservative_recall_ppm: int
+    evaluated_at: datetime
+    posture: Literal["OBSERVATIONAL_ONLY"]
+    limitations: list[str]
+
 class UtilityEvidenceView(BaseModel):
     """Source-safe structural evidence from a trusted local worker only."""
     id: str
@@ -600,6 +616,54 @@ def detector_evaluation_evidence_view(record: dict[str, Any], *, evaluator_autho
     except (KeyError, TypeError, ValueError, EvaluationHarnessError, EvaluatorAuthorityError):
         raise HTTPException(503, "Control integrity verification failed") from None
 
+def benchmark_evidence_view(record: dict[str, Any], *, store, evaluator_authorities,
+                            benchmark_evidence_profiles) -> BenchmarkEvidenceView:
+    """Rebuild M17 from the independently attested M8 report every read.
+
+    The persisted M17 record contains only an opaque source-control reference
+    and a conservative aggregate.  Reconstructing it prevents a stale profile,
+    changed evaluator authority, or altered M8 source report from looking like
+    valid benchmark evidence.
+    """
+    try:
+        payload = record["payload"]
+        expected = {"run_id", "processing_request_digest", "policy_digest", "rights_digest",
+                    "method_id", "method_version", "method_config_digest", "taxonomy_mapping_digest",
+                    "idempotency_key", "source_evidence_id", "assessment"}
+        if set(payload) != expected:
+            raise ValueError
+        source = store.get_control("detector_evaluation_evidence", payload["source_evidence_id"], record["tenant"])
+        if source["payload"].get("run_id") != payload["run_id"]:
+            raise ValueError
+        source_view = detector_evaluation_evidence_view(source, evaluator_authorities=evaluator_authorities)
+        source_payload = source["payload"]
+        profile = profile_for_tenant(benchmark_evidence_profiles, tenant=record["tenant"])
+        report = ScoredEvaluation.from_record(source_payload["report"])
+        matches = [authority for authority in evaluator_authorities
+                   if getattr(authority, "authority_id", None) == source_payload.get("evaluator_authority_id")]
+        if len(matches) != 1:
+            raise ValueError
+        assessed = BenchmarkEvidenceAssessment.from_profile(
+            profile=profile, report=report, authority=matches[0],
+            evaluator_subject=source_payload.get("evaluator_subject"),
+            evaluator_authority_id=source_payload.get("evaluator_authority_id"))
+        stored = BenchmarkEvidenceAssessment.from_record(payload["assessment"])
+        if (stored != assessed or source_view.report_digest != assessed.source_report_digest
+                or payload["processing_request_digest"] != source_view.processing_request_digest
+                or (payload["policy_digest"], payload["rights_digest"], payload["method_id"], payload["method_version"],
+                    payload["method_config_digest"], payload["taxonomy_mapping_digest"])
+                != tuple(source_payload[key] for key in ("policy_digest", "rights_digest", "method_id", "method_version",
+                                                          "method_config_digest", "taxonomy_mapping_digest"))):
+            raise ValueError
+        return BenchmarkEvidenceView(id=record["id"], run_id=payload["run_id"],
+            processing_request_digest=payload["processing_request_digest"], report_digest=assessed.source_report_digest,
+            profile_digest=assessed.profile_digest, conservative_recall_ppm=assessed.conservative_recall_ppm,
+            evaluated_at=assessed.evaluated_at, posture="OBSERVATIONAL_ONLY",
+            limitations=["NO_RELEASE_AUTHORIZATION", "A fixed profile uses the minimum recall across all required categories."])
+    except (HTTPException, KeyError, TypeError, ValueError, EvaluationHarnessError,
+            EvaluatorAuthorityError, BenchmarkEvidenceProfileError):
+        raise HTTPException(503, "Control integrity verification failed") from None
+
 def utility_evidence_view(record: dict[str, Any], *, utility_evidence_authorities) -> UtilityEvidenceView:
     """Render one independently reconstructed, aggregate-only utility report."""
     try:
@@ -816,6 +880,10 @@ def create_app() -> FastAPI:
         app.state.evaluator_authorities = load_evaluator_authorities()
     except EvaluatorAuthorityError:
         raise RuntimeError("Invalid evaluator authority configuration") from None
+    try:
+        app.state.benchmark_evidence_profiles = load_benchmark_evidence_profiles()
+    except BenchmarkEvidenceProfileError:
+        raise RuntimeError("Invalid benchmark-evidence profile configuration") from None
     try:
         app.state.utility_evidence_authorities = load_utility_evidence_authorities()
     except UtilityEvidenceAuthorityError:
@@ -1136,6 +1204,72 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "Control record not found")
         return detector_evaluation_evidence_view(record, evaluator_authorities=app.state.evaluator_authorities)
 
+    @app.post("/processing-runs/{run_id}/benchmark-evidence", response_model=BenchmarkEvidenceView, status_code=201)
+    async def create_benchmark_evidence(run_id: str, request_context: Request,
+                                        principal: Principal = Depends(require_roles("processor"))):
+        """Convert exactly one independently attested M8 report using M17's fixed profile.
+
+        This bodyless adapter accepts no corpus, labels, predictions, category
+        choice, score, profile or evaluator selection.  It remains a privacy
+        measurement input only; it does not authorize a case or delivery.
+        """
+        keys = request_context.headers.getlist("idempotency-key")
+        if (len(keys) != 1 or not 1 <= len(keys[0]) <= 200 or not keys[0].isascii()
+                or any(char.isspace() for char in keys[0]) or await request_context.body()):
+            raise HTTPException(422, "Request validation failed")
+        run = app.state.store.get_control("processing_run", run_id, principal.tenant)
+        if run["payload"].get("processor_subject") != principal.subject:
+            raise HTTPException(403, "Processing-run owner required")
+        try:
+            profile = profile_for_tenant(app.state.benchmark_evidence_profiles, tenant=principal.tenant)
+            sources = [item for item in app.state.store.list_controls("detector_evaluation_evidence", principal.tenant)
+                       if item.get("payload", {}).get("run_id") == run_id]
+            if len(sources) != 1:
+                raise ValueError
+            source = sources[0]
+            source_view = detector_evaluation_evidence_view(source, evaluator_authorities=app.state.evaluator_authorities)
+            source_payload = source["payload"]
+            matches = [authority for authority in app.state.evaluator_authorities
+                       if getattr(authority, "authority_id", None) == source_payload.get("evaluator_authority_id")]
+            if len(matches) != 1:
+                raise ValueError
+            report = ScoredEvaluation.from_record(source_payload["report"])
+            assessment = BenchmarkEvidenceAssessment.from_profile(
+                profile=profile, report=report, authority=matches[0],
+                evaluator_subject=source_payload["evaluator_subject"],
+                evaluator_authority_id=source_payload["evaluator_authority_id"])
+            if source_view.report_digest != assessment.source_report_digest:
+                raise ValueError
+        except (HTTPException, KeyError, TypeError, ValueError, EvaluationHarnessError,
+                EvaluatorAuthorityError, BenchmarkEvidenceProfileError):
+            raise HTTPException(409, "Benchmark evidence scope is unavailable") from None
+        payload = {"run_id": run_id, "processing_request_digest": run["payload"]["request_digest"],
+                   "policy_digest": run["payload"]["policy_digest"], "rights_digest": run["payload"]["rights_digest"],
+                   "method_id": run["payload"]["method_id"], "method_version": run["payload"]["method_version"],
+                   "method_config_digest": run["payload"]["method_config_digest"],
+                   "taxonomy_mapping_digest": run["payload"]["taxonomy_mapping_digest"], "idempotency_key": keys[0],
+                   "source_evidence_id": source["id"], "assessment": assessment.to_record()}
+        record = control_record(kind="benchmark_evidence", identifier=str(uuid4()), tenant=principal.tenant,
+                                payload=payload, expires_at=min(run["expires_at"], source["expires_at"]))
+        persisted, reused = app.state.store.record_benchmark_evidence(run_id, principal.tenant, record,
+                                                                        principal.subject, profile, matches[0])
+        view = benchmark_evidence_view(persisted, store=app.state.store,
+            evaluator_authorities=app.state.evaluator_authorities,
+            benchmark_evidence_profiles=app.state.benchmark_evidence_profiles)
+        if reused:
+            return Response(view.model_dump_json(), status_code=200, media_type="application/json")
+        return view
+
+    @app.get("/processing-runs/{run_id}/benchmark-evidence/{evidence_id}", response_model=BenchmarkEvidenceView)
+    def get_benchmark_evidence(run_id: str, evidence_id: str,
+                               principal: Principal = Depends(require_roles("processor", "reviewer"))):
+        record = app.state.store.get_control("benchmark_evidence", evidence_id, principal.tenant)
+        if record["payload"].get("run_id") != run_id:
+            raise HTTPException(404, "Control record not found")
+        return benchmark_evidence_view(record, store=app.state.store,
+            evaluator_authorities=app.state.evaluator_authorities,
+            benchmark_evidence_profiles=app.state.benchmark_evidence_profiles)
+
     @app.post("/processing-runs/{run_id}/utility-evidence", response_model=UtilityEvidenceView, status_code=201)
     async def create_utility_evidence(run_id: str, request_context: Request,
                                       principal: Principal = Depends(require_roles("processor"))):
@@ -1422,8 +1556,10 @@ def create_app() -> FastAPI:
     def assess_case_privacy(case_id: str, tenant: str, moment: datetime, decision_id: str):
         """Server-only M15 adapter; native report validation precedes M12 V2 issue.
 
-        Benchmark currently has no source-safe candidate-bound attested
-        control appropriate for this gate, so it deliberately remains missing.
+        Benchmark is admitted only through M17's fixed server-owned profile
+        over an independently evaluator-attested M9 report.  The profile fixes
+        the corpus, evaluator, detector/configuration and complete category
+        coverage before a conservative minimum recall can be observed.
         Residual evidence is admitted only through M16's complete native V2
         report, never from a naked digest or aggregate count.
         """
@@ -1438,6 +1574,7 @@ def create_app() -> FastAPI:
             candidate_expires_at=case.binding.candidate_expires_at)
         policy = control.policy(binding)
         candidates = {
+            PrivacyEvidenceKind.BENCHMARK: ("benchmark_evidence", benchmark_evidence_view, None),
             PrivacyEvidenceKind.UTILITY: ("utility_evidence", utility_evidence_view, app.state.utility_evidence_authorities),
             PrivacyEvidenceKind.DISCLOSURE_RISK: ("disclosure_risk_evidence", disclosure_risk_evidence_view, app.state.disclosure_risk_authorities),
             PrivacyEvidenceKind.LINKAGE: ("linkage_risk_evidence", linkage_risk_evidence_view, app.state.linkage_risk_authorities),
@@ -1452,13 +1589,34 @@ def create_app() -> FastAPI:
                 continue
             record=records[0]
             try:
-                view=renderer(record, **({"utility_evidence_authorities": authorities} if kind is PrivacyEvidenceKind.UTILITY else
+                view=(renderer(record, store=app.state.store, evaluator_authorities=app.state.evaluator_authorities,
+                               benchmark_evidence_profiles=app.state.benchmark_evidence_profiles)
+                      if kind is PrivacyEvidenceKind.BENCHMARK else renderer(record, **(
+                                           {"utility_evidence_authorities": authorities} if kind is PrivacyEvidenceKind.UTILITY else
                                            {"disclosure_risk_authorities": authorities} if kind is PrivacyEvidenceKind.DISCLOSURE_RISK else
                                            {"linkage_risk_authorities": authorities} if kind is PrivacyEvidenceKind.LINKAGE else
-                                           {"residual_evidence_authorities": authorities}))
-                report=view.report
-                if (view.candidate_artifact_digest != case.binding.candidate_artifact_digest
-                        or view.processing_request_digest != case.binding.processing_request_digest): raise ValueError
+                                           {"residual_evidence_authorities": authorities})))
+                report=None if kind is PrivacyEvidenceKind.BENCHMARK else view.report
+                if kind is PrivacyEvidenceKind.BENCHMARK:
+                    # M17 has no candidate payload.  The release case binds
+                    # the current candidate while the adapter re-derives the
+                    # exact method scope and uses a native evaluation time.
+                    if view.processing_request_digest != case.binding.processing_request_digest:
+                        raise ValueError
+                    method_scope = {key: record["payload"][key] for key in
+                                    ("method_id", "method_version", "method_config_digest", "taxonomy_mapping_digest")}
+                    method_digest = "sha256:" + hashlib.sha256(json.dumps(
+                        method_scope, ensure_ascii=False, allow_nan=False, sort_keys=True,
+                        separators=(",", ":")).encode("utf-8")).hexdigest()
+                    if (record["payload"].get("policy_digest") != case.binding.processing_policy_digest
+                            or record["payload"].get("rights_digest") != case.binding.rights_digest
+                            or method_digest != case.binding.method_provenance_digest
+                            or view.evaluated_at > moment):
+                        raise ValueError
+                    observed=view.conservative_recall_ppm
+                else:
+                    if (view.candidate_artifact_digest != case.binding.candidate_artifact_digest
+                            or view.processing_request_digest != case.binding.processing_request_digest): raise ValueError
                 if kind is PrivacyEvidenceKind.UTILITY:
                     if report.get("status") != "ASSESSED": raise ValueError
                     observed=1_000_000 if report.get("structure_preserved") and report.get("unit_count_preserved") else 0
@@ -1475,10 +1633,14 @@ def create_app() -> FastAPI:
                             or report.get("scanned_units") != report.get("total_units")
                             or type(report.get("maximum_residual_ppm")) is not int): raise ValueError
                     observed=report["maximum_residual_ppm"]
-                else:
+                elif kind is PrivacyEvidenceKind.LINKAGE:
                     if report.get("status") != "ASSESSED" or type(report.get("unique_match_count")) is not int: raise ValueError
                     observed=report["unique_match_count"]
-                created=datetime.fromisoformat(record["created_at"].replace("Z","+00:00")).astimezone(UTC).replace(microsecond=0)
+                # Benchmark evidence freshness is the native evaluator's time,
+                # never the later adapter/storage time which could launder an
+                # old signed benchmark into apparently fresh evidence.
+                created=(view.evaluated_at if kind is PrivacyEvidenceKind.BENCHMARK else
+                         datetime.fromisoformat(record["created_at"].replace("Z","+00:00")).astimezone(UTC).replace(microsecond=0))
                 record_expiry=datetime.fromtimestamp(record["expires_at"], UTC).replace(microsecond=0)
                 item_expiry=min(record_expiry, case.expires_at, control.decision_authority.expires_at)
                 issuer=control.evidence_authority(kind)

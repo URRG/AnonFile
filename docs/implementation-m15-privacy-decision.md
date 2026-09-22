@@ -27,6 +27,14 @@ Both possible outcomes are `QUARANTINED` and `INSUFFICIENT_EVIDENCE`, with
 `NO_RELEASE_AUTHORIZATION` permanently attached. This increment adds no
 approval, artifact bytes, export, delivery, or download route.
 
+M17 benchmark evidence is admitted only through its bodyless fixed-profile
+adapter. It requires the full taxonomy, pinned evaluator/corpus/detector and
+taxonomy configuration, bounded per-category reference coverage, and uses the
+minimum required-category recall. M15 recomputes the exact method-provenance
+digest and uses the evaluator's original `evaluated_at`, not the later adapter
+write time; profile drift, partial coverage, scope drift and stale evaluation
+time cannot be laundered into a fresh benchmark measurement.
+
 The disclosure adapter uses the native report's `unique_record_count` as a
 maximum-risk measurement. The policy contract reserves zero as invalid for
 that evidence family, so the smallest valid threshold is `1`; deployments

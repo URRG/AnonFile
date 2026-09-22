@@ -27,7 +27,10 @@ from app.privacy_evidence_policy import (
 )
 
 
-NOW = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
+# This is a synthetic issuer-time fixture, not a historical date test.  Keep
+# it in the future so the production authority's intentional expiry check does
+# not turn the suite into a calendar-dependent failure.
+NOW = datetime.now(UTC).replace(microsecond=0)
 DIGESTS = ["sha256:" + char * 64 for char in "abcdef123456789"]
 
 
