@@ -68,6 +68,9 @@ from app.release_case_authority import (ReleaseCaseAuthorityError,
 from app.privacy_decision import (PrivacyDecision, PrivacyDecisionError, control_for_tenant as privacy_decision_control_for_tenant,
                                   load_privacy_decision_controls)
 from app.privacy_evidence_policy import (PrivacyEvidenceBinding, PrivacyEvidenceKind, assess_privacy_evidence)
+from app.release_authorization import (ReleaseAuthorizationApproval, ReleaseAuthorizationError,
+    ReleaseAuthorizationRequest, control_for_tenant as release_authorization_control_for_tenant,
+    load_release_authorization_controls)
 from app.policies import TAXONOMY_CATEGORIES
 
 MAX_BODY_BYTES = 2_100_000
@@ -436,6 +439,21 @@ class PrivacyDecisionView(BaseModel):
     evidence: list[dict[str, str]]
     expires_at: datetime
     posture: Literal["NO_RELEASE_AUTHORIZATION"]
+    limitations: list[str]
+
+class ReleaseAuthorizationApprovalCreate(StrictModel):
+    approval: dict[str, Any]
+
+class ReleaseAuthorizationRequestView(BaseModel):
+    """Auditable authorization workflow state only; never an artifact handle."""
+    id: str
+    case_id: str
+    privacy_decision_id: str
+    request_digest: str
+    expires_at: datetime
+    approval_roles: list[str]
+    state: Literal["PENDING_INDEPENDENT_APPROVALS", "TWO_INDEPENDENT_APPROVALS_RECORDED"]
+    posture: Literal["NO_RELEASE_OR_DELIVERY_AUTHORIZATION"]
     limitations: list[str]
 
 class QualificationCreate(StrictModel):
@@ -822,6 +840,31 @@ def privacy_decision_view(record: dict[str, Any]) -> PrivacyDecisionView:
     except (KeyError,TypeError,ValueError,PrivacyDecisionError):
         raise HTTPException(503,"Control integrity verification failed") from None
 
+def release_authorization_request_view(record: dict[str, Any], *, store, authority) -> ReleaseAuthorizationRequestView:
+    """Render only request/approval metadata after caller has verified liveness."""
+    try:
+        payload=record["payload"]
+        if set(payload)!={"case_id","decision_id","run_id","idempotency_key","request"}:raise ValueError
+        item=ReleaseAuthorizationRequest.from_record(payload["request"])
+        if item.request_id!=record["id"] or item.tenant!=record["tenant"] or item.case_id!=payload["case_id"]:raise ValueError
+        moment=now().replace(microsecond=0)
+        approvals=[]
+        for row in store.list_controls("release_authorization_approval",record["tenant"]):
+            if row.get("payload",{}).get("request_id")!=item.request_id:continue
+            approval=ReleaseAuthorizationApproval.from_record(row["payload"]["approval"])
+            if (approval.case_id!=item.case_id or approval.processing_run_id!=payload["run_id"]
+                    or approval.request_digest!=item.digest or approval.scope_digest!=item.scope_digest
+                    or not authority.verify_approval(approval,at=moment)):raise ValueError
+            approvals.append(approval)
+        roles=sorted(x.approval_role for x in approvals)
+        if len(approvals)>2 or len({x.approver_subject for x in approvals})!=len(approvals) or len(set(roles))!=len(roles):raise ValueError
+        state="TWO_INDEPENDENT_APPROVALS_RECORDED" if set(roles)=={"privacy_reviewer","release_authorizer"} else "PENDING_INDEPENDENT_APPROVALS"
+        return ReleaseAuthorizationRequestView(id=item.request_id,case_id=item.case_id,privacy_decision_id=item.privacy_decision_id,
+            request_digest=item.digest,expires_at=item.expires_at,approval_roles=roles,state=state,
+            posture="NO_RELEASE_OR_DELIVERY_AUTHORIZATION",limitations=["NO_RELEASE_OR_DELIVERY_AUTHORIZATION","Two recorded independent human signatures are not a release, export, download, recipient credential, or delivery instruction.","The exact live case and clean M15 privacy holding are re-verified on every read and approval."])
+    except (KeyError,TypeError,ValueError,ReleaseAuthorizationError):
+        raise HTTPException(503,"Control integrity verification failed") from None
+
 def private_candidate_artifact(private: dict[str, Any]) -> CandidateArtifact:
     """Recreate a validated candidate only within a trusted worker boundary."""
     try:
@@ -908,6 +951,17 @@ def create_app() -> FastAPI:
         app.state.privacy_decision_controls = load_privacy_decision_controls()
     except PrivacyDecisionError:
         raise RuntimeError("Invalid privacy-decision authority configuration") from None
+    try:
+        app.state.release_authorization_controls = load_release_authorization_controls()
+    except ReleaseAuthorizationError:
+        raise RuntimeError("Invalid release-authorization authority configuration") from None
+    if app.state.auth_mode == "dev-token":
+        reviewers={(principal.tenant,principal.subject) for _,principal in app.state.principals
+                   if "reviewer" in principal.roles}
+        if any((control.tenant,subject) not in reviewers
+               for control in app.state.release_authorization_controls
+               for subject,_,_ in control.approvers):
+            raise RuntimeError("Release-authorization approvers are not configured development reviewers")
     app.state.store = create_store()
     app.add_middleware(BodyLimitMiddleware)
     origins = [v.strip() for v in os.getenv("WEB_ORIGIN", "http://localhost:3000,http://localhost:5173").split(",") if v.strip()]
@@ -1704,6 +1758,69 @@ def create_app() -> FastAPI:
             return privacy_decision_view(app.state.store.get_privacy_decision(decision_id,principal.tenant,control.decision_authority,release_authority))
         except (KeyError,TypeError,ValueError,PrivacyDecisionError,ReleaseCaseAuthorityError,HTTPException):
             raise HTTPException(503,"Privacy decision is unavailable") from None
+
+    @app.post("/release-cases/{case_id}/release-authorization-requests", response_model=ReleaseAuthorizationRequestView, status_code=201)
+    async def create_release_authorization_request(case_id: str, request_context: Request,
+                                                   principal: Principal = Depends(require_roles("reviewer"))):
+        """Record a signed pending workflow request; it cannot release anything."""
+        keys=request_context.headers.getlist("idempotency-key")
+        if len(keys)!=1 or await request_context.body():raise HTTPException(422,"Request validation failed")
+        moment=now().replace(microsecond=0)
+        try:
+            authority=release_authorization_control_for_tenant(app.state.release_authorization_controls,tenant=principal.tenant,at=moment)
+            release_authority=release_case_authority_for_tenant(app.state.release_case_authorities,tenant=principal.tenant,at=moment)
+            decision_control=privacy_decision_control_for_tenant(app.state.privacy_decision_controls,tenant=principal.tenant,at=moment)
+            raw_case=app.state.store.get_release_case(case_id,principal.tenant,release_authority)
+            case=ReleaseCase.from_record(raw_case["payload"]["case"])
+            decisions=[row for row in app.state.store.list_controls("privacy_decision",principal.tenant)
+                       if row.get("payload",{}).get("case_id")==case_id]
+            if len(decisions)!=1:raise ValueError
+            raw_decision=app.state.store.get_privacy_decision(decisions[0]["id"],principal.tenant,decision_control.decision_authority,release_authority)
+            decision=PrivacyDecision.from_record(raw_decision["payload"]["decision"])
+            run_id=raw_case["payload"]["run_id"]
+            scope_digest=app.state.store._authorization_scope_digest(case,decision)
+            expiry=min(case.expires_at,decision.expires_at,authority.expires_at,moment+timedelta(hours=1))
+            item=authority.issue_request(request_id=authority.request_id(case_id=case_id,idempotency_key=keys[0]),case_id=case_id,case_digest=case.digest,
+                privacy_decision_id=decision.decision_id,privacy_decision_digest=decision.digest,scope_digest=scope_digest,requested_by=principal.subject,expires_at=expiry,at=moment)
+        except (KeyError,TypeError,ValueError,ReleaseAuthorizationError,ReleaseCaseAuthorityError,PrivacyDecisionError,HTTPException):
+            raise HTTPException(409,"Release authorization scope is unavailable") from None
+        record=control_record(kind="release_authorization_request",identifier=item.request_id,tenant=principal.tenant,
+            payload={"case_id":case_id,"decision_id":decision.decision_id,"run_id":run_id,"idempotency_key":keys[0],"request":item.to_record()},expires_at=item.expires_at.timestamp())
+        stored,reused=app.state.store.record_release_authorization_request(tenant=principal.tenant,data=record,actor=principal.subject,authority=authority,release_authority=release_authority,decision_authority=decision_control.decision_authority)
+        view=release_authorization_request_view(stored,store=app.state.store,authority=authority)
+        return Response(view.model_dump_json(),status_code=200,media_type="application/json") if reused else view
+
+    @app.get("/release-authorization-requests/{request_id}", response_model=ReleaseAuthorizationRequestView)
+    def get_release_authorization_request(request_id: str, principal: Principal = Depends(require_roles("reviewer"))):
+        moment=now().replace(microsecond=0)
+        try:
+            authority=release_authorization_control_for_tenant(app.state.release_authorization_controls,tenant=principal.tenant,at=moment)
+            release_authority=release_case_authority_for_tenant(app.state.release_case_authorities,tenant=principal.tenant,at=moment)
+            decision_control=privacy_decision_control_for_tenant(app.state.privacy_decision_controls,tenant=principal.tenant,at=moment)
+            stored=app.state.store.get_release_authorization_request(request_id,principal.tenant,authority,release_authority,decision_control.decision_authority)
+            return release_authorization_request_view(stored,store=app.state.store,authority=authority)
+        except (ReleaseAuthorizationError,ReleaseCaseAuthorityError,PrivacyDecisionError,HTTPException):
+            raise HTTPException(503,"Release authorization request is unavailable") from None
+
+    @app.post("/release-authorization-requests/{request_id}/approvals", response_model=ReleaseAuthorizationRequestView, status_code=201)
+    def record_release_authorization_approval(request_id: str, request: ReleaseAuthorizationApprovalCreate,
+                                               principal: Principal = Depends(require_roles("reviewer"))):
+        """Append one configured human Ed25519 signature; no authorization is emitted."""
+        moment=now().replace(microsecond=0)
+        try:
+            authority=release_authorization_control_for_tenant(app.state.release_authorization_controls,tenant=principal.tenant,at=moment)
+            release_authority=release_case_authority_for_tenant(app.state.release_case_authorities,tenant=principal.tenant,at=moment)
+            decision_control=privacy_decision_control_for_tenant(app.state.privacy_decision_controls,tenant=principal.tenant,at=moment)
+            approval=ReleaseAuthorizationApproval.from_record(request.approval)
+            if approval.approval_id.startswith("release-authorization-approval:v1:") is False:raise ValueError
+            record=control_record(kind="release_authorization_approval",identifier=approval.approval_id,tenant=principal.tenant,
+                payload={"request_id":request_id,"case_id":approval.case_id,"run_id":approval.processing_run_id,"approval":approval.to_record()},expires_at=approval.expires_at.timestamp())
+            _,reused=app.state.store.record_release_authorization_approval(request_id=request_id,tenant=principal.tenant,data=record,actor=principal.subject,authority=authority,release_authority=release_authority,decision_authority=decision_control.decision_authority)
+            stored=app.state.store.get_release_authorization_request(request_id,principal.tenant,authority,release_authority,decision_control.decision_authority)
+            view=release_authorization_request_view(stored,store=app.state.store,authority=authority)
+            return Response(view.model_dump_json(),status_code=200,media_type="application/json") if reused else view
+        except (KeyError,TypeError,ValueError,ReleaseAuthorizationError,ReleaseCaseAuthorityError,PrivacyDecisionError,HTTPException):
+            raise HTTPException(409,"Release authorization approval is unavailable") from None
 
     @app.post("/processing-runs/{run_id}/residual-evaluations", response_model=ResidualEvaluationView, status_code=201)
     def create_residual_evaluation(run_id: str, principal: Principal = Depends(require_roles("reviewer"))):

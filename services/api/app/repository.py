@@ -34,6 +34,8 @@ from app.residual_evidence_authority import ResidualEvidenceAuthorityError, Resi
 from app.release_case import ReleaseCase, ReleaseCaseError
 from app.release_case_authority import ReleaseCaseControlAuthority
 from app.privacy_decision import PrivacyDecision, PrivacyDecisionAuthority, PrivacyDecisionError
+from app.release_authorization import (ReleaseAuthorizationApproval,
+    ReleaseAuthorizationControl, ReleaseAuthorizationError, ReleaseAuthorizationRequest)
 
 
 def unavailable():
@@ -92,7 +94,8 @@ class DevelopmentStore:
     CONTROL_KINDS = frozenset({"rights_profile", "policy_snapshot", "processing_run", "authorization_request",
                                 "private_candidate", "evaluation_report", "qualification",
                                 "detector_evaluation_evidence", "benchmark_evidence", "utility_evidence", "disclosure_risk_evidence",
-                                "linkage_risk_evidence", "independent_residual_evidence", "release_case", "privacy_decision"})
+                                "linkage_risk_evidence", "independent_residual_evidence", "release_case", "privacy_decision",
+                                "release_authorization_request", "release_authorization_approval"})
     TTL_SECONDS = 3600
 
     def __init__(self):
@@ -223,7 +226,7 @@ class DevelopmentStore:
             # in this transaction; no transient record state is persisted.
             if record["payload"].get("state") == "RUNNING":
                 record["payload"]["audit_reservation"] = 0
-            for kind in ("qualification", "evaluation_report", "detector_evaluation_evidence", "benchmark_evidence", "utility_evidence", "disclosure_risk_evidence", "linkage_risk_evidence", "independent_residual_evidence", "release_case", "privacy_decision",
+            for kind in ("qualification", "evaluation_report", "detector_evaluation_evidence", "benchmark_evidence", "utility_evidence", "disclosure_risk_evidence", "linkage_risk_evidence", "independent_residual_evidence", "release_case", "privacy_decision", "release_authorization_request", "release_authorization_approval",
                          "private_candidate"):
                 for evidence_id, evidence in list(self.controls[kind].items()):
                     if evidence["tenant"] == tenant and evidence["payload"].get("run_id") == run_id:
@@ -243,6 +246,14 @@ class DevelopmentStore:
                             and decision_id != retain_privacy_decision_id):
                         self._append_event(tenant, "privacy_decision.invalidated", decision_id, "system")
                         del self.controls["privacy_decision"][decision_id]
+                for request_id, request in list(self.controls["release_authorization_request"].items()):
+                    if request["tenant"] == tenant and request["payload"].get("case_id") == case_id:
+                        self._append_event(tenant, "release_authorization_request.invalidated", request_id, "system")
+                        del self.controls["release_authorization_request"][request_id]
+                        for approval_id, approval in list(self.controls["release_authorization_approval"].items()):
+                            if approval["tenant"] == tenant and approval["payload"].get("request_id") == request_id:
+                                self._append_event(tenant, "release_authorization_approval.invalidated", approval_id, "system")
+                                del self.controls["release_authorization_approval"][approval_id]
 
     def _dataset(self, identifier, tenant):
         result = self.datasets.get(identifier)
@@ -1306,6 +1317,136 @@ class DevelopmentStore:
                                                     moment=datetime.now(UTC).replace(microsecond=0))
             if decision.case_digest != case.digest: raise unavailable()
             return detached(data)
+
+    @staticmethod
+    def _authorization_scope_digest(case, decision):
+        """Opaque exact case/decision binding; never a release credential."""
+        return "sha256:" + hashlib.sha256(encoded({"case": case.canonical(),
+                                                      "privacy_decision": decision.canonical()})).hexdigest()
+
+    def _live_authorization_basis(self, *, case_id, decision_id, tenant, release_authority,
+                                  decision_authority, moment):
+        case_data = self._control("release_case", case_id, tenant)
+        run_id = case_data.get("payload", {}).get("run_id")
+        if type(run_id) is not str:
+            raise unavailable()
+        case = self._verify_release_case_scope(data=case_data, identifier=run_id, tenant=tenant,
+                                                authority=release_authority, moment=moment)
+        decision_data = self._control("privacy_decision", decision_id, tenant)
+        try:
+            decision = PrivacyDecision.from_record(decision_data["payload"]["decision"])
+            # M15 intentionally has no PASS.  A clean holding is precisely its
+            # complete-evidence outcome: one required independent-authorization
+            # reason and no other reason.  Anything else is unavailable, never
+            # an approval candidate.
+            clean = (decision.decision.outcome.value == "INSUFFICIENT_EVIDENCE"
+                     and tuple(reason.value for reason in decision.decision.reasons)
+                         == ("INDEPENDENT_RELEASE_AUTHORIZATION_REQUIRED",))
+            if (decision_data["payload"].get("case_id") != case_id or decision.case_id != case_id
+                    or decision.case_digest != case.digest or not clean
+                    or not decision_authority.verifies(decision, at=moment)):
+                raise ValueError
+            return case, decision, run_id
+        except (KeyError, TypeError, ValueError, PrivacyDecisionError):
+            raise unavailable() from None
+
+    def record_release_authorization_request(self, *, tenant, data, actor, authority,
+                                             release_authority, decision_authority):
+        """Persist one server-signed pending request after live M14/M15 checks."""
+        data = detached(data)
+        with self._transaction():
+            self._purge(); self._purge_controls()
+            moment = datetime.now(UTC).replace(microsecond=0)
+            self._validate_control(data); payload = data.get("payload")
+            if (data["kind"] != "release_authorization_request" or data["tenant"] != tenant
+                    or not isinstance(payload, dict) or set(payload) != {"case_id", "decision_id", "run_id", "idempotency_key", "request"}
+                    or type(payload["idempotency_key"]) is not str or not 1 <= len(payload["idempotency_key"]) <= 200
+                    or not payload["idempotency_key"].isascii() or any(c.isspace() for c in payload["idempotency_key"])
+                    or type(authority) is not ReleaseAuthorizationControl or not authority.is_active(at=moment)
+                    or authority.tenant != tenant):
+                raise unavailable()
+            case, decision, run_id = self._live_authorization_basis(case_id=payload["case_id"], decision_id=payload["decision_id"],
+                tenant=tenant, release_authority=release_authority, decision_authority=decision_authority, moment=moment)
+            try:
+                item = ReleaseAuthorizationRequest.from_record(payload["request"])
+                valid = (item.request_id == data["id"] and item.tenant == tenant and item.requested_by == actor
+                         and payload["run_id"] == run_id and item.case_id == case.case_id and item.case_digest == case.digest
+                         and item.privacy_decision_id == decision.decision_id and item.privacy_decision_digest == decision.digest
+                         and item.scope_digest == self._authorization_scope_digest(case, decision)
+                         and item.issued_at <= moment and item.expires_at <= min(case.expires_at, decision.expires_at, authority.expires_at)
+                         and item.expires_at.timestamp() == data["expires_at"] and authority.verifies_request(item, at=moment))
+            except (KeyError, TypeError, ValueError, ReleaseAuthorizationError):
+                valid = False
+            if not valid: raise unavailable()
+            for prior in self.controls["release_authorization_request"].values():
+                previous = prior["payload"]
+                if prior["tenant"] == tenant and previous.get("case_id") == payload["case_id"] and previous.get("idempotency_key") == payload["idempotency_key"]:
+                    try:
+                        old = ReleaseAuthorizationRequest.from_record(previous["request"])
+                        same = (prior["id"] == data["id"] and old.request_id == item.request_id
+                                and old.digest == item.digest and authority.verifies_request(old, at=moment))
+                    except (KeyError, TypeError, ValueError, ReleaseAuthorizationError): same = False
+                    if not same: raise HTTPException(409, "Idempotency key conflicts with a different request")
+                    return detached(prior), True
+            if data["id"] in self.controls["release_authorization_request"] or self._used_identifier(data["id"], "release_authorization_request"):
+                raise HTTPException(409, "Object already exists")
+            self._append_event(tenant, "release_authorization_request.created", data["id"], actor, record=data)
+            self.controls["release_authorization_request"][data["id"]] = data
+            return detached(data), False
+
+    def get_release_authorization_request(self, request_id, tenant, authority, release_authority, decision_authority):
+        with self._transaction():
+            self._purge(); self._purge_controls(); moment=datetime.now(UTC).replace(microsecond=0)
+            data=self._control("release_authorization_request", request_id, tenant)
+            payload=data.get("payload", {})
+            try:
+                item=ReleaseAuthorizationRequest.from_record(payload["request"])
+                case,decision,_=self._live_authorization_basis(case_id=payload["case_id"],decision_id=payload["decision_id"],tenant=tenant,release_authority=release_authority,decision_authority=decision_authority,moment=moment)
+                if (item.request_id != request_id or item.case_digest != case.digest or item.privacy_decision_digest != decision.digest
+                        or item.scope_digest != self._authorization_scope_digest(case,decision) or not authority.verifies_request(item,at=moment)):raise ValueError
+                return detached(data)
+            except (KeyError,TypeError,ValueError,ReleaseAuthorizationError,HTTPException):raise unavailable() from None
+
+    def record_release_authorization_approval(self, *, request_id, tenant, data, actor, authority,
+                                              release_authority, decision_authority):
+        """Append a distinct human signature; it cannot itself authorize delivery."""
+        data=detached(data)
+        with self._transaction():
+            self._purge();self._purge_controls();moment=datetime.now(UTC).replace(microsecond=0)
+            request_data=self.get_release_authorization_request(request_id,tenant,authority,release_authority,decision_authority)
+            request=ReleaseAuthorizationRequest.from_record(request_data["payload"]["request"])
+            self._validate_control(data);payload=data.get("payload")
+            if (data["kind"]!="release_authorization_approval" or data["tenant"]!=tenant or not isinstance(payload,dict)
+                    or set(payload)!={"request_id","case_id","run_id","approval"} or payload["request_id"]!=request_id):raise unavailable()
+            try:
+                approval=ReleaseAuthorizationApproval.from_record(payload["approval"])
+                valid=(approval.approval_id==data["id"] and approval.request_id==request_id and approval.case_id==request.case_id
+                       and approval.processing_run_id==request_data["payload"]["run_id"] and payload["case_id"]==request.case_id
+                       and payload["run_id"]==request_data["payload"]["run_id"] and approval.request_digest==request.digest
+                       and approval.scope_digest==request.scope_digest and approval.approver_subject==actor
+                       and approval.approver_subject!=request.requested_by and request.issued_at<=approval.approved_at<=moment
+                       and approval.expires_at<=request.expires_at and approval.expires_at.timestamp()==data["expires_at"]
+                       and authority.verify_approval(approval,at=moment))
+            except (KeyError,TypeError,ValueError,ReleaseAuthorizationError):valid=False
+            if not valid:raise unavailable()
+            prior_by_id=self.controls["release_authorization_approval"].get(data["id"])
+            if prior_by_id is not None:
+                try:
+                    prior=ReleaseAuthorizationApproval.from_record(prior_by_id["payload"]["approval"])
+                    same=(prior_by_id["tenant"]==tenant and prior.digest==approval.digest
+                          and authority.verify_approval(prior,at=moment))
+                except (KeyError,TypeError,ValueError,ReleaseAuthorizationError):same=False
+                if not same:raise HTTPException(409,"Approval identifier conflicts with a different request")
+                return detached(prior_by_id), True
+            existing=[ReleaseAuthorizationApproval.from_record(row["payload"]["approval"]) for row in self.controls["release_authorization_approval"].values()
+                      if row["tenant"]==tenant and row["payload"].get("request_id")==request_id]
+            if any(item.approver_subject==approval.approver_subject or item.approval_role==approval.approval_role for item in existing):
+                raise HTTPException(409,"Approval conflicts with an existing independent approval")
+            if data["id"] in self.controls["release_authorization_approval"] or self._used_identifier(data["id"],"release_authorization_approval"):
+                raise HTTPException(409,"Object already exists")
+            self._append_event(tenant,"release_authorization_approval.created",data["id"],actor,record=data)
+            self.controls["release_authorization_approval"][data["id"]]=data
+            return detached(data), False
 
     def record_qualification(self, identifier, tenant, qualification, evaluation_id, actor):
         """Persist only a candidate/evidence-bound, non-authorizing decision."""
