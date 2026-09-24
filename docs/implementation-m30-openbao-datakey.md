@@ -11,7 +11,8 @@ authenticated by AEAD ciphers on both paths. See the official
 
 ## Caller contract
 
-An operator pins HTTPS `base_url`, mount path, key name, opaque `key_ref`, and
+An operator pins HTTPS `base_url`, mount path, key name, opaque `key_ref` in
+the existing `keyref:v1:<lowercase-name>` production-substrate format, and
 one Transit key version. The configured Transit key must be `aes256-gcm96`,
 non-derived, non-exportable, not plaintext-backup-enabled, not deletable,
 support encryption/decryption, and report the configured version as its latest

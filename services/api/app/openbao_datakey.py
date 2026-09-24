@@ -22,7 +22,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 _MAX_CONTEXT_BYTES = 4096
 _MAX_RESPONSE_BYTES = 16 * 1024
 _KEY_PART = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}\Z")
-_KEY_REF = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}\Z")
+_KEY_REF = re.compile(r"keyref:v1:[a-z0-9][a-z0-9._:-]{0,95}\Z")
 _WRAPPED_KEY = re.compile(r"vault:v([1-9][0-9]{0,8}):([A-Za-z0-9+/]{80})\Z")
 
 

@@ -17,6 +17,7 @@ from app.openbao_transit import (
     OpenBaoTransitError,
     TransitEd25519Signature,
 )
+from app.openbao_datakey import OpenBaoDataKeyConfig, OpenBaoDataKeyError, OpenBaoTransitDataKey
 
 
 _REQUIRED = (
@@ -28,6 +29,14 @@ _REQUIRED = (
     "OPENBAO_INTEGRATION_KEY_VERSION",
 )
 
+_DATAKEY_REQUIRED = (
+    "OPENBAO_TRANSIT_INTEGRATION",
+    "OPENBAO_INTEGRATION_URL",
+    "OPENBAO_INTEGRATION_DATAKEY_TOKEN",
+    "OPENBAO_INTEGRATION_DATAKEY_NO_DECRYPT_TOKEN",
+    "OPENBAO_INTEGRATION_DATAKEY_VERSION",
+)
+
 
 def _environment() -> dict[str, str]:
     values = {name: os.environ.get(name, "") for name in _REQUIRED}
@@ -36,6 +45,16 @@ def _environment() -> dict[str, str]:
     missing = [name for name, value in values.items() if not value]
     if missing:
         pytest.fail("OpenBao integration environment is incomplete: " + ", ".join(missing))
+    return values
+
+
+def _datakey_environment() -> dict[str, str]:
+    values = {name: os.environ.get(name, "") for name in _DATAKEY_REQUIRED}
+    if values["OPENBAO_TRANSIT_INTEGRATION"] != "1":
+        pytest.skip("set OPENBAO_TRANSIT_INTEGRATION=1 to enable live OpenBao checks")
+    missing = [name for name, value in values.items() if not value]
+    if missing:
+        pytest.fail("OpenBao data-key integration environment is incomplete: " + ", ".join(missing))
     return values
 
 
@@ -77,3 +96,33 @@ def test_real_openbao_transit_ed25519_sign_verify_and_policy_boundary():
     # fixed fail-closed error.
     with pytest.raises(OpenBaoTransitError, match="^verification unavailable$"):
         client.verify(message=message, signature=signature, token=env["OPENBAO_INTEGRATION_SIGN_ONLY_TOKEN"])
+
+
+def test_real_openbao_transit_datakey_aad_and_policy_boundary():
+    env = _datakey_environment()
+    client = OpenBaoTransitDataKey(
+        OpenBaoDataKeyConfig(
+            base_url=env["OPENBAO_INTEGRATION_URL"],
+            mount_path="transit",
+            key_name="m30-integration-envelope",
+            key_ref="keyref:v1:m30-integration-envelope",
+            key_version=int(env["OPENBAO_INTEGRATION_DATAKEY_VERSION"]),
+        )
+    )
+    context = b"tenantref:v1:integration/objectref:v1:integration/envelope-v1"
+    result = client.generate(key_ref="keyref:v1:m30-integration-envelope", context=context,
+                             token=env["OPENBAO_INTEGRATION_DATAKEY_TOKEN"])
+    assert len(result.plaintext_key) == 32
+    assert result.key_version == int(env["OPENBAO_INTEGRATION_DATAKEY_VERSION"])
+    assert result.wrapped_key.startswith("vault:v" + str(result.key_version) + ":")
+    assert len(result.wrapped_key) == len("vault:v7:") + 80
+    assert client.unwrap(key_ref="keyref:v1:m30-integration-envelope", wrapped_key=result.wrapped_key,
+                         context=context, token=env["OPENBAO_INTEGRATION_DATAKEY_TOKEN"]) == result.plaintext_key
+
+    with pytest.raises(OpenBaoDataKeyError, match="^data-key unwrap unavailable$"):
+        client.unwrap(key_ref="keyref:v1:m30-integration-envelope", wrapped_key=result.wrapped_key,
+                      context=context + b"/wrong", token=env["OPENBAO_INTEGRATION_DATAKEY_TOKEN"])
+
+    with pytest.raises(OpenBaoDataKeyError, match="^data-key unwrap unavailable$"):
+        client.unwrap(key_ref="keyref:v1:m30-integration-envelope", wrapped_key=result.wrapped_key,
+                      context=context, token=env["OPENBAO_INTEGRATION_DATAKEY_NO_DECRYPT_TOKEN"])
