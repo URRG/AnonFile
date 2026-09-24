@@ -105,8 +105,11 @@ class PostgresControlPlaneMetadata:
     """Small DB-API PostgreSQL adapter with transaction-id idempotency and CAS.
 
     ``connection_factory`` must return a fresh DB-API-style PostgreSQL
-    connection.  It is deliberately injected so startup, secrets, pooling and
-    infrastructure lifecycle stay outside this metadata-only substrate.
+    connection with ``autocommit`` set to literal ``True``. The adapter starts
+    and completes its own explicit transaction, so an accidentally supplied
+    already-transactional connection cannot weaken the atomicity boundary or
+    emit nested-transaction warnings. Connection creation, secrets, pooling
+    and infrastructure lifecycle stay outside this metadata-only substrate.
     """
 
     def __init__(self, connection_factory: Callable[[], Any]) -> None:
@@ -132,9 +135,16 @@ class PostgresControlPlaneMetadata:
     @staticmethod
     def _rollback(connection: Any) -> None:
         try:
-            connection.rollback()
+            connection.cursor().execute("ROLLBACK")
         except Exception:
             pass
+
+    @staticmethod
+    def _commit(connection: Any) -> None:
+        try:
+            connection.cursor().execute("COMMIT")
+        except Exception:
+            _fail()
 
     @staticmethod
     def _close(connection: Any) -> None:
@@ -153,7 +163,7 @@ class PostgresControlPlaneMetadata:
         connection = None
         try:
             connection = self._connection_factory()
-            if connection is None:
+            if connection is None or getattr(connection, "autocommit", None) is not True:
                 _fail()
             cursor = connection.cursor()
             cursor.execute("BEGIN")
@@ -184,7 +194,7 @@ class PostgresControlPlaneMetadata:
                 result = tuple(_decode_document(item, tenant_ref=transaction.tenant_ref,
                                                  record_id=write.record_id, version=write.version)
                                for item, write in zip(prior_document, transaction.writes, strict=True))
-                connection.commit()
+                self._commit(connection)
                 return result
             if len(claimed) != 1 or claimed[0] != transaction.transaction_id:
                 _fail()
@@ -219,7 +229,7 @@ class PostgresControlPlaneMetadata:
                 (result_document, transaction.tenant_ref, transaction.transaction_id, request_digest))
             if cursor.rowcount != 1:
                 _fail()
-            connection.commit()
+            self._commit(connection)
             return tuple(transaction.writes)
         except PostgresMetadataError:
             if connection is not None:
@@ -245,7 +255,7 @@ class PostgresControlPlaneMetadata:
         connection = None
         try:
             connection = self._connection_factory()
-            if connection is None:
+            if connection is None or getattr(connection, "autocommit", None) is not True:
                 _fail()
             cursor = connection.cursor()
             cursor.execute("BEGIN READ ONLY")
@@ -256,13 +266,13 @@ class PostgresControlPlaneMetadata:
                 (MAX_METADATA_BYTES, tenant_ref, record_id))
             stored = _row(cursor)
             if stored is None:
-                connection.commit()
+                self._commit(connection)
                 return None
             if len(stored) != 3 or stored[1] is None or stored[2] is not True:
                 _fail()
             record = _decode_document(stored[1], tenant_ref=tenant_ref, record_id=record_id,
                                       version=stored[0])
-            connection.commit()
+            self._commit(connection)
             return record
         except PostgresMetadataError:
             if connection is not None:

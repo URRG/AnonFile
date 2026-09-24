@@ -7,12 +7,15 @@ tenant-scoped transactional metadata persistence with create-only/exact-version
 CAS and idempotent transaction IDs after an operator explicitly applies
 `services/api/migrations/001_m26_postgres_metadata.sql`.
 
-The adapter takes only an injected connection factory; it has no
-environment-driven startup configuration, DSN parsing, credential handling,
-TLS verification policy, network policy, API route registration, or automatic
-schema migration. Those connection and transport controls are caller-owned and
-unimplemented here. PostgreSQL is a free, self-hostable open-source dependency,
-but this small adapter is not a production enablement claim.
+The adapter takes only an injected connection factory. It requires each fresh
+connection to expose `autocommit=True`, then owns its explicit transaction
+boundary itself using PostgreSQL `BEGIN`/`COMMIT`/`ROLLBACK` statements (rather
+than driver transaction helpers). It has no environment-driven startup configuration, DSN
+parsing, credential handling, TLS verification policy, network policy, API
+route registration, or automatic schema migration. Those connection and
+transport controls are caller-owned and unimplemented here. PostgreSQL is a
+free, self-hostable open-source dependency, but this small adapter is not a
+production enablement claim.
 
 The database constraints and adapter validate bounded record shape and bind an
 idempotent transaction replay to its exact canonical result. They do **not**

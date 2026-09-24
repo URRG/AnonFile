@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import copy
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -51,6 +50,7 @@ class FakeDatabase:
 class FakeConnection:
     def __init__(self, database):
         self.database = database
+        self.autocommit = True
         self.records = copy.deepcopy(database.records)
         self.transactions = copy.deepcopy(database.transactions)
         self.committed = self.rolled_back = self.closed = False
@@ -83,6 +83,12 @@ class FakeCursor:
         normalized = " ".join(sql.split())
         self._row, self.rowcount = None, -1
         if normalized in {"BEGIN", "BEGIN READ ONLY"}:
+            return
+        if normalized == "COMMIT":
+            self.connection.commit()
+            return
+        if normalized == "ROLLBACK":
+            self.connection.rollback()
             return
         if normalized.startswith("INSERT INTO anonflow_metadata_transactions"):
             tenant, txid, digest = params
@@ -214,6 +220,16 @@ def test_late_cas_conflict_rolls_back_every_earlier_write_and_transaction_claim(
     assert (TENANT, late_conflict.transaction_id) not in database.transactions
 
 
+def test_adapter_requires_a_fresh_autocommit_connection_to_own_transactions():
+    database = FakeDatabase()
+    connection = FakeConnection(database)
+    connection.autocommit = False
+    adapter = PostgresControlPlaneMetadata(lambda: connection)
+    with pytest.raises(PostgresMetadataError):
+        adapter.commit(transaction())
+    assert connection.rolled_back and connection.closed
+
+
 def test_postgresql_service_commit_cas_and_idempotency_when_configured():
     dsn = os.environ.get("ANONFLOW_POSTGRES_TEST_DSN")
     if not dsn:
@@ -225,12 +241,12 @@ def test_postgresql_service_commit_cas_and_idempotency_when_configured():
 
     tenant, record_id, txid = opaque("tenantref:v1:"), opaque("metarecord:v1:"), opaque("metatx:v1:")
     first = metadata(tenant=tenant, record_id=record_id)
-    adapter = PostgresControlPlaneMetadata(lambda: psycopg.connect(dsn, autocommit=False))
+    adapter = PostgresControlPlaneMetadata(lambda: psycopg.connect(dsn, autocommit=True))
     request = transaction(transaction_id=txid, write=first)
     assert adapter.commit(request) == (first,)
     assert adapter.commit(request) == (first,)
     with pytest.raises(PostgresMetadataError):
-        adapter.commit(transaction(write=replace(first, version=2), expected={record_id: 0}))
+        adapter.commit(transaction(transaction_id=opaque("metatx:v1:"), write=first, expected={record_id: 0}))
     assert adapter.read(tenant, record_id) == first
 
     concurrent_record, concurrent_tx = opaque("metarecord:v1:"), opaque("metatx:v1:")
