@@ -1,9 +1,27 @@
 # M22 production-substrate contracts
 
-`app.production_substrate` is a small, metadata-only contract foundation for a
-future production adapter.  It introduces no adapter implementation, storage
-configuration, secrets, queue connection, worker process, API route, or
-production-route enablement.
+`app.production_substrate` is a small, metadata-only contract foundation. M26
+adds `app.postgres_metadata.PostgresControlPlaneMetadata`, a narrowly scoped
+PostgreSQL adapter for those `ControlPlaneMetadata` values. It provides real,
+tenant-scoped transactional metadata persistence with create-only/exact-version
+CAS and idempotent transaction IDs after an operator explicitly applies
+`services/api/migrations/001_m26_postgres_metadata.sql`.
+
+The adapter takes only an injected connection factory. It requires each fresh
+connection to expose `autocommit=True`, then owns its explicit transaction
+boundary itself using PostgreSQL `BEGIN`/`COMMIT`/`ROLLBACK` statements (rather
+than driver transaction helpers). It has no environment-driven startup configuration, DSN
+parsing, credential handling, TLS verification policy, network policy, API
+route registration, or automatic schema migration. Those connection and
+transport controls are caller-owned and unimplemented here. PostgreSQL is a
+free, self-hostable open-source dependency, but this small adapter is not a
+production enablement claim.
+
+The database constraints and adapter validate bounded record shape and bind an
+idempotent transaction replay to its exact canonical result. They do **not**
+cryptographically authenticate database rows: a privileged database writer can
+still replace one valid-shaped metadata value with another. Tamper evidence and
+authenticated backups remain future work outside this slice.
 
 ## Contract guarantees
 
@@ -29,11 +47,12 @@ production-route enablement.
 
 ## Deliberate gaps
 
-No M22 code commits a transaction, encrypts or stores an object, claims work,
-reclaims a lease, authenticates a worker, or proves multi-process atomicity.
-There is no migration from the development SQLite store and no production
-configuration.  A later integration must independently test a real adapter's
-atomic tenant isolation, database/object-store durability, KMS/key rotation,
-network and workload isolation, queue redelivery and fencing behavior,
-observability, backups/deletion, egress, and incident recovery.  Passing these
-shape validators is not production readiness or release authorization.
+M26 persists metadata only; it never accepts raw/candidate bytes, plaintext,
+ciphertext, or object bytes. It does not encrypt or store an object, provide a
+KMS/key lifecycle claim, claim or reclaim worker work, run a queue, authenticate
+any caller, or enable production traffic. There is no migration from the
+development SQLite store. A later integration must independently test the
+object/KMS/worker plane, authentication and authorization, network/workload
+isolation, queue redelivery/fencing, observability, backups/deletion, egress,
+incident recovery, and production-route controls. Passing these contract or
+adapter tests is not production readiness or release authorization.
