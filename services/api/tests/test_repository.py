@@ -1,5 +1,6 @@
 """Local synthetic repository contracts, tampering and cross-instance transactions."""
 import copy
+import re
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -548,8 +549,81 @@ def test_audit_hmac_is_verified_after_successful_aead_decryption(tmp_path):
         entry = store._open(blob, ["tenant-a", "audit", 1], store.MAX_AUDIT_BLOB)
         entry["event"]["actor"] = "forged-actor"
         connection.execute("UPDATE audit SET blob=? WHERE seq=1", (store._seal(entry, ["tenant-a", "audit", 1]),))
+    fails(503, store.audit_head, "tenant-a")
     fails(503, store.verify_audit, "tenant-a")
     store.close()
+
+
+def test_audit_head_is_opaque_tenant_bound_and_commits_empty_and_latest_chain(store):
+    empty_a = store.audit_head("tenant-a")
+    empty_b = store.audit_head("tenant-b")
+    assert empty_a.sequence == empty_b.sequence == 0
+    assert empty_a.audit_chain_commitment != empty_b.audit_chain_commitment
+    assert re.fullmatch(r"audithead:v1:[A-Za-z0-9_-]{43}", empty_a.audit_chain_commitment)
+    assert set(empty_a.__dataclass_fields__) == {"sequence", "audit_chain_commitment"}
+
+    store.add_dataset(source())
+    first = store.audit_head("tenant-a")
+    store.add_release(candidate())
+    latest = store.audit_head("tenant-a")
+    assert first.sequence == 1
+    assert latest.sequence == 2
+    assert latest.audit_chain_commitment != first.audit_chain_commitment
+    # The public commitment is never a serialized audit event or its raw MAC.
+    assert "synthetic-actor" not in repr(latest)
+    assert "dataset.created" not in repr(latest)
+    if type(store) is DevelopmentStore:
+        assert store._audit["tenant-a"][-1]["mac"] not in repr(latest)
+
+
+def test_audit_head_rejects_tampered_memory_chain():
+    store = DevelopmentStore()
+    store.add_dataset(source())
+    store._audit["tenant-a"][-1]["event"]["actor"] = "forged"
+    fails(503, store.audit_head, "tenant-a")
+
+
+def test_sqlite_audit_head_survives_reopen_and_rekeys_as_a_fresh_authenticated_head(tmp_path):
+    path = tmp_path / "source.db"
+    store = DurableStore(str(path), KEY)
+    store.add_dataset(source())
+    initial = store.audit_head("tenant-a")
+    store.close()
+
+    reopened = DurableStore(str(path), KEY)
+    assert reopened.audit_head("tenant-a") == initial
+    reopened.close()
+
+    DurableStore.rotate_key(str(path), KEY, NEXT_KEY, new_key_id="m25-test-key")
+    rotated = DurableStore(str(path), NEXT_KEY)
+    fresh = rotated.audit_head("tenant-a")
+    assert fresh.sequence == initial.sequence == 1
+    assert fresh.audit_chain_commitment != initial.audit_chain_commitment
+    rotated.close()
+
+
+def test_sqlite_audit_head_is_a_transactional_snapshot_during_concurrent_mutation(tmp_path):
+    path = tmp_path / "source.db"
+    first, second = DurableStore(str(path), KEY), DurableStore(str(path), KEY)
+    first.add_dataset(source("d1"))
+    try:
+        def add():
+            first.add_dataset(source("d2"))
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            written = pool.submit(add)
+            observed = pool.submit(second.audit_head, "tenant-a")
+            written.result()
+            head = observed.result()
+        final = first.audit_head("tenant-a")
+        assert head.sequence in {1, 2}
+        assert re.fullmatch(r"audithead:v1:[A-Za-z0-9_-]{43}", head.audit_chain_commitment)
+        assert final.sequence == 2
+        if head.sequence == final.sequence:
+            assert head == final
+    finally:
+        first.close()
+        second.close()
 
 
 def test_subkey_separation_and_fresh_encryption_nonces(tmp_path):

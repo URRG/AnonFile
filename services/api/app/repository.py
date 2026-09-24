@@ -5,7 +5,9 @@ are logical operations, never a guarantee of erasure from memory or backups.
 """
 from __future__ import annotations
 
+import base64
 import copy
+from dataclasses import dataclass
 import hashlib
 import hmac
 import json
@@ -49,6 +51,20 @@ def encoded(value):
 
 def detached(value):
     return json.loads(encoded(value))
+
+
+@dataclass(frozen=True, slots=True)
+class AuditHead:
+    """One source-safe, tenant-bound snapshot of an authenticated audit chain.
+
+    ``audit_chain_commitment`` is intentionally not the chain MAC: it is a
+    domain-separated HMAC over the tenant, exact sequence, and private final
+    MAC.  It can be supplied to M10/M23 checkpoint code without disclosing
+    event metadata or authentication material.
+    """
+
+    sequence: int
+    audit_chain_commitment: str
 
 
 def _evaluation_evidence_status(payload):
@@ -137,6 +153,22 @@ class DevelopmentStore:
                 previous = signature
             except (KeyError, ValueError, TypeError, UnicodeError):
                 raise unavailable() from None
+
+    def _audit_head(self, tenant):
+        """Return an opaque commitment to one already-verified tenant head."""
+        if type(tenant) is not str or not 1 <= len(tenant) <= 256:
+            raise unavailable()
+        self._verify(tenant)
+        entries = self._audit.get(tenant, [])
+        sequence = len(entries)
+        # The same explicit seed used by ``_verify`` makes an empty tenant a
+        # real, authenticated head rather than an ambiguous missing value.
+        final_mac = entries[-1]["mac"] if entries else "0" * 64
+        material = encoded(["anonflow:audithead:v1", tenant, sequence, final_mac])
+        opaque = base64.urlsafe_b64encode(
+            hmac.new(self._audit_key, material, hashlib.sha256).digest()
+        ).decode("ascii").rstrip("=")
+        return AuditHead(sequence=sequence, audit_chain_commitment="audithead:v1:" + opaque)
 
     def _append_event(self, tenant, action, object_id, actor, event_time=None, record=None):
         entries = self._audit.get(tenant, [])
@@ -1675,6 +1707,15 @@ class DevelopmentStore:
         with self._transaction():
             self._verify(tenant)
             return True
+
+    def audit_head(self, tenant):
+        """Authenticate and snapshot a tenant's opaque audit-chain head.
+
+        This is a local commitment primitive only.  It neither issues an M10
+        checkpoint nor submits/claims an external audit anchor.
+        """
+        with self._transaction():
+            return self._audit_head(tenant)
 
     def close(self):
         pass
