@@ -1469,7 +1469,12 @@ class DevelopmentStore:
                 request_data=self.get_release_authorization_request(payload["request_id"],tenant,authorization_authority,release_authority,decision_authority)
                 request=ReleaseAuthorizationRequest.from_record(request_data["payload"]["request"])
                 case,decision,run_id=self._live_authorization_basis(case_id=request.case_id,decision_id=request.privacy_decision_id,tenant=tenant,release_authority=release_authority,decision_authority=decision_authority,moment=moment)
-                approval_rows=[row for row in self.controls["release_authorization_approval"].values() if row.get("tenant")==tenant and isinstance(row.get("payload"),dict) and row["payload"].get("request_id")==request.request_id]
+                approval_rows=[
+                    row for row in self.controls["release_authorization_approval"].values()
+                    if isinstance(row, dict) and row.get("tenant")==tenant
+                    and isinstance(row.get("payload"), dict)
+                    and row["payload"].get("request_id")==request.request_id
+                ]
                 approvals=[ReleaseAuthorizationApproval.from_record(row["payload"]["approval"]) for row in approval_rows]
                 roles={x.approval_role for x in approvals}
                 if (len(approvals)!=2 or roles!={"privacy_reviewer","release_authorizer"} or len({x.approver_subject for x in approvals})!=2
