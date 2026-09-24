@@ -20,17 +20,29 @@ retention/immutable-object controls and the later read-time authentication
 check remain necessary.
 
 In one explicit transaction it locks the immutable M39 intent, the M42 binding,
-the optional M41 reconciliation observation, any completion receipt, the worker
-job, M26 metadata idempotency row, and target metadata row, in that order. A
+the immutable M43 authorization, the optional M41 reconciliation observation,
+any completion receipt, the worker job, M26 metadata idempotency row, and
+target metadata row, in that order. A
 terminal M41 `QUARANTINED` observation rejects finalization. Quarantine takes
 the same intent-first lock and declines after an M40 completion, so the two
 terminal decisions cannot both commit. It re-decodes and compares the locked
 binding with the preflight binding before deriving the only metadata write.
-The completion receipt includes the full binding and encrypted reference,
-applies M26 CAS, and acknowledges the exact unexpired claim. A crash before
-commit rolls back all of those database changes. Exact replay after commit
-returns the stored result; altered inputs and stale/expired claims for an
-unfinalized publication fail closed.
+The M43 attestation is verified with a concrete tenant-scoped pinned Ed25519
+verifier and PostgreSQL's clock in the preflight read, then re-verified under
+the locked rows in the write transaction. It commits to the exact plan,
+metadata target/kind, and M42 binding. The finalizer verifies it once more at
+the database clock immediately before commit; expiry rolls back every staged
+metadata, acknowledgement, and receipt mutation. Pin reload/revocation must
+be completed outside the transaction; no S3, OpenBao, key-loader, or network
+work occurs while locks are held.
+
+The completion receipt includes the full binding, encrypted reference, and
+M43 authorization digest/issuer/validity identity, applies M26 CAS, and
+acknowledges the exact unexpired claim. A crash before commit rolls back all
+of those database changes. Missing legacy authorization, altered/unpinned
+authorization, scope drift, or expiry fails closed. Exact replay after a grant
+expires also fails closed; a future status reader, not `finalize`, must expose
+the durable prior completion.
 
 This is neither an approval, a release, nor a delivery mechanism.  It cannot
 make an object-store write atomic with PostgreSQL, cannot erase an orphan, and

@@ -69,7 +69,10 @@ def _instant(value: datetime) -> str:
 def _time(value: object) -> datetime:
     if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
         _fail()
-    value = value.astimezone(UTC)
+    try:
+        value = value.astimezone(UTC)
+    except (OverflowError, ValueError):
+        _fail()
     if value.microsecond:
         _fail()
     return value
@@ -187,16 +190,20 @@ class PublicationAuthorizationAttestation:
 class PinnedPublicationAuthorizationVerifier:
     """Verify an attestation only against explicit Ed25519 public-key pins."""
 
-    def __init__(self, keys: Mapping[str, bytes]) -> None:
+    def __init__(self, keys: Mapping[tuple[str, str], bytes]) -> None:
         if not isinstance(keys, Mapping) or not keys or len(keys) > 64:
             _fail()
-        parsed: dict[str, Ed25519PublicKey] = {}
-        for key_id, raw in keys.items():
+        parsed: dict[tuple[str, str], Ed25519PublicKey] = {}
+        for identity, raw in keys.items():
+            if type(identity) is not tuple or len(identity) != 2:
+                _fail()
+            tenant_ref, key_id = identity
+            _text(tenant_ref, _TENANT)
             _text(key_id, _IDENTIFIER)
-            if type(raw) is not bytes or len(raw) != 32 or key_id in parsed:
+            if type(raw) is not bytes or len(raw) != 32 or identity in parsed:
                 _fail()
             try:
-                parsed[key_id] = Ed25519PublicKey.from_public_bytes(raw)
+                parsed[identity] = Ed25519PublicKey.from_public_bytes(raw)
             except ValueError:
                 _fail()
         self._keys = parsed
@@ -212,7 +219,7 @@ class PinnedPublicationAuthorizationVerifier:
                     or type(binding) is not PublicationPayloadBinding
                     or attestation.issued_at > moment or attestation.expires_at <= moment):
                 return False
-            key = self._keys.get(attestation.issuer_key_id)
+            key = self._keys.get((attestation.tenant_ref, attestation.issuer_key_id))
             if key is None:
                 return False
             if (attestation.tenant_ref != intent.tenant_ref != binding.tenant_ref

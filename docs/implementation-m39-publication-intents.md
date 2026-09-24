@@ -5,8 +5,9 @@
 any I/O.  It is an injected PostgreSQL DB-API adapter: each factory call must
 return a fresh connection with `autocommit=True`, and the adapter explicitly
 owns `BEGIN`/`COMMIT`/`ROLLBACK`.  Operators must apply migration
-`003_m39_publication_intents.sql` and then
-`006_m42_publication_payload_bindings.sql` separately.
+`003_m39_publication_intents.sql`, then
+`006_m42_publication_payload_bindings.sql`, and then
+`007_m43_publication_authorizations.sql` separately.
 
 An intent binds an exact `publicationref:v1:<43 base64url chars>` to one
 tenant, encrypted object/key/work references, a target metadata-record
@@ -20,7 +21,7 @@ positive value is an update of that exact version.
 All are opaque references or a bounded integer; arbitrary strings, URLs,
 payloads, ciphertext, envelopes, and wrapped data-encryption keys reject.
 
-Each `begin(intent, binding)` additionally commits a `PublicationPayloadBinding`
+Each `begin(intent, binding, attestation)` additionally commits a `PublicationPayloadBinding`
 in the same PostgreSQL transaction.  The binding contains the tenant,
 publication, encrypted object/key references, plan commitment, an exact-byte
 payload commitment, byte size, and one supported serialization identifier
@@ -40,9 +41,14 @@ absent. Database constraints also enforce reference grammar and the permanent
 `PENDING` initial state.
 
 The binding is a technical integrity commitment, not business authorization.
-An independently authorized release decision for the exact plan, destination,
-and payload is an external prerequisite before calling `begin`; this ledger
-does not create or infer that approval.
+`begin()` additionally requires a short-lived externally issued M43a signed
+attestation that commits the exact plan, destination and binding. The caller
+supplies only a pinned Ed25519 public-key verifier: it has no signing key and
+does not infer rights or approvals. The ledger validates signature/scope and
+uses PostgreSQL's clock to reject future-issued or expired attestations before
+the atomic insert. `read()`, `read_binding()`, and `read_authorization()`
+revalidate the matching durable attestation against that same clock; missing,
+expired, corrupt, untrusted, or legacy authorization rows fail closed.
 
 Because M38 binds each create-only `(tenant_ref, object_ref)` object marker to
 one publication ref, the ledger also permits only one intent for an object
