@@ -71,6 +71,8 @@ from app.privacy_evidence_policy import (PrivacyEvidenceBinding, PrivacyEvidence
 from app.release_authorization import (ReleaseAuthorizationApproval, ReleaseAuthorizationError,
     ReleaseAuthorizationRequest, control_for_tenant as release_authorization_control_for_tenant,
     load_release_authorization_controls)
+from app.delivery_readiness import (DeliveryReadiness, DeliveryReadinessError,
+    authority_for_tenant as delivery_readiness_authority_for_tenant, load_delivery_readiness_authorities)
 from app.policies import TAXONOMY_CATEGORIES
 
 MAX_BODY_BYTES = 2_100_000
@@ -454,6 +456,15 @@ class ReleaseAuthorizationRequestView(BaseModel):
     approval_roles: list[str]
     state: Literal["PENDING_INDEPENDENT_APPROVALS", "TWO_INDEPENDENT_APPROVALS_RECORDED"]
     posture: Literal["NO_RELEASE_OR_DELIVERY_AUTHORIZATION"]
+    limitations: list[str]
+
+class DeliveryReadinessView(BaseModel):
+    id: str
+    request_id: str
+    case_id: str
+    expires_at: datetime
+    status: Literal["READY_FOR_INDEPENDENT_DELIVERY_WORKFLOW"]
+    posture: Literal["DELIVERY_READINESS_ONLY"]
     limitations: list[str]
 
 class QualificationCreate(StrictModel):
@@ -865,6 +876,16 @@ def release_authorization_request_view(record: dict[str, Any], *, store, authori
     except (KeyError,TypeError,ValueError,ReleaseAuthorizationError):
         raise HTTPException(503,"Control integrity verification failed") from None
 
+def delivery_readiness_view(record: dict[str, Any]) -> DeliveryReadinessView:
+    try:
+        payload=record["payload"]
+        if set(payload)!={"request_id","idempotency_key","readiness"}:raise ValueError
+        item=DeliveryReadiness.from_record(payload["readiness"])
+        if item.readiness_id!=record["id"] or item.request_id!=payload["request_id"] or item.tenant!=record["tenant"]:raise ValueError
+        return DeliveryReadinessView(id=item.readiness_id,request_id=item.request_id,case_id=item.case_id,expires_at=item.expires_at,status="READY_FOR_INDEPENDENT_DELIVERY_WORKFLOW",posture="DELIVERY_READINESS_ONLY",limitations=["This signed control-plane record is not an artifact, URL, token, export, recipient credential, contract body, or delivery transport.","Every use must independently re-verify live M14/M15/M18 dependencies; revocation, expiry, mismatch, or tenant change fails closed."])
+    except (KeyError,TypeError,ValueError,DeliveryReadinessError):
+        raise HTTPException(503,"Delivery readiness is unavailable") from None
+
 def private_candidate_artifact(private: dict[str, Any]) -> CandidateArtifact:
     """Recreate a validated candidate only within a trusted worker boundary."""
     try:
@@ -955,6 +976,10 @@ def create_app() -> FastAPI:
         app.state.release_authorization_controls = load_release_authorization_controls()
     except ReleaseAuthorizationError:
         raise RuntimeError("Invalid release-authorization authority configuration") from None
+    try:
+        app.state.delivery_readiness_authorities = load_delivery_readiness_authorities()
+    except DeliveryReadinessError:
+        raise RuntimeError("Invalid delivery-readiness authority configuration") from None
     if app.state.auth_mode == "dev-token":
         reviewers={(principal.tenant,principal.subject) for _,principal in app.state.principals
                    if "reviewer" in principal.roles}
@@ -1839,6 +1864,45 @@ def create_app() -> FastAPI:
             return Response(view.model_dump_json(),status_code=200,media_type="application/json") if reused else view
         except (KeyError,TypeError,ValueError,ReleaseAuthorizationError,ReleaseCaseAuthorityError,PrivacyDecisionError,HTTPException):
             raise HTTPException(409,"Release authorization approval is unavailable") from None
+
+    @app.post("/release-authorization-requests/{request_id}/delivery-readiness", response_model=DeliveryReadinessView, status_code=201)
+    async def create_delivery_readiness(request_id: str, request_context: Request,
+                                        principal: Principal = Depends(require_roles("reviewer"))):
+        """Seal a bounded M21 readiness observation; it cannot deliver anything."""
+        keys=request_context.headers.getlist("idempotency-key")
+        if len(keys)!=1 or await request_context.body():raise HTTPException(422,"Request validation failed")
+        moment=now().replace(microsecond=0)
+        try:
+            signer=delivery_readiness_authority_for_tenant(app.state.delivery_readiness_authorities,tenant=principal.tenant,at=moment)
+            authz=release_authorization_control_for_tenant(app.state.release_authorization_controls,tenant=principal.tenant,at=moment)
+            case_authority=release_case_authority_for_tenant(app.state.release_case_authorities,tenant=principal.tenant,at=moment)
+            decision_control=privacy_decision_control_for_tenant(app.state.privacy_decision_controls,tenant=principal.tenant,at=moment)
+            raw=app.state.store.get_release_authorization_request(request_id,principal.tenant,authz,case_authority,decision_control.decision_authority)
+            request=ReleaseAuthorizationRequest.from_record(raw["payload"]["request"])
+            raw_case=app.state.store.get_release_case(request.case_id,principal.tenant,case_authority); case=ReleaseCase.from_record(raw_case["payload"]["case"])
+            raw_decision=app.state.store.get_privacy_decision(request.privacy_decision_id,principal.tenant,decision_control.decision_authority,case_authority); decision=PrivacyDecision.from_record(raw_decision["payload"]["decision"])
+            approvals=[ReleaseAuthorizationApproval.from_record(x["payload"]["approval"]) for x in app.state.store.list_controls("release_authorization_approval",principal.tenant) if x.get("payload",{}).get("request_id")==request_id]
+            if len(approvals)!=2 or {x.approval_role for x in approvals}!={"privacy_reviewer","release_authorizer"} or any(not authz.verify_approval(x,at=moment) for x in approvals):raise ValueError
+            expiry=min(case.expires_at,decision.expires_at,request.expires_at,signer.expires_at,*[x.expires_at for x in approvals])
+            item=signer.issue(readiness_id=signer.readiness_id(request_id,keys[0]),case_id=case.case_id,case_digest=case.digest,privacy_decision_id=decision.decision_id,privacy_decision_digest=decision.digest,request_id=request.request_id,request_digest=request.digest,scope_digest=request.scope_digest,processing_run_id=case.binding.processing_run_id,candidate_artifact_digest=case.binding.candidate_artifact_digest,rights_digest=case.binding.rights_digest,contract_digest=case.binding.contract_digest,recipient_commitment=case.binding.recipient_commitment,purpose_code=case.binding.purpose_code,approval_digests=tuple(sorted(x.digest for x in approvals)),assessed_at=moment,expires_at=expiry)
+            record=control_record(kind="delivery_readiness",identifier=item.readiness_id,tenant=principal.tenant,payload={"request_id":request_id,"idempotency_key":keys[0],"readiness":item.to_record()},expires_at=item.expires_at.timestamp())
+            stored,reused=app.state.store.record_delivery_readiness(tenant=principal.tenant,data=record,actor=principal.subject,authority=signer,release_authority=case_authority,decision_authority=decision_control.decision_authority,authorization_authority=authz)
+            view=delivery_readiness_view(stored)
+            return Response(view.model_dump_json(),status_code=200,media_type="application/json") if reused else view
+        except (KeyError,TypeError,ValueError,DeliveryReadinessError,ReleaseAuthorizationError,ReleaseCaseAuthorityError,PrivacyDecisionError,HTTPException):
+            raise HTTPException(409,"Delivery readiness scope is unavailable") from None
+
+    @app.get("/delivery-readiness/{readiness_id}", response_model=DeliveryReadinessView)
+    def get_delivery_readiness(readiness_id: str, principal: Principal = Depends(require_roles("reviewer"))):
+        moment=now().replace(microsecond=0)
+        try:
+            signer=delivery_readiness_authority_for_tenant(app.state.delivery_readiness_authorities,tenant=principal.tenant,at=moment)
+            authz=release_authorization_control_for_tenant(app.state.release_authorization_controls,tenant=principal.tenant,at=moment)
+            case_authority=release_case_authority_for_tenant(app.state.release_case_authorities,tenant=principal.tenant,at=moment)
+            decision_control=privacy_decision_control_for_tenant(app.state.privacy_decision_controls,tenant=principal.tenant,at=moment)
+            return delivery_readiness_view(app.state.store.get_delivery_readiness(readiness_id,principal.tenant,signer,case_authority,decision_control.decision_authority,authz))
+        except (DeliveryReadinessError,ReleaseAuthorizationError,ReleaseCaseAuthorityError,PrivacyDecisionError,HTTPException):
+            raise HTTPException(503,"Delivery readiness is unavailable") from None
 
     @app.post("/processing-runs/{run_id}/residual-evaluations", response_model=ResidualEvaluationView, status_code=201)
     def create_residual_evaluation(run_id: str, principal: Principal = Depends(require_roles("reviewer"))):
