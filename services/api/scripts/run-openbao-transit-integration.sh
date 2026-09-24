@@ -43,7 +43,7 @@ done
 "${root_bao[@]}" token lookup >/dev/null
 "${root_bao[@]}" secrets enable transit >/dev/null
 "${root_bao[@]}" write transit/keys/m29-integration-ed25519 type=ed25519 exportable=false allow_plaintext_backup=false >/dev/null
-"${root_bao[@]}" write transit/keys/m30-integration-envelope type=aes256-gcm96 derived=false exportable=false allow_plaintext_backup=false deletion_allowed=false >/dev/null
+"${root_bao[@]}" write transit/keys/m30-integration-envelope type=aes256-gcm96 derived=false exportable=false allow_plaintext_backup=false >/dev/null
 
 cat <<'POLICY' | "${root_bao[@]}" policy write m29-transit-integration - >/dev/null
 path "transit/keys/m29-integration-ed25519" {

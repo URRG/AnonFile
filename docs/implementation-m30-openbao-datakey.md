@@ -17,15 +17,17 @@ one Transit key version. The configured Transit key must be `aes256-gcm96`,
 non-derived, non-exportable, not plaintext-backup-enabled, not deletable,
 support encryption/decryption, and report the configured version as its latest
 version. Version drift fails closed. The adapter sends a fixed `bits=256` and a
-required 1--4096 byte caller context as base64 `associated_data`. The context
+required 1--4096 byte caller context as base64 `associated_data`, and the
+configured `key_version` in the datakey request. The context
 must be canonical, tenant/object/envelope-specific AAD supplied by the caller;
 the adapter does not derive it from untrusted paths or accept a different key
 reference.
 
 `generate(key_ref=..., context=..., token=...)` returns immutable
 `TransitDataKey(plaintext_key, wrapped_key, key_version)`. `plaintext_key` is
-exactly 32 bytes, and `wrapped_key` is an opaque canonical Transit ciphertext
-whose embedded version must equal the configured version. `unwrap(...)` accepts
+exactly 32 bytes, and `wrapped_key` is an opaque canonical Transit ciphertext.
+The adapter requires both the server's `key_version` response field and the
+ciphertext's embedded version to equal the configured version. `unwrap(...)` accepts
 only that same opaque `key_ref`, exact ciphertext version, and context, and
 returns only an exact 32-byte plaintext key. Callers must use the plaintext key
 immediately for local authenticated encryption/decryption and must never persist

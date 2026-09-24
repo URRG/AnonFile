@@ -106,9 +106,12 @@ class OpenBaoTransitDataKey:
         self._key_ref(key_ref)
         associated_data = self._context(context)
         self._assert_key_metadata(token, "data-key generation unavailable")
-        data = self._request("datakey/plaintext", {"bits": 256, "associated_data": associated_data},
+        data = self._request("datakey/plaintext", {"bits": 256, "key_version": self._config.key_version,
+                                                     "associated_data": associated_data},
                              token, "data-key generation unavailable")
-        if type(data) is not dict or set(data) != {"plaintext", "ciphertext"}:
+        if (type(data) is not dict or set(data) != {"plaintext", "ciphertext", "key_version"}
+                or type(data["key_version"]) is not int
+                or data["key_version"] != self._config.key_version):
             raise OpenBaoDataKeyError("data-key generation unavailable")
         plaintext = _base64_bytes(data["plaintext"], 32)
         version = _wrapped_key_version(data["ciphertext"])

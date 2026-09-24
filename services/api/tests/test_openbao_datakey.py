@@ -49,14 +49,14 @@ def client(transport):
 
 
 def test_generate_uses_only_pinned_plaintext_datakey_path_and_aad():
-    transport = FakeTransport([metadata(), Response(body=json.dumps({"data": {"plaintext": PLAIN, "ciphertext": WRAPPED}}).encode())])
+    transport = FakeTransport([metadata(), Response(body=json.dumps({"data": {"plaintext": PLAIN, "ciphertext": WRAPPED, "key_version": 7}}).encode())])
     result = client(transport).generate(key_ref=KEY_REF, context=b"tenant/a/object/b", token="short-lived")
     assert result == TransitDataKey(b"p" * 32, WRAPPED, 7)
     assert [request.full_url for request in transport.requests] == [
         "https://bao.example/v1/transit/keys/envelope-key",
         "https://bao.example/v1/transit/datakey/plaintext/envelope-key",
     ]
-    assert json.loads(transport.requests[1].data) == {"bits": 256, "associated_data": "dGVuYW50L2Evb2JqZWN0L2I="}
+    assert json.loads(transport.requests[1].data) == {"bits": 256, "key_version": 7, "associated_data": "dGVuYW50L2Evb2JqZWN0L2I="}
     assert transport.requests[1].get_header("X-vault-token") == "short-lived"
     assert transport.timeout == 1.5
 
@@ -87,9 +87,10 @@ def test_key_policy_drift_fails_closed(bad):
     Response(body=b'{"auth":{"client_token":"secret"},"data":{}}'),
     Response(body=b'{"data":{},"wrap_info":{"token":"wrapped"}}'),
     Response(body=b"{" + b"x" * (16 * 1024 + 1) + b"}"),
-    Response(body=json.dumps({"data": {"plaintext": PLAIN, "ciphertext": WRAPPED.replace("v7", "v8")}}).encode()),
-    Response(body=json.dumps({"data": {"plaintext": PLAIN, "ciphertext": WRAPPED, "extra": True}}).encode()),
-    Response(body=json.dumps({"data": {"plaintext": base64.b64encode(b"x" * 31).decode(), "ciphertext": WRAPPED}}).encode()),
+    Response(body=json.dumps({"data": {"plaintext": PLAIN, "ciphertext": WRAPPED.replace("v7", "v8"), "key_version": 7}}).encode()),
+    Response(body=json.dumps({"data": {"plaintext": PLAIN, "ciphertext": WRAPPED, "key_version": 8}}).encode()),
+    Response(body=json.dumps({"data": {"plaintext": PLAIN, "ciphertext": WRAPPED, "key_version": 7, "extra": True}}).encode()),
+    Response(body=json.dumps({"data": {"plaintext": base64.b64encode(b"x" * 31).decode(), "ciphertext": WRAPPED, "key_version": 7}}).encode()),
 ])
 def test_malformed_or_unexpected_generation_responses_fail_closed(response):
     with pytest.raises(OpenBaoDataKeyError, match="^data-key generation unavailable$"):
