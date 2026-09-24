@@ -40,10 +40,10 @@ def test_missing_config_fails_closed(monkeypatch):
     monkeypatch.setenv("ANONFLOW_ENV", "development")
     assert TestClient(create_app()).get("/datasets").status_code == 503
 
-@pytest.mark.parametrize("mode", ["production", "staging", "", "Development"])
+@pytest.mark.parametrize("mode", ["staging", "", "Development"])
 def test_non_development_mode_refused(monkeypatch, mode):
     monkeypatch.setenv("ANONFLOW_ENV", mode)
-    with pytest.raises(RuntimeError, match="Only explicit development"):
+    with pytest.raises(RuntimeError, match="^Invalid application environment$"):
         create_app()
 
 @pytest.mark.parametrize("config", ["not-json-secret", "{}", '[{"token":"short"}]', '[{"token":"a"}]', "null"])

@@ -1,9 +1,11 @@
-"""Offline JWT resource-server adapter for synthetic/local development only.
+"""Pinned-JWKS JWT resource-server adapter.
 
-This is not OIDC discovery, login, refresh, introspection or online key rotation.
-The operator supplies a trusted local public JWKS and restarts to change keys or
-bindings. No token header can select a URL, algorithm, or authority. Only the
-deliberately narrow RS256/at+jwt access-token profile is supported.
+This is not OIDC discovery, login, refresh or introspection.  The operator
+pins a trusted *local* public JWKS path in configuration; no token header can
+select a URL, algorithm, or authority.  The pinned bundle is read for each
+authentication so an atomic operator key rotation or revocation takes effect
+without a process restart.  Only the deliberately narrow RS256/at+jwt access
+token profile is supported.
 """
 from __future__ import annotations
 
@@ -140,6 +142,7 @@ def _load_bindings(raw: str) -> Mapping[str, Principal]:
 class JWTVerifier:
     issuer: str
     audience: str
+    jwks_path: str
     keys: Mapping[str, rsa.RSAPublicKey]
     bindings: Mapping[str, Principal]
 
@@ -158,7 +161,11 @@ class JWTVerifier:
                     or header["alg"] != "RS256" or header["typ"] != "at+jwt"):
                 raise ValueError
             kid = _identifier(header["kid"], 128)
-            key = self.keys.get(kid)
+            # The configured local path, rather than a token field, remains
+            # the sole key authority.  Re-reading it lets an operator add a
+            # replacement key or revoke a compromised key atomically.  An
+            # unreadable or malformed replacement fails this request closed.
+            key = _load_keys(self.jwks_path).get(kid)
             if key is None or not isinstance(claims, dict):
                 raise ValueError
             if not {"iss", "aud", "sub", "exp", "iat", "nbf"} <= set(claims):
@@ -181,7 +188,7 @@ class JWTVerifier:
             now = time.time()
             if claims["exp"] <= now or claims["iat"] > now or claims["nbf"] > now:
                 raise ValueError
-        except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, OverflowError,
+        except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, OverflowError, OSError,
                 binascii.Error, jwt.PyJWTError):
             raise HTTPException(401, "Authentication required", headers={"WWW-Authenticate": "Bearer"}) from None
         principal = self.bindings.get(subject)
@@ -194,8 +201,9 @@ def load_jwt_verifier() -> JWTVerifier:
     try:
         issuer = _identifier(_config_env("ANONFLOW_JWT_ISSUER", 2048), 2048)
         audience = _identifier(_config_env("ANONFLOW_JWT_AUDIENCE", 512), 512)
-        keys = _load_keys(_config_env("ANONFLOW_JWKS_PATH", 4096))
+        jwks_path = _config_env("ANONFLOW_JWKS_PATH", 4096)
+        keys = _load_keys(jwks_path)
         bindings = _load_bindings(_config_env("ANONFLOW_JWT_BINDINGS"))
-        return JWTVerifier(issuer, audience, keys, bindings)
+        return JWTVerifier(issuer, audience, jwks_path, keys, bindings)
     except (ValueError, TypeError, KeyError, UnicodeError, OSError, RecursionError, OverflowError):
         raise RuntimeError("Invalid JWT authentication configuration") from None

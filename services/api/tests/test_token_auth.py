@@ -332,12 +332,35 @@ def test_modes_never_fall_back(config, monkeypatch, private_key):
         app()
 
 
-@pytest.mark.parametrize("mode", ["jwt", "dev-token"])
-def test_production_refused_regardless_of_auth_mode(config, monkeypatch, mode):
-    monkeypatch.setenv("ANONFLOW_AUTH_MODE", mode)
+def test_production_requires_explicit_jwt_configuration(config, monkeypatch, private_key):
     monkeypatch.setenv("ANONFLOW_ENV", "production")
-    with pytest.raises(RuntimeError, match="Only explicit development mode is supported"):
+    assert TestClient(app()).get("/identity", headers={"Authorization": "Bearer " + token(private_key)}).status_code == 200
+    monkeypatch.setenv("ANONFLOW_AUTH_MODE", "dev-token")
+    with pytest.raises(RuntimeError, match="^Production requires JWT authentication$"):
         app()
+
+
+def test_pinned_jwks_rotation_and_revocation_take_effect_per_request(config, private_key):
+    client = TestClient(app())
+    replacement = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    old_token = token(private_key)
+    replacement_token = signed_raw(
+        replacement,
+        json.dumps({"alg": "RS256", "kid": "replacement-key", "typ": "at+jwt"}),
+        json.dumps(claims()),
+    )
+    assert request(client, old_token).status_code == 200
+
+    # A single trusted, locally managed bundle can overlap keys during an
+    # atomic rotation; token data cannot nominate another bundle or algorithm.
+    config.write_text(json.dumps({"keys": [jwk(private_key), jwk(replacement, "replacement-key")]}), encoding="utf-8")
+    assert request(client, replacement_token).status_code == 200
+
+    # Removing the old public key is a revocation: an already-created client
+    # must no longer authenticate signatures from that key.
+    config.write_text(json.dumps({"keys": [jwk(replacement, "replacement-key")]}), encoding="utf-8")
+    assert_auth_failure(request(client, old_token))
+    assert request(client, replacement_token).status_code == 200
 
 
 def test_invalid_auth_mode_fails_closed(config, monkeypatch):
@@ -346,10 +369,11 @@ def test_invalid_auth_mode_fails_closed(config, monkeypatch):
         app()
 
 
-def test_configuration_is_startup_snapshot(config, private_key, monkeypatch):
+def test_bindings_are_a_startup_snapshot_but_jwks_changes_fail_closed(config, private_key, monkeypatch):
     client = TestClient(app())
     monkeypatch.setenv("ANONFLOW_JWT_BINDINGS", "[]")
-    config.write_text('{"keys":[]}', encoding="utf-8")
     assert request(client, token(private_key)).status_code == 200
+    config.write_text('{"keys":[]}', encoding="utf-8")
+    assert_auth_failure(request(client, token(private_key)))
     with pytest.raises(RuntimeError, match="^Invalid JWT authentication configuration$"):
         app()

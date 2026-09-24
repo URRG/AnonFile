@@ -1,6 +1,6 @@
 # M2a: secure local ingestion foundation
 
-Synthetic data only. This increment does not authorize customer intake or buyer delivery. `ANONFLOW_ENV=development` remains mandatory. All candidates are withheld and approval returns409. Detection/evaluation coverage is unchanged from M1; parser, persistence and authentication improvements do not prove anonymity.
+Synthetic data only. This increment does not authorize customer intake or buyer delivery. All candidates are withheld and approval returns409. Detection/evaluation coverage is unchanged from M1; parser, persistence and authentication improvements do not prove anonymity. M20 later added a narrow production JWT identity foundation; it does not make this API, its storage, or its workflow production-ready.
 
 ## Run without Docker
 
@@ -58,7 +58,7 @@ Set `ANONFLOW_AUTH_MODE=jwt` and all of:
 
 Accepted tokens require RS256, explicit known `kid`, `typ=at+jwt`, and `iss/aud/sub/exp/iat/nbf`; numeric dates must be finite numbers, not coerced strings/bools. RSA keys must be2048–8192bits. Only the narrow documented JOSE/JWK fields are accepted; token-controlled URLs and unsupported critical headers are rejected. Token tenant/role claims cannot grant access: bindings are authoritative. Invalid tokens return fixed401; unbound subjects/unauthorized roles return403. JWT errors never fall back to development tokens. Do not use ID tokens or paste third-party customer credentials into the workbench.
 
-This is a resource-server verifier, **not** OIDC discovery, browser login, refresh, introspection or automatic key rotation. Revocation/key/binding updates require operator file/config changes and process restart; already issued valid tokens are not checked with an issuer online. Production needs identity-provider integration, lifecycle policies, transport protection and verified rotation/revocation procedures.
+This is a resource-server verifier, **not** OIDC discovery, browser login, refresh or introspection. In M20 the pinned local JWKS is re-read per authentication, so an atomically published key addition or removal takes effect without restart; this is not issuer-side subject/session revocation or online validation. Production still needs identity-provider lifecycle policies, transport protection and verified rotation/revocation procedures.
 
 ## Intake and metadata endpoints
 
