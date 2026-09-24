@@ -138,7 +138,9 @@ def test_postgresql_scan_skips_live_claim_then_observes_expired_lease(pg_reconci
     assert jobs.claim(state["tenant"], opaque("workerref:v1:"), lease_seconds=60) is not None
     assert _scan(state) == ()
     with state["psycopg"].connect(state["dsn"], autocommit=True) as connection:
-        connection.execute("UPDATE anonflow_worker_jobs SET lease_expires_at=clock_timestamp()-interval '1 second' "
+        connection.execute("WITH database_clock AS (SELECT date_trunc('second', clock_timestamp()) AS now) "
+                           "UPDATE anonflow_worker_jobs SET leased_at=database_clock.now-interval '3 seconds', "
+                           "lease_expires_at=database_clock.now-interval '1 second' FROM database_clock "
                            "WHERE tenant_ref=%s AND work_ref=%s", (state["tenant"], state["intent"].work_ref))
     assert len(_scan(state)) == 1
 
