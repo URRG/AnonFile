@@ -96,7 +96,7 @@ def test_worker_object_path_against_live_openbao_and_s3():
         tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION,
         key_ref=KEY_REF, binding=bound, plaintext=MARKER, openbao_token=values["M36_OPENBAO_TOKEN"],
     ) == reference
-    with pytest.raises(WorkerEncryptedObjectsError, match="^Worker encrypted object operation failed$"):
+    with pytest.raises(EncryptedObjectStoreError, match="^Encrypted object operation failed$"):
         restarted.put_or_recover(
             tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION,
             key_ref=KEY_REF, binding=binding(b"m41 altered retry plaintext"), plaintext=b"m41 altered retry plaintext",
