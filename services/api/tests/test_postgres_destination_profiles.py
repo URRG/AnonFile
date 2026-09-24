@@ -226,7 +226,9 @@ def postgres_authority():
 
 def test_postgres_destination_profile_fence_race_observes_terminal_generation(postgres_authority):
     dsn, psycopg, authority = postgres_authority
-    item = profile(expires_at=datetime.now(UTC).replace(microsecond=0) + timedelta(minutes=5))
+    moment = datetime.now(UTC).replace(microsecond=0)
+    item = profile(not_before=moment - timedelta(minutes=1),
+                   expires_at=moment + timedelta(minutes=5))
     authority.create(item)
     with psycopg.connect(dsn, autocommit=True) as repeatable:
         cursor = repeatable.cursor()
@@ -286,7 +288,9 @@ def test_postgres_destination_profile_fence_race_observes_terminal_generation(po
 
 def test_postgres_rotation_blocks_old_reader_until_new_version_is_current(postgres_authority):
     dsn, psycopg, authority = postgres_authority
-    item = profile(expires_at=datetime.now(UTC).replace(microsecond=0) + timedelta(minutes=5))
+    moment = datetime.now(UTC).replace(microsecond=0)
+    item = profile(not_before=moment - timedelta(minutes=1),
+                   expires_at=moment + timedelta(minutes=5))
     authority.create(item)
     authority.terminal(tenant_ref=TENANT, destination_ref=item.destination_ref, version=1,
                        expected_generation=0, state="DEACTIVATED", event_ref=opaque("destinationfence:v1:"))
