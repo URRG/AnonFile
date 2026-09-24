@@ -269,11 +269,24 @@ class PostgresPublicationReconciler:
             connection = self._connection()
             cursor = connection.cursor()
             cursor.execute("BEGIN")
+            # Serialize with M40's intent-first finalization transaction.  A
+            # terminal quarantine must never be committed after a completion
+            # receipt for the same publication.
+            cursor.execute("SELECT publication_ref FROM anonflow_publication_intents "
+                           "WHERE tenant_ref=%s AND publication_ref=%s FOR UPDATE",
+                           (tenant_ref, publication_ref))
+            intent = _row(cursor)
+            if intent is None or len(intent) != 1 or intent[0] != publication_ref:
+                _fail()
             cursor.execute(
                 "UPDATE anonflow_publication_observations SET state='QUARANTINED', reason=%s, "
                 "quarantined_at=clock_timestamp() WHERE tenant_ref=%s AND publication_ref=%s "
                 "AND observation_token=%s AND state='OBSERVED' "
-                "AND lease_expires_at > clock_timestamp() RETURNING observation_epoch",
+                "AND lease_expires_at > clock_timestamp() "
+                "AND NOT EXISTS (SELECT 1 FROM anonflow_publication_finalizations AS f "
+                "WHERE f.tenant_ref=anonflow_publication_observations.tenant_ref "
+                "AND f.publication_ref=anonflow_publication_observations.publication_ref) "
+                "RETURNING observation_epoch",
                 (reason, tenant_ref, publication_ref, observation_token))
             changed = _row(cursor)
             if changed is None:

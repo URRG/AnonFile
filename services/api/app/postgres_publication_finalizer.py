@@ -69,8 +69,8 @@ class PublicationFinalization:
 class PostgresPublicationFinalizer:
     """Finalize intent, metadata CAS and worker acknowledgement atomically.
 
-    Lock order is intent, immutable payload binding, completion, worker job,
-    metadata idempotency row, then metadata record.  Object and key service I/O
+    Lock order is intent, immutable payload binding, reconciliation observation,
+    completion, worker job, metadata idempotency row, then metadata record.  Object and key service I/O
     happens only in the preflight read/recovery phase, before the write locks.
     """
     def __init__(self, connection_factory: Callable[[], Any],
@@ -185,6 +185,20 @@ class PostgresPublicationFinalizer:
             locked_binding = _decode_binding(_row(cursor), intent=intent, plan_digest=row[1])
             if locked_binding != binding or reference.binding_digest != locked_binding.binding_digest:
                 _fail()
+            # An explicit M41 operator quarantine is terminal for this
+            # publication.  Take the same row lock used by quarantine after
+            # the intent/binding lock order, so a quarantine racing recovery
+            # either commits first and fences finalization, or observes this
+            # committed completion and declines to quarantine.
+            cursor.execute("SELECT state FROM anonflow_publication_observations "
+                           "WHERE tenant_ref=%s AND publication_ref=%s FOR UPDATE",
+                           (claim.tenant_ref, reference.publication_ref))
+            observation = _row(cursor)
+            if observation is not None:
+                if len(observation) != 1 or observation[0] not in ("OBSERVED", "QUARANTINED"):
+                    _fail()
+                if observation[0] == "QUARANTINED":
+                    _fail()
             completion = {"plan_digest": row[1], "claim_id": claim.claim_id,
                           "worker_ref": claim.worker_ref,
                           "delivery_attempt": claim.delivery_attempt,
