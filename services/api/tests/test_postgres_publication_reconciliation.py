@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
 import secrets
+from datetime import UTC
 
 import pytest
 
@@ -38,6 +39,13 @@ def test_reconciler_validates_bounded_metadata_only_inputs_without_connecting():
         reconciler.scan(tenant, older_than_seconds=1, limit=101)
     with pytest.raises(PostgresPublicationReconciliationError):
         reconciler.quarantine(tenant, opaque("publicationref:v1:"), opaque("observation:v1:"), reason="guessed")
+    with pytest.raises(PostgresPublicationReconciliationError):
+        reconciler.quarantine(tenant, opaque("publicationref:v1:"), opaque("observation:v1:"),
+                              reason="OPERATOR_CONFIRMED_UNRECOVERABLE")
+    with pytest.raises(PostgresPublicationReconciliationError):
+        PostgresPublicationReconciler(lambda: opened.append(True), quarantine_authorizer=lambda *_args: False).quarantine(
+            tenant, opaque("publicationref:v1:"), opaque("observation:v1:"),
+            reason="OPERATOR_CONFIRMED_UNRECOVERABLE")
     assert opened == []
 
 
@@ -92,6 +100,37 @@ def test_postgresql_scan_is_tenant_scoped_bounded_and_single_scanner(pg_reconcil
     assert PostgresPublicationReconciler(state["connect"]).scan(other.tenant_ref, older_than_seconds=60) != ()
 
 
+def test_postgresql_scan_filters_more_than_one_hundred_live_observations_before_limit(pg_reconciliation):
+    state = pg_reconciliation
+    intents = PostgresPublicationIntents(state["connect"])
+    active = [plan(state["tenant"]) for _unused in range(101)]
+    for pending in active:
+        assert intents.begin(pending) == pending
+    eligible = plan(state["tenant"])
+    assert intents.begin(eligible) == eligible
+    with state["psycopg"].connect(state["dsn"], autocommit=True) as connection:
+        for pending in [state["intent"], *active, eligible]:
+            connection.execute("UPDATE anonflow_publication_intents SET created_at=clock_timestamp()-interval '2 minutes' "
+                               "WHERE tenant_ref=%s AND publication_ref=%s", (state["tenant"], pending.publication_ref))
+        for pending in [state["intent"], *active]:
+            connection.execute("INSERT INTO anonflow_publication_observations "
+                               "(tenant_ref, publication_ref, observation_epoch, observation_token, state, lease_expires_at) "
+                               "VALUES (%s,%s,1,%s,'OBSERVED',clock_timestamp()+interval '1 hour')",
+                               (state["tenant"], pending.publication_ref, opaque("observation:v1:")))
+    observed = _scan(state, limit=100)
+    assert [item.publication_ref for item in observed] == [eligible.publication_ref]
+
+
+def test_postgresql_scan_normalizes_non_utc_session_timestamps(pg_reconciliation):
+    state = pg_reconciliation
+    def offset_connect():
+        connection = state["psycopg"].connect(state["dsn"], autocommit=True)
+        connection.execute("SET TIME ZONE 'Asia/Kolkata'")
+        return connection
+    observed = PostgresPublicationReconciler(offset_connect).scan(state["tenant"], older_than_seconds=60)[0]
+    assert observed.created_at.tzinfo is UTC and observed.lease_expires_at.tzinfo is UTC
+
+
 def test_postgresql_scan_skips_live_claim_then_observes_expired_lease(pg_reconciliation):
     state = pg_reconciliation
     jobs = PostgresLeasedWorkerJobs(state["connect"])
@@ -107,7 +146,7 @@ def test_postgresql_scan_skips_live_claim_then_observes_expired_lease(pg_reconci
 def test_postgresql_quarantine_is_explicit_cas_and_events_are_append_only(pg_reconciliation):
     state = pg_reconciliation
     observation = _scan(state)[0]
-    reconciler = PostgresPublicationReconciler(state["connect"])
+    reconciler = PostgresPublicationReconciler(state["connect"], quarantine_authorizer=lambda *_args: True)
     assert reconciler.quarantine(state["tenant"], observation.publication_ref,
                                   opaque("observation:v1:"), reason="OPERATOR_CONFIRMED_UNRECOVERABLE") is False
     assert reconciler.quarantine(state["tenant"], observation.publication_ref, observation.observation_token,

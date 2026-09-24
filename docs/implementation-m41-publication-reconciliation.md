@@ -14,9 +14,14 @@ cannot observe the same publication until that lease expires. Every granted
 lease and every explicit quarantine appends an immutable event row.
 
 The only quarantine transition is the fixed,
-`OPERATOR_CONFIRMED_UNRECOVERABLE`, reason and it requires the caller's current
-unexpired observation token. Scanning never quarantines automatically. It also
-never deletes an object, adopts an S3 object, writes metadata, finalizes a
+`OPERATOR_CONFIRMED_UNRECOVERABLE`, reason. It requires both the caller's
+current unexpired observation token and a deployment-owned
+`quarantine_authorizer` capability injected by the composition root. The
+adapter supplies neither identity nor authorization: without that guard,
+quarantine fails closed. This is only a narrow integration point; deployments
+must independently authenticate and audit the guard's operator decision.
+Scanning never quarantines automatically. It also never deletes an object,
+adopts an S3 object, writes metadata, finalizes a
 publication, acknowledges a job, or changes worker claims.
 
 Commit outcome uncertainty fails closed. A retry may see no result while the

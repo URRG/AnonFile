@@ -49,9 +49,13 @@ def _token() -> str:
 
 
 def _timestamp(value: object) -> datetime:
-    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() != UTC.utcoffset(None):
+    """Accept a PostgreSQL-aware value and return its canonical UTC instant."""
+    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
         _fail()
-    return value
+    try:
+        return value.astimezone(UTC)
+    except (OverflowError, ValueError):
+        _fail()
 
 
 def _row(cursor: Any) -> tuple[object, ...] | None:
@@ -95,10 +99,10 @@ class PublicationObservation:
         # less strict object/work validators here.
         _text(self.object_ref, re.compile(r"objectref:v1:[A-Za-z0-9_-]{43}\Z"))
         _text(self.work_ref, re.compile(r"workref:v1:[A-Za-z0-9_-]{43}\Z"))
-        _timestamp(self.created_at)
+        object.__setattr__(self, "created_at", _timestamp(self.created_at))
         _positive(self.observation_epoch, 2**63 - 1)
         _text(self.observation_token, _OBSERVATION)
-        _timestamp(self.lease_expires_at)
+        object.__setattr__(self, "lease_expires_at", _timestamp(self.lease_expires_at))
         if self.lease_expires_at <= self.created_at or self.state != _OBSERVED or self.reason is not None:
             _fail()
 
@@ -112,10 +116,13 @@ class PostgresPublicationReconciler:
     compare-and-swap on an absent/expired prior observation lease.
     """
 
-    def __init__(self, connection_factory: Callable[[], Any]) -> None:
-        if not callable(connection_factory):
+    def __init__(self, connection_factory: Callable[[], Any], *,
+                 quarantine_authorizer: Callable[[str, str, str], bool] | None = None) -> None:
+        if not callable(connection_factory) or (quarantine_authorizer is not None
+                                                and not callable(quarantine_authorizer)):
             _fail()
         self._connection_factory = connection_factory
+        self._quarantine_authorizer = quarantine_authorizer
 
     def _connection(self) -> Any:
         connection = self._connection_factory()
@@ -177,7 +184,8 @@ class PostgresPublicationReconciler:
                 "AND j.completed_at IS NULL AND j.lease_expires_at > clock_timestamp()) "
                 "AND NOT EXISTS (SELECT 1 FROM anonflow_publication_observations AS o "
                 "WHERE o.tenant_ref=i.tenant_ref AND o.publication_ref=i.publication_ref "
-                "AND o.state='QUARANTINED') "
+                "AND (o.state='QUARANTINED' OR (o.state='OBSERVED' "
+                "AND o.lease_expires_at > clock_timestamp()))) "
                 "ORDER BY i.publication_ref FOR UPDATE OF i SKIP LOCKED LIMIT %s",
                 (_MAX_ROW_BYTES, tenant_ref, after_publication_ref, after_publication_ref, age, count))
             candidates = _rows(cursor)
@@ -195,19 +203,22 @@ class PostgresPublicationReconciler:
                     "ON CONFLICT (tenant_ref, publication_ref) DO UPDATE SET "
                     "observation_epoch=anonflow_publication_observations.observation_epoch+1, "
                     "observation_token=EXCLUDED.observation_token, observed_at=clock_timestamp(), "
-                    "lease_expires_at=EXCLUDED.lease_expires_at "
+                    "lease_expires_at=clock_timestamp() + (%s * interval '1 second') "
                     "WHERE anonflow_publication_observations.state='OBSERVED' "
                     "AND anonflow_publication_observations.lease_expires_at <= clock_timestamp() "
-                    "RETURNING observation_epoch, observation_token, lease_expires_at",
-                    (tenant_ref, publication_ref, token, lease))
+                    "RETURNING observation_epoch, observation_token, lease_expires_at, "
+                    "lease_expires_at > clock_timestamp()",
+                    (tenant_ref, publication_ref, token, lease, lease))
                 granted = _row(cursor)
                 if granted is None:
                     if cursor.rowcount != 0:
                         _fail()
                     continue
-                if len(granted) != 3:
+                if len(granted) != 4:
                     _fail()
-                epoch, stored_token, expiry = granted
+                epoch, stored_token, expiry, live = granted
+                if live is not True:
+                    _fail()
                 observation = PublicationObservation(tenant_ref, publication_ref, intent.object_ref,
                                                      intent.work_ref, created_at, epoch, stored_token, expiry)
                 cursor.execute(
@@ -244,6 +255,14 @@ class PostgresPublicationReconciler:
         _text(publication_ref, _PUBLICATION)
         _text(observation_token, _OBSERVATION)
         if reason != _REASON:
+            _fail()
+        if self._quarantine_authorizer is None:
+            _fail()
+        try:
+            authorized = self._quarantine_authorizer(tenant_ref, publication_ref, reason)
+        except Exception:
+            _fail()
+        if authorized is not True:
             _fail()
         connection = None
         try:
