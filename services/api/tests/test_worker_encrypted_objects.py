@@ -11,6 +11,7 @@ import pytest
 from app.encrypted_object_store import EncryptedObjectStoreError
 from app.openbao_datakey import OpenBaoDataKeyConfig, OpenBaoTransitDataKey
 from app.s3_ciphertext_transport import S3CiphertextTransport, S3CiphertextTransportConfig
+from app.publication_payload_binding import PublicationPayloadBinding, payload_digest
 from app.worker_encrypted_objects import (WorkerEncryptedObjects, WorkerEncryptedObjectsError,
                                           _S3EnvelopeTransport, _ScopedOpenBaoDataKeys)
 
@@ -20,7 +21,15 @@ OTHER_TENANT = "tenantref:v1:" + "U" * 43
 OBJECT = "objectref:v1:" + "O" * 43
 KEY = "keyref:v1:production-data-key"
 PUBLICATION = "publicationref:v1:" + "P" * 43
+PLAN = "sha256:" + "a" * 64
 WRAPPED = "vault:v7:" + base64.b64encode(b"w" * 60).decode("ascii")
+
+
+def binding(payload: bytes, *, tenant: str = TENANT, object_ref: str = OBJECT,
+            publication: str = PUBLICATION, key_ref: str = KEY) -> PublicationPayloadBinding:
+    return PublicationPayloadBinding.create(tenant_ref=tenant, object_ref=object_ref, publication_ref=publication,
+                                            key_ref=key_ref, plan_digest=PLAN, payload_digest=payload_digest(payload),
+                                            payload_size_bytes=len(payload), serialization_id="binary-v1")
 
 
 class Response:
@@ -101,9 +110,11 @@ def composed():
 
 def test_put_get_uses_explicit_operation_tokens_and_sends_only_envelope_to_s3():
     value, bao_http, s3, s3_sdk = composed()
-    reference = value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, plaintext=b"customer private record",
+    payload = b"customer private record"
+    bound = binding(payload)
+    reference = value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, binding=bound, plaintext=payload,
                           openbao_token="put-token")
-    assert value.get(tenant_ref=TENANT, reference=reference, openbao_token="get-token") == b"customer private record"
+    assert value.get(tenant_ref=TENANT, reference=reference, binding=bound, openbao_token="get-token") == payload
     tokens = [request.get_header("X-vault-token") for request in bao_http.requests]
     assert tokens == ["put-token", "put-token", "get-token", "get-token"]
     put_call = next(call for call in s3_sdk.calls if "Body" in call)
@@ -117,70 +128,74 @@ def test_put_get_uses_explicit_operation_tokens_and_sends_only_envelope_to_s3():
 
 def test_tenant_aad_and_duplicate_fail_closed_without_a_token_or_object_key_leak():
     value, _, _, s3_sdk = composed()
-    reference = value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, plaintext=b"private", openbao_token="token-1")
+    bound = binding(b"private")
+    reference = value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, binding=bound, plaintext=b"private", openbao_token="token-1")
     with pytest.raises(EncryptedObjectStoreError, match="^Encrypted object operation failed$"):
-        value.get(tenant_ref=OTHER_TENANT, reference=reference, openbao_token="token-2")
+        value.get(tenant_ref=OTHER_TENANT, reference=reference, binding=bound, openbao_token="token-2")
     with pytest.raises(EncryptedObjectStoreError, match="^Encrypted object operation failed$"):
-        value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, plaintext=b"different", openbao_token="token-3")
+        value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, binding=binding(b"different"), plaintext=b"different", openbao_token="token-3")
     assert len([call for call in s3_sdk.calls if "Body" in call]) == 2
 
 
 def test_response_lost_after_create_recovers_only_same_publication_in_a_fresh_worker():
     value, _, s3, s3_sdk = composed()
+    bound = binding(b"private")
     s3_sdk.accept_then_raise = True
     with pytest.raises(EncryptedObjectStoreError, match="^Encrypted object operation failed$"):
         value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION,
-                  key_ref=KEY, plaintext=b"private", openbao_token="lost-response-token")
+                  key_ref=KEY, binding=bound, plaintext=b"private", openbao_token="lost-response-token")
 
     fresh = WorkerEncryptedObjects(openbao=value._openbao, ciphertexts=s3)
     reference = fresh.put_or_recover(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION,
-                                     key_ref=KEY, plaintext=b"private",
+                                     key_ref=KEY, binding=bound, plaintext=b"private",
                                      openbao_token="recovery-token")
-    assert fresh.get(tenant_ref=TENANT, reference=reference, openbao_token="recovery-token") == b"private"
+    assert fresh.get(tenant_ref=TENANT, reference=reference, binding=bound, openbao_token="recovery-token") == b"private"
 
-    with pytest.raises(WorkerEncryptedObjectsError, match="^Worker encrypted object operation failed$"):
+    with pytest.raises(EncryptedObjectStoreError, match="^Encrypted object operation failed$"):
         fresh.put_or_recover(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION,
-                             key_ref=KEY, plaintext=b"different retry plaintext",
+                             key_ref=KEY, binding=binding(b"different retry plaintext"), plaintext=b"different retry plaintext",
                              openbao_token="recovery-token")
 
     wrong_publication = "publicationref:v1:" + "Q" * 43
     with pytest.raises(EncryptedObjectStoreError, match="^Encrypted object operation failed$"):
         fresh.recover(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=wrong_publication,
-                      key_ref=KEY, openbao_token="recovery-token")
+                      key_ref=KEY, binding=binding(b"private", publication=wrong_publication), openbao_token="recovery-token")
     with pytest.raises(EncryptedObjectStoreError, match="^Encrypted object operation failed$"):
         fresh.recover(tenant_ref=OTHER_TENANT, object_ref=OBJECT, publication_ref=PUBLICATION,
-                      key_ref=KEY, openbao_token="recovery-token")
+                      key_ref=KEY, binding=binding(b"private", tenant=OTHER_TENANT), openbao_token="recovery-token")
 
 
 def test_recovery_rejects_a_tampered_envelope_before_returning_a_reference():
     value, _, s3, s3_sdk = composed()
+    bound = binding(b"private")
     reference = value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION,
-                          key_ref=KEY, plaintext=b"private", openbao_token="token")
+                          key_ref=KEY, binding=bound, plaintext=b"private", openbao_token="token")
     key = next(iter(s3_sdk.objects))
     envelope, metadata = s3_sdk.objects[key]
     s3_sdk.objects[key] = (b"!" + envelope[1:], metadata)
     fresh = WorkerEncryptedObjects(openbao=value._openbao, ciphertexts=s3)
     with pytest.raises(EncryptedObjectStoreError, match="^Encrypted object operation failed$"):
         fresh.recover(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION,
-                      key_ref=KEY, openbao_token="token")
+                      key_ref=KEY, binding=bound, openbao_token="token")
     assert reference.publication_ref == PUBLICATION
 
 
 def test_wrong_key_cannot_authenticate_even_when_the_s3_object_and_digest_are_valid():
     value, bao_http, _, _ = composed()
-    reference = value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, plaintext=b"private", openbao_token="token")
+    bound = binding(b"private")
+    reference = value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, binding=bound, plaintext=b"private", openbao_token="token")
     # The fake is M30's HTTP transport: a different AAD-bound key cannot
     # authenticate the envelope, even while its storage digest remains valid.
     key = next(iter(bao_http.keys))
     bao_http.keys[key] = b"x" * 32
     with pytest.raises(EncryptedObjectStoreError, match="^Encrypted object operation failed$"):
-        value.get(tenant_ref=TENANT, reference=reference, openbao_token="token")
+        value.get(tenant_ref=TENANT, reference=reference, binding=bound, openbao_token="token")
 
 
 def test_bad_token_fake_dependencies_and_adapter_result_substitution_fail_closed():
     value, _, s3, _ = composed()
     with pytest.raises(WorkerEncryptedObjectsError, match="^Worker encrypted object operation failed$"):
-        value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, plaintext=b"private", openbao_token="bad token")
+        value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, binding=binding(b"private"), plaintext=b"private", openbao_token="bad token")
     with pytest.raises(WorkerEncryptedObjectsError):
         WorkerEncryptedObjects(openbao=object(), ciphertexts=s3)
     with pytest.raises(WorkerEncryptedObjectsError):
@@ -192,18 +207,19 @@ def test_bad_token_fake_dependencies_and_adapter_result_substitution_fail_closed
         return object()
     s3.store = forged_store
     with pytest.raises(EncryptedObjectStoreError, match="^Encrypted object operation failed$"):
-        value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, plaintext=b"private", openbao_token="token")
+        value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, binding=binding(b"private"), plaintext=b"private", openbao_token="token")
 
 
 def test_substituted_s3_load_result_is_rejected_before_it_reaches_the_envelope_parser():
     value, _, s3, _ = composed()
-    reference = value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, plaintext=b"private", openbao_token="token")
+    bound = binding(b"private")
+    reference = value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, binding=bound, plaintext=b"private", openbao_token="token")
 
     def forged_load(**kwargs):
         return object()
     s3.load = forged_load
     with pytest.raises(EncryptedObjectStoreError, match="^Encrypted object operation failed$"):
-        value.get(tenant_ref=TENANT, reference=reference, openbao_token="token")
+        value.get(tenant_ref=TENANT, reference=reference, binding=bound, openbao_token="token")
 
 
 def test_scoped_adapter_tracebacks_do_not_include_malicious_provider_or_transport_details():

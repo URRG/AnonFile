@@ -14,7 +14,8 @@ No token, plaintext data key, or marker value is printed by the script.
 The integration test writes and reads a synthetic marker through M33 and then
 uses privileged test-only S3 access to prove the stored body is an encrypted
 envelope rather than the marker. It also verifies cross-tenant use fails,
-create-only duplicate storage fails without replacing the original, OpenBao
+create-only duplicate storage fails without replacing the original, an
+equal-size but different payload is rejected before any S3 write, OpenBao
 rejects a wrong associated-data context, the restricted token cannot decrypt,
 and a privileged corrupted S3 body is rejected before decryption.
 

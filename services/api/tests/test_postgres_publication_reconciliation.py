@@ -9,7 +9,10 @@ from datetime import UTC
 
 import pytest
 
-from app.postgres_publication_intents import PostgresPublicationIntents, PublicationIntent
+from app.postgres_publication_intents import (PostgresPublicationIntents, PublicationIntent,
+                                              _plan_digest)
+from app.publication_payload_binding import (PublicationPayloadBinding,
+                                             payload_digest)
 from app.postgres_publication_reconciliation import (PostgresPublicationReconciliationError,
                                                       PostgresPublicationReconciler)
 from app.postgres_worker_jobs import PostgresLeasedWorkerJobs
@@ -27,6 +30,15 @@ def plan(tenant: str, *, publication: str | None = None, work: str | None = None
     return PublicationIntent(tenant, publication or opaque("publicationref:v1:"), opaque("metatx:v1:"),
         opaque("objectref:v1:"), "keyref:v1:reconcile", work or opaque("workref:v1:"),
         opaque("metarecord:v1:"), "release_artifact", digest(), digest(), 0, {})
+
+
+def binding(intent: PublicationIntent) -> PublicationPayloadBinding:
+    payload = b"reconciliation commitment"
+    return PublicationPayloadBinding.create(
+        tenant_ref=intent.tenant_ref, publication_ref=intent.publication_ref,
+        object_ref=intent.object_ref, key_ref=intent.key_ref,
+        plan_digest=_plan_digest(intent), payload_digest=payload_digest(payload),
+        payload_size_bytes=len(payload), serialization_id="binary-v1")
 
 
 def test_reconciler_validates_bounded_metadata_only_inputs_without_connecting():
@@ -58,7 +70,7 @@ def pg_reconciliation():
     migrations = [Path(__file__).parents[1] / "migrations" / name for name in (
         "001_m26_postgres_metadata.sql", "002_m28_postgres_worker_jobs.sql",
         "003_m39_publication_intents.sql", "004_m40_publication_finalizations.sql",
-        "005_m41_publication_reconciliation.sql")]
+        "005_m41_publication_reconciliation.sql", "006_m42_publication_payload_bindings.sql")]
     with psycopg.connect(dsn, autocommit=True) as connection:
         for migration in migrations:
             connection.execute(migration.read_text(encoding="utf-8"))
@@ -66,7 +78,7 @@ def pg_reconciliation():
     tenant = opaque("tenantref:v1:")
     intent = plan(tenant)
     intents = PostgresPublicationIntents(connect)
-    assert intents.begin(intent) == intent
+    assert intents.begin(intent, binding(intent)) == intent
     with psycopg.connect(dsn, autocommit=True) as connection:
         connection.execute("UPDATE anonflow_publication_intents SET created_at=clock_timestamp()-interval '2 minutes' "
                            "WHERE tenant_ref=%s AND publication_ref=%s", (tenant, intent.publication_ref))
@@ -87,7 +99,7 @@ def _event_count(state) -> int:
 def test_postgresql_scan_is_tenant_scoped_bounded_and_single_scanner(pg_reconciliation):
     state = pg_reconciliation
     other = plan(opaque("tenantref:v1:"))
-    assert PostgresPublicationIntents(state["connect"]).begin(other) == other
+    assert PostgresPublicationIntents(state["connect"]).begin(other, binding(other)) == other
     with state["psycopg"].connect(state["dsn"], autocommit=True) as connection:
         connection.execute("UPDATE anonflow_publication_intents SET created_at=clock_timestamp()-interval '2 minutes' "
                            "WHERE tenant_ref=%s AND publication_ref=%s", (other.tenant_ref, other.publication_ref))
@@ -105,9 +117,9 @@ def test_postgresql_scan_filters_more_than_one_hundred_live_observations_before_
     intents = PostgresPublicationIntents(state["connect"])
     active = [plan(state["tenant"]) for _unused in range(101)]
     for pending in active:
-        assert intents.begin(pending) == pending
+        assert intents.begin(pending, binding(pending)) == pending
     eligible = plan(state["tenant"])
-    assert intents.begin(eligible) == eligible
+    assert intents.begin(eligible, binding(eligible)) == eligible
     with state["psycopg"].connect(state["dsn"], autocommit=True) as connection:
         for pending in [state["intent"], *active, eligible]:
             connection.execute("UPDATE anonflow_publication_intents SET created_at=clock_timestamp()-interval '2 minutes' "

@@ -123,6 +123,7 @@ class EncryptedObjectReference:
     key_ref: str
     ciphertext_digest: str
     ciphertext_size_bytes: int
+    binding_digest: str
     encryption_algorithm: str = "AES-256-GCM"
 
     def __post_init__(self) -> None:
@@ -131,6 +132,7 @@ class EncryptedObjectReference:
         _text(self.publication_ref, _PUBLICATION)
         _text(self.key_ref, _KEY)
         _text(self.ciphertext_digest, _DIGEST)
+        _text(self.binding_digest, _DIGEST)
         if (type(self.ciphertext_size_bytes) is not int or isinstance(self.ciphertext_size_bytes, bool)
                 or not 0 <= self.ciphertext_size_bytes <= 2 ** 63 - 1
                 or self.encryption_algorithm != "AES-256-GCM"):
@@ -163,6 +165,7 @@ class ControlPlaneMetadata:
         reference = None if self.encrypted_object is None else {
             "ciphertext_digest": self.encrypted_object.ciphertext_digest,
             "ciphertext_size_bytes": self.encrypted_object.ciphertext_size_bytes,
+            "binding_digest": self.encrypted_object.binding_digest,
             "encryption_algorithm": self.encrypted_object.encryption_algorithm,
             "key_ref": self.encrypted_object.key_ref, "object_ref": self.encrypted_object.object_ref,
             "publication_ref": self.encrypted_object.publication_ref,

@@ -29,7 +29,7 @@ def fails(constructor, *args, **kwargs):
 
 def reference(**changes):
     return EncryptedObjectReference(TENANT, OBJECT, PUBLICATION, "keyref:v1:production-data-key",
-                                    "sha256:" + "a" * 64, 77, **changes)
+                                    "sha256:" + "a" * 64, 77, "sha256:" + "b" * 64, **changes)
 
 
 def record(**changes):
@@ -51,7 +51,8 @@ def test_metadata_record_allows_only_opaque_encrypted_reference_and_safe_metadat
     item = record()
     assert item.encrypted_object.object_ref == OBJECT
     assert item.attributes["policy_digest"].startswith("sha256:")
-    fails(EncryptedObjectReference, TENANT, "s3://bucket/candidate", PUBLICATION, "keyref:v1:key", "sha256:" + "a" * 64, 1)
+    fails(EncryptedObjectReference, TENANT, "s3://bucket/candidate", PUBLICATION, "keyref:v1:key", "sha256:" + "a" * 64, 1,
+          "sha256:" + "b" * 64)
     fails(lambda: record(encrypted_object=replace(reference(), tenant_ref="tenantref:v1:" + "Z" * 43)))
 
 
