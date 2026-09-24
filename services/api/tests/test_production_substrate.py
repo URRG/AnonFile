@@ -71,6 +71,7 @@ def test_validated_metadata_and_expected_versions_cannot_be_mutated_after_constr
     {"nested": {"ciphertext": "encoded"}}, {"digest": b"source bytes"},
     {"business_label": "unbounded source-like text"},
     {"email_digest": "sha256:" + "a" * 64},
+    {"state": []},
 ])
 def test_control_plane_records_fail_closed_on_raw_or_candidate_byte_bearing_fields(attributes):
     fails(lambda: record(attributes=attributes))

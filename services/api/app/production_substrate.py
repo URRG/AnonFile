@@ -96,7 +96,8 @@ def _frozen_attributes(value: object) -> Mapping[str, object]:
             result[key] = _opaque_reference(item)
         elif key in {"attempt", "lease_epoch", "sequence"}:
             result[key] = _positive(item)
-        elif key == "state" and item in {"PENDING", "RUNNING", "SUCCEEDED", "FAILED", "QUARANTINED"}:
+        elif (key == "state" and type(item) is str
+              and item in {"PENDING", "RUNNING", "SUCCEEDED", "FAILED", "QUARANTINED"}):
             result[key] = item
         else:
             _fail()
@@ -241,13 +242,13 @@ def validate_adapter_declaration(value: object) -> dict[str, object]:
     traffic, establish durability, or test an infrastructure provider.
     """
     expected = {"schema", "adapter_id", "capabilities"}
-    if not isinstance(value, dict) or set(value) != expected or value.get("schema") != "anonflow-production-substrate-v1":
+    if type(value) is not dict or set(value) != expected or value.get("schema") != "anonflow-production-substrate-v1":
         _fail()
     adapter_id = value.get("adapter_id")
     if type(adapter_id) is not str or not re.fullmatch(r"[a-z][a-z0-9._-]{2,95}", adapter_id):
         _fail()
     capabilities = value.get("capabilities")
-    if not isinstance(capabilities, dict) or set(capabilities) != _REQUIRED_CAPABILITIES:
+    if type(capabilities) is not dict or set(capabilities) != _REQUIRED_CAPABILITIES:
         _fail()
     if any(type(enabled) is not bool or enabled is not True for enabled in capabilities.values()):
         _fail()
