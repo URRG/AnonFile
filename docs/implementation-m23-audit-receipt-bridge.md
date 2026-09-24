@@ -11,6 +11,13 @@ Missing, stale/replayed, forged, malformed, mismatched, or discontinuous
 receipts fail closed.  Continuity is enforced by the persisted M19 receipt
 ledger, including on reads before a later receipt can use its predecessor.
 
+The bridge does **not** independently prove that a checkpoint's
+`audit_chain_commitment` represents repository audit events or the actual audit
+head.  That source-to-commitment binding must be authenticated and durably
+persisted by the caller before it creates or supplies a checkpoint.  Likewise,
+the `at` argument is a trusted caller-supplied clock input; the bridge does not
+obtain or establish trusted time itself.
+
 This is a foundation for later production anchoring, not production anchoring
 itself.  The bridge has no HTTP client, no external-service implementation, no
 receipt-request/submission operation, no key that can issue external receipts,

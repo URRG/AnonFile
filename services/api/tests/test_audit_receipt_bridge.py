@@ -98,6 +98,19 @@ def test_forged_or_unauthenticated_local_evidence_cannot_be_admitted(tmp_path):
     store.close()
 
 
+def test_second_valid_checkpoint_receipt_link_is_persisted_with_continuity(tmp_path):
+    authority, private, key, store, bridge = setup(tmp_path)
+    first_local = checkpoint(authority)
+    first = receipt(private, key, first_local)
+    bridge.accept(first_local, first, tenant_ref=TENANT, at=NOW)
+
+    second_local = checkpoint(authority, 2, first_local.digest, HEAD_2)
+    second = receipt(private, key, second_local, previous=first.digest)
+    assert bridge.accept(second_local, second, tenant_ref=TENANT, at=NOW) == second
+    assert store.head(TENANT, at=NOW) == second
+    store.close()
+
+
 def test_stale_receipt_and_broken_persisted_continuity_fail_closed(tmp_path):
     authority, private, key, store, bridge = setup(tmp_path)
     first_local = checkpoint(authority)
