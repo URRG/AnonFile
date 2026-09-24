@@ -57,9 +57,11 @@ class PostgresPublicationFinalizer:
     Lock order is intent, completion, worker job, metadata idempotency row,
     then metadata record.  The helper called below owns no transaction boundary.
     """
-    def __init__(self, connection_factory: Callable[[], Any]) -> None:
-        if not callable(connection_factory): _fail()
+    def __init__(self, connection_factory: Callable[[], Any],
+                 reference_verifier: Callable[[EncryptedObjectReference], EncryptedObjectReference]) -> None:
+        if not callable(connection_factory) or not callable(reference_verifier): _fail()
         self._connection_factory = connection_factory
+        self._reference_verifier = reference_verifier
 
     @staticmethod
     def _close(connection: Any) -> None:
@@ -75,6 +77,14 @@ class PostgresPublicationFinalizer:
         if type(claim) is not LeasedWorkerClaim or type(reference) is not EncryptedObjectReference:
             _fail()
         if claim.tenant_ref != reference.tenant_ref: _fail()
+        # This occurs before BEGIN: a verifier must use the worker's narrowly
+        # scoped M38 recovery/get path to authenticate envelope, AAD and key.
+        try:
+            verified = self._reference_verifier(reference)
+        except Exception:
+            _fail()
+        if type(verified) is not EncryptedObjectReference or verified != reference:
+            _fail()
         connection = None
         try:
             connection = self._connection_factory()
@@ -105,17 +115,27 @@ class PostgresPublicationFinalizer:
             previous = _row(cursor)
             if previous is not None:
                 if len(previous) != 2 or previous[0] != completion_digest or previous[1] != completion: _fail()
+                cursor.execute("SELECT version, document FROM anonflow_metadata_records WHERE tenant_ref=%s "
+                               "AND record_id=%s FOR UPDATE", (intent.tenant_ref, intent.target_ref))
+                stored = _row(cursor)
                 metadata = ControlPlaneMetadata(intent.tenant_ref, intent.target_ref, intent.metadata_kind,
                                                 intent.expected_version + 1, dict(intent.attributes), reference)
+                if stored is None or len(stored) != 2 or stored[0] != metadata.version:
+                    _fail()
+                from app.postgres_metadata import _decode_document
+                if _decode_document(stored[1], tenant_ref=intent.tenant_ref, record_id=intent.target_ref,
+                                    version=stored[0]) != metadata: _fail()
                 cursor.execute("COMMIT")
                 return PublicationFinalization(intent.tenant_ref, intent.publication_ref, metadata, True)
             # 3. Fence the current lease immediately before metadata mutation.
-            cursor.execute("SELECT claim_id, lease_epoch, completed_at, lease_expires_at > clock_timestamp() "
+            cursor.execute("SELECT claim_id, worker_ref, delivery_attempt, lease_epoch, leased_at, lease_expires_at, "
+                           "completed_at, lease_expires_at > clock_timestamp() "
                            "FROM anonflow_worker_jobs WHERE tenant_ref=%s AND work_ref=%s FOR UPDATE",
                            (claim.tenant_ref, claim.work_ref))
             job = _row(cursor)
-            if (job is None or len(job) != 4 or job[0] != claim.claim_id or job[1] != claim.lease_epoch
-                    or job[2] is not None or job[3] is not True): _fail()
+            if (job is None or len(job) != 8 or job[:6] != (claim.claim_id, claim.worker_ref,
+                    claim.delivery_attempt, claim.lease_epoch, claim.leased_at, claim.lease_expires_at)
+                    or job[6] is not None or job[7] is not True): _fail()
             metadata = ControlPlaneMetadata(intent.tenant_ref, intent.target_ref, intent.metadata_kind,
                                             intent.expected_version + 1, dict(intent.attributes), reference)
             tx = TenantMetadataTransaction(intent.tenant_ref, intent.transaction_id,
