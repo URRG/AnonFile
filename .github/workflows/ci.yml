@@ -56,6 +56,21 @@ jobs:
       - run: python -m pip install -r services/api/requirements-dev.txt
       - name: Verify ciphertext transport against pinned S3-compatible storage
         run: bash services/api/scripts/run-s3-ciphertext-integration.sh
+  worker-encrypted-object-path-integration:
+    # CI-only: compose the existing bounded worker adapters against disposable
+    # TLS OpenBao and MinIO servers. This is not a production deployment test.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r services/api/requirements-dev.txt
+      - name: Verify encrypted worker object path against OpenBao and S3 over TLS
+        env:
+          OPENBAO_IMAGE: openbao/openbao:2.5.5@sha256:e59b4c73cfce6875363d25548222819433c6ce0af9c6d3ec9ede220e905723f9
+          S3_INTEGRATION_IMAGE: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:a1a8bd4ac40ad7881a245bab97323e18f971e4d4cba2c2007ec1bedd21cbaba2
+        run: bash services/api/scripts/run-worker-encrypted-objects-integration.sh
   web:
     runs-on: ubuntu-latest
     steps:
