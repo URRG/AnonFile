@@ -12,7 +12,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.postgres_metadata import PostgresControlPlaneMetadata
-from app.postgres_publication_intents import _decode
+from app.postgres_publication_intents import (_MAX_ROW_BYTES, _decode, _decode_binding)
+from app.publication_payload_binding import PublicationPayloadBinding
 from app.production_substrate import (ControlPlaneMetadata, EncryptedObjectReference,
                                       LeasedWorkerClaim, TenantMetadataTransaction)
 from app.worker_encrypted_objects import WorkerEncryptedObjects
@@ -44,6 +45,19 @@ def _row(cursor: Any) -> tuple[object, ...] | None:
     return value
 
 
+def _binding_fields(binding: PublicationPayloadBinding) -> dict[str, object]:
+    """The complete non-secret authorization carried into the receipt."""
+    if type(binding) is not PublicationPayloadBinding:
+        _fail()
+    return {
+        "tenant_ref": binding.tenant_ref, "publication_ref": binding.publication_ref,
+        "object_ref": binding.object_ref, "key_ref": binding.key_ref,
+        "plan_digest": binding.plan_digest, "payload_digest": binding.payload_digest,
+        "payload_size_bytes": binding.payload_size_bytes,
+        "serialization_id": binding.serialization_id, "binding_digest": binding.binding_digest,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class PublicationFinalization:
     tenant_ref: str
@@ -55,8 +69,9 @@ class PublicationFinalization:
 class PostgresPublicationFinalizer:
     """Finalize intent, metadata CAS and worker acknowledgement atomically.
 
-    Lock order is intent, completion, worker job, metadata idempotency row,
-    then metadata record.  The helper called below owns no transaction boundary.
+    Lock order is intent, immutable payload binding, completion, worker job,
+    metadata idempotency row, then metadata record.  Object and key service I/O
+    happens only in the preflight read/recovery phase, before the write locks.
     """
     def __init__(self, connection_factory: Callable[[], Any],
                  encrypted_objects: WorkerEncryptedObjects) -> None:
@@ -74,18 +89,73 @@ class PostgresPublicationFinalizer:
         try: connection.cursor().execute("ROLLBACK")
         except Exception: pass
 
+    def _preflight_binding(self, *, tenant_ref: str, publication_ref: str,
+                           claim: LeasedWorkerClaim,
+                           reference: EncryptedObjectReference) -> PublicationPayloadBinding:
+        """Load a coherent immutable authorization before object-store recovery.
+
+        An M39-only row has no commitment to the bytes that were authorized,
+        and is therefore deliberately not eligible for finalization.
+        """
+        connection = None
+        try:
+            connection = self._connection_factory()
+            if connection is None or getattr(connection, "autocommit", None) is not True:
+                _fail()
+            cursor = connection.cursor()
+            cursor.execute("BEGIN READ ONLY")
+            cursor.execute(
+                "SELECT transaction_id, plan_digest, "
+                "CASE WHEN octet_length(document::text) <= %s THEN document ELSE NULL END "
+                "FROM anonflow_publication_intents WHERE tenant_ref=%s AND publication_ref=%s",
+                (_MAX_ROW_BYTES, tenant_ref, publication_ref))
+            row = _row(cursor)
+            if row is None or len(row) != 3:
+                _fail()
+            intent = _decode(row[2], tenant_ref=tenant_ref, publication_ref=publication_ref,
+                             transaction_id=row[0], plan_digest=row[1])
+            cursor.execute(
+                "SELECT object_ref, key_ref, plan_digest, payload_digest, payload_size_bytes, "
+                "serialization_id, binding_digest FROM anonflow_publication_payload_bindings "
+                "WHERE tenant_ref=%s AND publication_ref=%s",
+                (tenant_ref, publication_ref))
+            binding = _decode_binding(_row(cursor), intent=intent, plan_digest=row[1])
+            if (intent.work_ref != claim.work_ref or binding.tenant_ref != tenant_ref
+                    or binding.publication_ref != publication_ref
+                    or reference.object_ref != binding.object_ref
+                    or reference.key_ref != binding.key_ref
+                    or reference.binding_digest != binding.binding_digest):
+                _fail()
+            cursor.execute("COMMIT")
+            return binding
+        except PostgresPublicationFinalizationError:
+            if connection is not None:
+                self._rollback(connection)
+            raise
+        except Exception:
+            if connection is not None:
+                self._rollback(connection)
+            _fail()
+        finally:
+            if connection is not None:
+                self._close(connection)
+
     def finalize(self, *, claim: LeasedWorkerClaim, reference: EncryptedObjectReference,
                  openbao_token: str) -> PublicationFinalization:
         if type(claim) is not LeasedWorkerClaim or type(reference) is not EncryptedObjectReference:
             _fail()
         if claim.tenant_ref != reference.tenant_ref: _fail()
-        # Authenticate the exact S3 object and OpenBao-wrapped key before BEGIN.
+        binding = self._preflight_binding(tenant_ref=claim.tenant_ref,
+                                          publication_ref=reference.publication_ref,
+                                          claim=claim, reference=reference)
+        # Authenticate the exact S3 object and OpenBao-wrapped key before the
+        # write transaction.  Never keep DB row locks across remote I/O.
         # The token remains call-scoped; the finalizer never stores it.
         try:
             verified = self._encrypted_objects.recover(
                 tenant_ref=reference.tenant_ref, object_ref=reference.object_ref,
                 publication_ref=reference.publication_ref, key_ref=reference.key_ref,
-                openbao_token=openbao_token)
+                binding=binding, openbao_token=openbao_token)
         except Exception:
             _fail()
         if type(verified) is not EncryptedObjectReference or verified != reference:
@@ -95,27 +165,39 @@ class PostgresPublicationFinalizer:
             connection = self._connection_factory()
             if connection is None or getattr(connection, "autocommit", None) is not True: _fail()
             cursor = connection.cursor(); cursor.execute("BEGIN")
-            # 1. Immutable intent is the authority for every metadata field.
-            cursor.execute("SELECT transaction_id, plan_digest, document FROM anonflow_publication_intents "
+            # 1. Re-lock and re-decode every authorization element after the
+            # preflight.  A row changed/corrupted between phases cannot be used.
+            cursor.execute("SELECT transaction_id, plan_digest, "
+                           "CASE WHEN octet_length(document::text) <= %s THEN document ELSE NULL END "
+                           "FROM anonflow_publication_intents "
                            "WHERE tenant_ref=%s AND publication_ref=%s FOR UPDATE",
-                           (claim.tenant_ref, reference.publication_ref))
+                           (_MAX_ROW_BYTES, claim.tenant_ref, reference.publication_ref))
             row = _row(cursor)
             if row is None or len(row) != 3: _fail()
             intent = _decode(row[2], tenant_ref=claim.tenant_ref, publication_ref=reference.publication_ref,
                              transaction_id=row[0], plan_digest=row[1])
             if (intent.work_ref != claim.work_ref or intent.object_ref != reference.object_ref
                     or intent.key_ref != reference.key_ref): _fail()
+            cursor.execute("SELECT object_ref, key_ref, plan_digest, payload_digest, payload_size_bytes, "
+                           "serialization_id, binding_digest FROM anonflow_publication_payload_bindings "
+                           "WHERE tenant_ref=%s AND publication_ref=%s FOR UPDATE",
+                           (claim.tenant_ref, reference.publication_ref))
+            locked_binding = _decode_binding(_row(cursor), intent=intent, plan_digest=row[1])
+            if locked_binding != binding or reference.binding_digest != locked_binding.binding_digest:
+                _fail()
             completion = {"plan_digest": row[1], "claim_id": claim.claim_id,
                           "worker_ref": claim.worker_ref,
                           "delivery_attempt": claim.delivery_attempt,
                           "lease_epoch": claim.lease_epoch,
                           "leased_at": claim.leased_at.isoformat(),
                           "lease_expires_at": claim.lease_expires_at.isoformat(),
+                          "binding": _binding_fields(locked_binding),
                           "reference": {
                               "tenant_ref": reference.tenant_ref, "object_ref": reference.object_ref,
                               "publication_ref": reference.publication_ref, "key_ref": reference.key_ref,
                               "ciphertext_digest": reference.ciphertext_digest,
                               "ciphertext_size_bytes": reference.ciphertext_size_bytes,
+                              "binding_digest": reference.binding_digest,
                               "encryption_algorithm": reference.encryption_algorithm}}
             completion_digest = hashlib.sha256(_canonical(completion).encode("ascii")).hexdigest()
             # 2. An existing completion is read-only exact replay; it never re-acks a claim.
