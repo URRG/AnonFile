@@ -5,7 +5,8 @@
 any I/O.  It is an injected PostgreSQL DB-API adapter: each factory call must
 return a fresh connection with `autocommit=True`, and the adapter explicitly
 owns `BEGIN`/`COMMIT`/`ROLLBACK`.  Operators must apply migration
-`003_m39_publication_intents.sql` separately.
+`003_m39_publication_intents.sql` and then
+`006_m42_publication_payload_bindings.sql` separately.
 
 An intent binds an exact `publicationref:v1:<43 base64url chars>` to one
 tenant, encrypted object/key/work references, a target metadata-record
@@ -19,12 +20,29 @@ positive value is an update of that exact version.
 All are opaque references or a bounded integer; arbitrary strings, URLs,
 payloads, ciphertext, envelopes, and wrapped data-encryption keys reject.
 
+Each `begin(intent, binding)` additionally commits a `PublicationPayloadBinding`
+in the same PostgreSQL transaction.  The binding contains the tenant,
+publication, encrypted object/key references, plan commitment, an exact-byte
+payload commitment, byte size, and one supported serialization identifier
+(`binary-v1` or `jsonl-utf8-v1`).  It never contains the payload, a URL,
+ciphertext, envelope, or key material.  Its `payload_digest` is
+`SHA256("anonflow-release-payload:v1\\0" || uint64_be(size) || exact_bytes)`;
+the binding digest canonically commits every binding field other than itself.
+
 `begin()` uses both the tenant-scoped publication ref and `(tenant_ref, transaction_id)` as
-immutable identities.  It creates the row once or returns only the exact same
-canonical plan; reusing either identity with a changed plan fails closed.
-`read()` requires the owning tenant ref, so a cross-tenant lookup is absent.
-Database constraints also enforce reference grammar and the permanent
+immutable identities.  It creates the intent and binding once or returns only
+the exact same canonical pair; reusing either identity with a changed plan or
+binding fails closed.  A legacy M39 intent with no binding is deliberately not
+retrofit: replay, `read()`, and `read_binding()` all fail closed rather than
+attaching a potentially unauthorized payload after the fact. `read()` and
+`read_binding()` require the owning tenant ref, so a cross-tenant lookup is
+absent. Database constraints also enforce reference grammar and the permanent
 `PENDING` initial state.
+
+The binding is a technical integrity commitment, not business authorization.
+An independently authorized release decision for the exact plan, destination,
+and payload is an external prerequisite before calling `begin`; this ledger
+does not create or infer that approval.
 
 Because M38 binds each create-only `(tenant_ref, object_ref)` object marker to
 one publication ref, the ledger also permits only one intent for an object

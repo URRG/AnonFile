@@ -14,6 +14,9 @@ import re
 from types import MappingProxyType
 from typing import Any
 
+from app.publication_payload_binding import (PublicationPayloadBinding,
+                                             PublicationPayloadBindingError)
+
 
 _OPAQUE = r"[A-Za-z0-9_-]{43}"
 _TENANT = re.compile(r"tenantref:v1:" + _OPAQUE + r"\Z")
@@ -38,7 +41,7 @@ class PostgresPublicationIntentError(RuntimeError):
 
 
 def _fail() -> None:
-    raise PostgresPublicationIntentError()
+    raise PostgresPublicationIntentError() from None
 
 
 def _text(value: object, expression: re.Pattern[str]) -> str:
@@ -179,6 +182,38 @@ def _decode(document: object, *, tenant_ref: str, publication_ref: str,
     return intent
 
 
+def _binding_row(cursor: Any) -> tuple[object, ...] | None:
+    return _row(cursor)
+
+
+def _locked_binding(cursor: Any, *, tenant_ref: str,
+                    publication_ref: str) -> tuple[object, ...] | None:
+    """Lock and return the seven non-identity binding columns for finalizers."""
+    cursor.execute(
+        "SELECT object_ref, key_ref, plan_digest, payload_digest, payload_size_bytes, "
+        "serialization_id, binding_digest FROM anonflow_publication_payload_bindings "
+        "WHERE tenant_ref=%s AND publication_ref=%s FOR UPDATE",
+        (tenant_ref, publication_ref))
+    return _binding_row(cursor)
+
+
+def _decode_binding(row: tuple[object, ...] | None, *, intent: PublicationIntent,
+                    plan_digest: str) -> PublicationPayloadBinding:
+    if row is None or len(row) != 7:
+        _fail()
+    try:
+        binding = PublicationPayloadBinding(
+            tenant_ref=intent.tenant_ref, publication_ref=intent.publication_ref,
+            object_ref=row[0], key_ref=row[1], plan_digest=row[2], payload_digest=row[3],
+            payload_size_bytes=row[4], serialization_id=row[5], binding_digest=row[6])
+    except (PublicationPayloadBindingError, TypeError):
+        _fail()
+    if (binding.object_ref != intent.object_ref or binding.key_ref != intent.key_ref
+            or binding.plan_digest != plan_digest):
+        _fail()
+    return binding
+
+
 class PostgresPublicationIntents:
     """Atomic create-or-return ledger for immutable PENDING publication plans.
 
@@ -218,15 +253,20 @@ class PostgresPublicationIntents:
             _fail()
         return connection
 
-    def begin(self, intent: PublicationIntent) -> PublicationIntent:
-        """Atomically create or return the exact original PENDING plan.
+    def begin(self, intent: PublicationIntent,
+              binding: PublicationPayloadBinding) -> PublicationIntent:
+        """Atomically create or return an exact plan *and* payload binding.
 
         Reusing either immutable identity (publication ref or tenant-scoped
         transaction id) with any altered canonical plan fails closed.
         """
-        if type(intent) is not PublicationIntent:
+        if type(intent) is not PublicationIntent or type(binding) is not PublicationPayloadBinding:
             _fail()
         document, digest = _canonical(_document(intent)), _plan_digest(intent)
+        if (binding.tenant_ref != intent.tenant_ref or binding.publication_ref != intent.publication_ref
+                or binding.object_ref != intent.object_ref or binding.key_ref != intent.key_ref
+                or binding.plan_digest != digest):
+            _fail()
         connection = None
         try:
             connection = self._connection()
@@ -240,6 +280,7 @@ class PostgresPublicationIntents:
                 (intent.publication_ref, intent.tenant_ref, intent.transaction_id, intent.object_ref,
                  digest, document))
             stored = _row(cursor)
+            inserted_intent = stored is not None
             if stored is None:
                 if cursor.rowcount != 0:
                     _fail()
@@ -262,6 +303,28 @@ class PostgresPublicationIntents:
             if (publication_ref != intent.publication_ref or tenant_ref != intent.tenant_ref
                     or transaction_id != intent.transaction_id or stored_digest != digest
                     or loaded != intent):
+                _fail()
+            if inserted_intent:
+                cursor.execute(
+                    "INSERT INTO anonflow_publication_payload_bindings "
+                    "(tenant_ref, publication_ref, object_ref, key_ref, plan_digest, payload_digest, "
+                    "payload_size_bytes, serialization_id, binding_digest) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                    "RETURNING object_ref, key_ref, plan_digest, payload_digest, payload_size_bytes, "
+                    "serialization_id, binding_digest",
+                    (binding.tenant_ref, binding.publication_ref, binding.object_ref, binding.key_ref,
+                     binding.plan_digest, binding.payload_digest, binding.payload_size_bytes,
+                     binding.serialization_id, binding.binding_digest))
+                stored_binding = _binding_row(cursor)
+                if cursor.rowcount != 1:
+                    _fail()
+            else:
+                # A pre-M42 intent is not safely bindable after the fact: the
+                # original authorization may have covered different bytes.
+                stored_binding = _locked_binding(cursor, tenant_ref=intent.tenant_ref,
+                                                 publication_ref=intent.publication_ref)
+            loaded_binding = _decode_binding(stored_binding, intent=loaded, plan_digest=digest)
+            if loaded_binding != binding:
                 _fail()
             self._commit(connection)
             return loaded
@@ -299,8 +362,56 @@ class PostgresPublicationIntents:
                 _fail()
             result = _decode(stored[2], tenant_ref=tenant_ref, publication_ref=publication_ref,
                              transaction_id=stored[0], plan_digest=stored[1])
+            cursor.execute(
+                "SELECT object_ref, key_ref, plan_digest, payload_digest, payload_size_bytes, "
+                "serialization_id, binding_digest FROM anonflow_publication_payload_bindings "
+                "WHERE tenant_ref=%s AND publication_ref=%s",
+                (tenant_ref, publication_ref))
+            _decode_binding(_binding_row(cursor), intent=result, plan_digest=stored[1])
             self._commit(connection)
             return result
+        except PostgresPublicationIntentError:
+            if connection is not None:
+                self._rollback(connection)
+            raise
+        except Exception:
+            if connection is not None:
+                self._rollback(connection)
+            raise PostgresPublicationIntentError() from None
+        finally:
+            if connection is not None:
+                self._close(connection)
+
+    def read_binding(self, tenant_ref: str, publication_ref: str) -> PublicationPayloadBinding | None:
+        """Read a binding only after validating its matching immutable intent."""
+        _text(tenant_ref, _TENANT)
+        _text(publication_ref, _PUBLICATION)
+        connection = None
+        try:
+            connection = self._connection()
+            cursor = connection.cursor()
+            cursor.execute("BEGIN READ ONLY")
+            cursor.execute(
+                "SELECT transaction_id, plan_digest, "
+                "CASE WHEN octet_length(document::text) <= %s THEN document ELSE NULL END "
+                "FROM anonflow_publication_intents WHERE tenant_ref=%s AND publication_ref=%s",
+                (_MAX_ROW_BYTES, tenant_ref, publication_ref))
+            stored = _row(cursor)
+            if stored is None:
+                self._commit(connection)
+                return None
+            if len(stored) != 3:
+                _fail()
+            intent = _decode(stored[2], tenant_ref=tenant_ref, publication_ref=publication_ref,
+                             transaction_id=stored[0], plan_digest=stored[1])
+            cursor.execute(
+                "SELECT object_ref, key_ref, plan_digest, payload_digest, payload_size_bytes, "
+                "serialization_id, binding_digest FROM anonflow_publication_payload_bindings "
+                "WHERE tenant_ref=%s AND publication_ref=%s",
+                (tenant_ref, publication_ref))
+            binding = _decode_binding(_binding_row(cursor), intent=intent, plan_digest=stored[1])
+            self._commit(connection)
+            return binding
         except PostgresPublicationIntentError:
             if connection is not None:
                 self._rollback(connection)
