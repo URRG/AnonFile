@@ -1,4 +1,8 @@
-"""Development-only authentication dispatch; no production identity claims."""
+"""Fail-closed authentication dispatch with a narrow production JWT profile.
+
+This only establishes request identity.  It does not make the rest of the API,
+storage, or release workflow production-ready.
+"""
 from __future__ import annotations
 import hmac
 import json
@@ -54,11 +58,16 @@ def load_principals() -> tuple[tuple[str, Principal], ...]:
 
 def configure_auth(app) -> None:
     """Choose one explicit auth adapter at startup, never fall back on errors."""
-    if os.getenv("ANONFLOW_ENV", "development") != "development":
-        raise RuntimeError("Only explicit development mode is supported")
+    environment = os.getenv("ANONFLOW_ENV", "development")
+    if environment not in {"development", "production"}:
+        raise RuntimeError("Invalid application environment")
     mode = os.getenv("ANONFLOW_AUTH_MODE", "dev-token")
     if mode not in {"dev-token", "jwt"}:
         raise RuntimeError("Invalid authentication mode")
+    # Static development credentials must never be an implicit production
+    # fallback.  Production has one deliberately narrow identity adapter.
+    if environment == "production" and mode != "jwt":
+        raise RuntimeError("Production requires JWT authentication")
     if mode == "jwt":
         from app.token_auth import load_jwt_verifier
         verifier = load_jwt_verifier()
@@ -67,6 +76,7 @@ def configure_auth(app) -> None:
         principals = load_principals()
         verifier = None
     app.state.auth_mode = mode
+    app.state.auth_environment = environment
     app.state.principals = principals
     app.state.jwt_verifier = verifier
 
