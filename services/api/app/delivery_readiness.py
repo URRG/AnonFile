@@ -36,6 +36,13 @@ def _key(v):
         if len(raw)!=32 or base64.b64encode(raw).decode()!=v:_fail()
         return Ed25519PrivateKey.from_private_bytes(raw)
     except (ValueError,UnicodeError):_fail()
+def _signature_bytes(value):
+    if type(value) is not str or not _SIG.fullmatch(value):_fail()
+    try:
+        text=value.split(":",2)[2]; raw=base64.urlsafe_b64decode(text+"==")
+        if len(raw)!=64 or base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")!=text:_fail()
+        return raw
+    except (ValueError,UnicodeError):_fail()
 
 @dataclass(frozen=True,slots=True)
 class DeliveryReadiness:
@@ -91,7 +98,7 @@ class DeliveryReadinessAuthority:
     def verifies(self,item,at):
         try:
             if type(item) is not DeliveryReadiness or item.tenant!=self.tenant or item.issuer_key_id!=self.issuer_key_id or not self.active(at) or item.assessed_at>_time(at) or item.expires_at<=_time(at) or item.expires_at>self.expires_at:return False
-            self._key.public_key().verify(base64.urlsafe_b64decode(item.signature.split(":",2)[2]+"=="),b"delivery-readiness-v1:"+_canon(item.canonical()));return True
+            self._key.public_key().verify(_signature_bytes(item.signature),b"delivery-readiness-v1:"+_canon(item.canonical()));return True
         except (InvalidSignature,ValueError,UnicodeError,DeliveryReadinessError):return False
 def load_delivery_readiness_authorities():
     raw=os.getenv("ANONFLOW_DELIVERY_READINESS_AUTHORITIES","")
