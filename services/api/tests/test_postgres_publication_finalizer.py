@@ -15,7 +15,8 @@ from app.postgres_metadata import PostgresControlPlaneMetadata
 from app.postgres_publication_finalizer import (PostgresPublicationFinalizationError,
                                                 PostgresPublicationFinalizer)
 from app.postgres_publication_intents import (PostgresPublicationIntents, PublicationIntent,
-                                              _canonical, _document, _plan_digest)
+                                               _canonical, _document, _plan_digest)
+from app.postgres_publication_reconciliation import PostgresPublicationReconciler
 from app.publication_payload_binding import (PublicationPayloadBinding,
                                              payload_digest)
 from app.postgres_worker_jobs import PostgresLeasedWorkerJobs
@@ -58,7 +59,7 @@ def pg_finalizer(monkeypatch):
     if not dsn: pytest.skip("set ANONFLOW_POSTGRES_TEST_DSN to run PostgreSQL integration")
     psycopg = pytest.importorskip("psycopg")
     migrations = [Path(__file__).parents[1] / "migrations" / name for name in (
-        "001_m26_postgres_metadata.sql", "002_m28_postgres_worker_jobs.sql", "003_m39_publication_intents.sql", "004_m40_publication_finalizations.sql", "006_m42_publication_payload_bindings.sql")]
+        "001_m26_postgres_metadata.sql", "002_m28_postgres_worker_jobs.sql", "003_m39_publication_intents.sql", "004_m40_publication_finalizations.sql", "005_m41_publication_reconciliation.sql", "006_m42_publication_payload_bindings.sql")]
     with psycopg.connect(dsn, autocommit=True) as connection:
         for migration in migrations: connection.execute(migration.read_text(encoding="utf-8"))
     connect = lambda: psycopg.connect(dsn, autocommit=True)
@@ -99,6 +100,36 @@ def _m40_transaction_exists(state) -> bool:
             (state["plan"].tenant_ref, state["plan"].transaction_id)).fetchone()[0]
 
 
+def _quarantine(state) -> None:
+    """Create an observation directly, then exercise the guarded M41 transition.
+
+    The fixture intentionally owns a live worker claim, so M41's scanner would
+    correctly skip it.  This setup models an observation obtained just before
+    that claim raced in.
+    """
+    token = opaque("observation:v1:")
+    with state["psycopg"].connect(state["dsn"], autocommit=True) as connection:
+        connection.execute(
+            "INSERT INTO anonflow_publication_observations "
+            "(tenant_ref, publication_ref, observation_epoch, observation_token, state, lease_expires_at) "
+            "VALUES (%s,%s,1,%s,'OBSERVED',clock_timestamp()+interval '1 hour')",
+            (state["plan"].tenant_ref, state["plan"].publication_ref, token))
+    assert PostgresPublicationReconciler(
+        state["connect"], quarantine_authorizer=lambda *_args: True).quarantine(
+            state["plan"].tenant_ref, state["plan"].publication_ref, token,
+            reason="OPERATOR_CONFIRMED_UNRECOVERABLE") is True
+
+
+def _assert_unfinalized(state) -> None:
+    assert state["metadata"].read(state["plan"].tenant_ref, state["plan"].target_ref).version == 1
+    assert _count(state, "anonflow_publication_finalizations") == 0
+    assert _m40_transaction_exists(state) is False
+    with state["psycopg"].connect(state["dsn"], autocommit=True) as connection:
+        assert connection.execute(
+            "SELECT completed_at FROM anonflow_worker_jobs WHERE tenant_ref=%s AND work_ref=%s",
+            (state["plan"].tenant_ref, state["plan"].work_ref)).fetchone()[0] is None
+
+
 def test_postgresql_finalization_concurrent_same_claim_commits_exactly_once(pg_finalizer):
     state = pg_finalizer
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -127,6 +158,27 @@ def test_postgresql_finalization_rejects_expired_and_reclaimed_claim_without_wri
     assert replacement is not None and replacement.lease_epoch == state["claim"].lease_epoch + 1
     with pytest.raises(PostgresPublicationFinalizationError): _finalizer(state).finalize(claim=state["claim"], reference=state["reference"], openbao_token="test-token")
     assert state["metadata"].read(state["plan"].tenant_ref, state["plan"].target_ref).version == 1 and _count(state, "anonflow_publication_finalizations") == 0
+
+
+def test_postgresql_finalization_rejects_terminal_quarantine_without_write(pg_finalizer):
+    state = pg_finalizer
+    _quarantine(state)
+    with pytest.raises(PostgresPublicationFinalizationError):
+        _finalizer(state).finalize(claim=state["claim"], reference=state["reference"],
+                                   openbao_token="test-token")
+    _assert_unfinalized(state)
+
+
+def test_postgresql_quarantine_racing_recovery_fences_finalization_without_write(pg_finalizer, monkeypatch):
+    state = pg_finalizer
+    def recover(_self, **_kwargs):
+        _quarantine(state)
+        return state["reference"]
+    monkeypatch.setattr(WorkerEncryptedObjects, "recover", recover)
+    with pytest.raises(PostgresPublicationFinalizationError):
+        _finalizer(state).finalize(claim=state["claim"], reference=state["reference"],
+                                   openbao_token="test-token")
+    _assert_unfinalized(state)
 
 
 def test_postgresql_finalization_metadata_cas_conflict_rolls_back_everything(pg_finalizer):

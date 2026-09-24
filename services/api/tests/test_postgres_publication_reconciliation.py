@@ -172,6 +172,21 @@ def test_postgresql_quarantine_is_explicit_cas_and_events_are_append_only(pg_rec
                                (state["tenant"],))
 
 
+def test_postgresql_quarantine_declines_after_finalization(pg_reconciliation):
+    state = pg_reconciliation
+    observation = _scan(state)[0]
+    with state["psycopg"].connect(state["dsn"], autocommit=True) as connection:
+        connection.execute(
+            "INSERT INTO anonflow_publication_finalizations "
+            "(tenant_ref, publication_ref, completion_digest, result_document) "
+            "VALUES (%s,%s,%s,'{}'::jsonb)",
+            (state["tenant"], state["intent"].publication_ref, secrets.token_hex(32)))
+    reconciler = PostgresPublicationReconciler(state["connect"], quarantine_authorizer=lambda *_args: True)
+    assert reconciler.quarantine(state["tenant"], observation.publication_ref, observation.observation_token,
+                                 reason="OPERATOR_CONFIRMED_UNRECOVERABLE") is False
+    assert _event_count(state) == 1
+
+
 def test_postgresql_commit_lost_replay_never_creates_second_active_observation(pg_reconciliation):
     state = pg_reconciliation
     class CommitLostCursor:

@@ -20,8 +20,11 @@ retention/immutable-object controls and the later read-time authentication
 check remain necessary.
 
 In one explicit transaction it locks the immutable M39 intent, the M42 binding,
-any completion receipt, the worker job, M26 metadata idempotency row, and
-target metadata row, in that order. It re-decodes and compares the locked
+the optional M41 reconciliation observation, any completion receipt, the worker
+job, M26 metadata idempotency row, and target metadata row, in that order. A
+terminal M41 `QUARANTINED` observation rejects finalization. Quarantine takes
+the same intent-first lock and declines after an M40 completion, so the two
+terminal decisions cannot both commit. It re-decodes and compares the locked
 binding with the preflight binding before deriving the only metadata write.
 The completion receipt includes the full binding and encrypted reference,
 applies M26 CAS, and acknowledges the exact unexpired claim. A crash before

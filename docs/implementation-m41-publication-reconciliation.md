@@ -22,7 +22,11 @@ quarantine fails closed. This is only a narrow integration point; deployments
 must independently authenticate and audit the guard's operator decision.
 Scanning never quarantines automatically. It also never deletes an object,
 adopts an S3 object, writes metadata, finalizes a
-publication, acknowledges a job, or changes worker claims.
+publication, acknowledges a job, or changes worker claims. An explicit terminal
+quarantine is serialized with M40 finalization: it locks the intent first and
+declines if a completion already exists; M40 locks the corresponding observation
+and rejects `QUARANTINED`. This does not stop an M28 worker from claiming work;
+it only fences the irreversible metadata finalization.
 
 Commit outcome uncertainty fails closed. A retry may see no result while the
 already committed observation lease remains active; it must wait for expiry or
