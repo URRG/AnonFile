@@ -26,6 +26,7 @@ pytestmark = pytest.mark.skipif(
 TENANT = "tenantref:v1:" + "M" * 43
 OTHER_TENANT = "tenantref:v1:" + "N" * 43
 OBJECT = "objectref:v1:" + "W" * 43
+PUBLICATION = "publicationref:v1:" + "P" * 43
 KEY_REF = "keyref:v1:m36-worker-envelope"
 BUCKET = "m36-worker-objects-ci"
 MARKER = b"m36 synthetic private customer record marker"
@@ -65,7 +66,7 @@ def test_worker_object_path_against_live_openbao_and_s3():
     )
     worker = WorkerEncryptedObjects(openbao=data_keys, ciphertexts=ciphertexts)
 
-    reference = worker.put(tenant_ref=TENANT, object_ref=OBJECT, key_ref=KEY_REF,
+    reference = worker.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY_REF,
                            plaintext=MARKER, openbao_token=values["M36_OPENBAO_TOKEN"])
     assert worker.get(tenant_ref=TENANT, reference=reference,
                       openbao_token=values["M36_OPENBAO_TOKEN"]) == MARKER
@@ -79,7 +80,7 @@ def test_worker_object_path_against_live_openbao_and_s3():
     finally:
         raw_response["Body"].close()
     assert MARKER not in stored_envelope
-    assert json.loads(stored_envelope)["version"] == 1
+    assert json.loads(stored_envelope)["version"] == 2
 
     # A reference cannot be used to cross a tenant boundary, and a second
     # create-only put cannot replace the established encrypted object.
@@ -87,7 +88,7 @@ def test_worker_object_path_against_live_openbao_and_s3():
         worker.get(tenant_ref=OTHER_TENANT, reference=reference,
                    openbao_token=values["M36_OPENBAO_TOKEN"])
     with pytest.raises(EncryptedObjectStoreError, match="^Encrypted object operation failed$"):
-        worker.put(tenant_ref=TENANT, object_ref=OBJECT, key_ref=KEY_REF,
+        worker.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY_REF,
                    plaintext=b"m36 replacement marker", openbao_token=values["M36_OPENBAO_TOKEN"])
     assert worker.get(tenant_ref=TENANT, reference=reference,
                       openbao_token=values["M36_OPENBAO_TOKEN"]) == MARKER
@@ -108,7 +109,8 @@ def test_worker_object_path_against_live_openbao_and_s3():
     client.put_object(Bucket=BUCKET, Key=key, Body=b"m36-corrupted-envelope",
                       ContentLength=len(b"m36-corrupted-envelope"),
                       ContentType="application/octet-stream",
-                      Metadata={"anonflow-sha256": reference.ciphertext_digest.removeprefix("sha256:")},
+                      Metadata={"anonflow-publication-ref": PUBLICATION,
+                                "anonflow-sha256": reference.ciphertext_digest.removeprefix("sha256:")},
                       ACL="private")
     with pytest.raises(EncryptedObjectStoreError, match="^Encrypted object operation failed$"):
         worker.get(tenant_ref=TENANT, reference=reference,

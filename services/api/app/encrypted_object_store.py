@@ -24,9 +24,10 @@ from app.production_substrate import EncryptedObjectReference, ProductionSubstra
 
 _TENANT = re.compile(r"tenantref:v1:[A-Za-z0-9_-]{43}\Z")
 _OBJECT = re.compile(r"objectref:v1:[A-Za-z0-9_-]{43}\Z")
+_PUBLICATION = re.compile(r"publicationref:v1:[A-Za-z0-9_-]{43}\Z")
 _KEY = re.compile(r"keyref:v1:[a-z0-9][a-z0-9._:-]{0,95}\Z")
 _WRAPPED_KEY = re.compile(r"[\x21-\x7e]{1,16384}\Z")
-_VERSION = 1
+_VERSION = 2
 _NONCE_BYTES = 12
 _TAG_BYTES = 16
 _MAX_PLAINTEXT_BYTES = 32 * 1024 * 1024
@@ -41,6 +42,10 @@ class EncryptedObjectStoreError(ValueError):
 
     def __init__(self) -> None:
         super().__init__("Encrypted object operation failed")
+
+
+class EncryptedObjectAlreadyExistsError(EncryptedObjectStoreError):
+    """A create-only conflict eligible for publication-bound recovery only."""
 
 
 def _fail() -> None:
@@ -66,17 +71,18 @@ def _b64_decode(value: object) -> bytes:
         _fail()
 
 
-def _aad(*, tenant_ref: str, object_ref: str, key_ref: str) -> bytes:
+def _aad(*, tenant_ref: str, object_ref: str, publication_ref: str, key_ref: str) -> bytes:
     """Canonical, domain-separated context for key wrapping and AES-GCM."""
-    return json.dumps(["anonflow-encrypted-object", _VERSION, tenant_ref, object_ref, key_ref],
+    return json.dumps(["anonflow-encrypted-object", _VERSION, tenant_ref, object_ref, publication_ref, key_ref],
                       ensure_ascii=True, separators=(",", ":")).encode("ascii")
 
 
-def _canonical_envelope(*, wrapped_key: str, nonce: bytes, ciphertext: bytes) -> bytes:
-    if not _WRAPPED_KEY.fullmatch(wrapped_key) or len(nonce) != _NONCE_BYTES or len(ciphertext) < _TAG_BYTES:
+def _canonical_envelope(*, publication_ref: str, wrapped_key: str, nonce: bytes, ciphertext: bytes) -> bytes:
+    if (not _PUBLICATION.fullmatch(publication_ref) or not _WRAPPED_KEY.fullmatch(wrapped_key)
+            or len(nonce) != _NONCE_BYTES or len(ciphertext) < _TAG_BYTES):
         _fail()
     encoded = json.dumps({"ciphertext": _b64_encode(ciphertext), "nonce": _b64_encode(nonce),
-                          "version": _VERSION, "wrapped_key": wrapped_key}, ensure_ascii=True,
+                          "publication_ref": publication_ref, "version": _VERSION, "wrapped_key": wrapped_key}, ensure_ascii=True,
                          sort_keys=True, separators=(",", ":")).encode("ascii")
     if len(encoded) > _MAX_ENVELOPE_BYTES:
         _fail()
@@ -124,13 +130,16 @@ class EncryptedByteTransport(Protocol):
     prefix or substitute a different object.
     """
 
-    def put(self, *, tenant_ref: str, object_ref: str, envelope: bytes, ciphertext_digest: str) -> None: ...
+    def put(self, *, tenant_ref: str, object_ref: str, publication_ref: str, envelope: bytes, ciphertext_digest: str) -> None: ...
 
-    def get(self, *, tenant_ref: str, object_ref: str, ciphertext_digest: str) -> bytes: ...
+    def get(self, *, tenant_ref: str, object_ref: str, publication_ref: str, ciphertext_digest: str) -> bytes: ...
+
+    def recover(self, *, tenant_ref: str, object_ref: str, publication_ref: str) -> tuple[bytes, str]: ...
 
 
 @dataclass(frozen=True, slots=True)
 class _Envelope:
+    publication_ref: str
     wrapped_key: str
     nonce: bytes
     ciphertext: bytes
@@ -143,15 +152,15 @@ def _parse_envelope(value: object) -> _Envelope:
         decoded = json.loads(value.decode("ascii"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         _fail()
-    if type(decoded) is not dict or set(decoded) != {"version", "wrapped_key", "nonce", "ciphertext"}:
+    if type(decoded) is not dict or set(decoded) != {"version", "publication_ref", "wrapped_key", "nonce", "ciphertext"}:
         _fail()
     if decoded.get("version") != _VERSION or type(decoded["wrapped_key"]) is not str:
         _fail()
     nonce, ciphertext = _b64_decode(decoded["nonce"]), _b64_decode(decoded["ciphertext"])
-    canonical = _canonical_envelope(wrapped_key=decoded["wrapped_key"], nonce=nonce, ciphertext=ciphertext)
+    canonical = _canonical_envelope(publication_ref=decoded["publication_ref"], wrapped_key=decoded["wrapped_key"], nonce=nonce, ciphertext=ciphertext)
     if canonical != value:
         _fail()
-    return _Envelope(decoded["wrapped_key"], nonce, ciphertext)
+    return _Envelope(decoded["publication_ref"], decoded["wrapped_key"], nonce, ciphertext)
 
 
 class EncryptedObjectStore:
@@ -164,19 +173,20 @@ class EncryptedObjectStore:
         self._transport = transport
 
     @staticmethod
-    def _reference(*, tenant_ref: str, object_ref: str, key_ref: str, envelope: bytes) -> EncryptedObjectReference:
+    def _reference(*, tenant_ref: str, object_ref: str, publication_ref: str, key_ref: str, envelope: bytes) -> EncryptedObjectReference:
         try:
-            return EncryptedObjectReference(tenant_ref=tenant_ref, object_ref=object_ref, key_ref=key_ref,
+            return EncryptedObjectReference(tenant_ref=tenant_ref, object_ref=object_ref, publication_ref=publication_ref, key_ref=key_ref,
                                             ciphertext_digest="sha256:" + sha256(envelope).hexdigest(),
                                             ciphertext_size_bytes=len(envelope))
         except ProductionSubstrateContractError:
             _fail()
 
-    def put(self, *, tenant_ref: object, object_ref: object, key_ref: object, plaintext: object) -> EncryptedObjectReference:
-        tenant, object_id, key = _opaque(tenant_ref, _TENANT), _opaque(object_ref, _OBJECT), _opaque(key_ref, _KEY)
+    def put(self, *, tenant_ref: object, object_ref: object, publication_ref: object, key_ref: object, plaintext: object) -> EncryptedObjectReference:
+        tenant, object_id, publication, key = (_opaque(tenant_ref, _TENANT), _opaque(object_ref, _OBJECT),
+                                                _opaque(publication_ref, _PUBLICATION), _opaque(key_ref, _KEY))
         if type(plaintext) is not bytes or len(plaintext) > _MAX_PLAINTEXT_BYTES:
             _fail()
-        context = _aad(tenant_ref=tenant, object_ref=object_id, key_ref=key)
+        context = _aad(tenant_ref=tenant, object_ref=object_id, publication_ref=publication, key_ref=key)
         try:
             generated = self._data_keys.generate(key_ref=key, context=context)
             # Providers may expose their own immutable return type (for
@@ -185,9 +195,9 @@ class EncryptedObjectStore:
             generated = GeneratedDataKey(generated.plaintext_key, generated.wrapped_key)
             fresh_nonce = urandom(_NONCE_BYTES)
             ciphertext = AESGCM(generated.plaintext_key).encrypt(fresh_nonce, plaintext, context)
-            envelope = _canonical_envelope(wrapped_key=generated.wrapped_key, nonce=fresh_nonce, ciphertext=ciphertext)
-            reference = self._reference(tenant_ref=tenant, object_ref=object_id, key_ref=key, envelope=envelope)
-            self._transport.put(tenant_ref=tenant, object_ref=object_id, envelope=envelope,
+            envelope = _canonical_envelope(publication_ref=publication, wrapped_key=generated.wrapped_key, nonce=fresh_nonce, ciphertext=ciphertext)
+            reference = self._reference(tenant_ref=tenant, object_ref=object_id, publication_ref=publication, key_ref=key, envelope=envelope)
+            self._transport.put(tenant_ref=tenant, object_ref=object_id, publication_ref=publication, envelope=envelope,
                                 ciphertext_digest=reference.ciphertext_digest)
             return reference
         except EncryptedObjectStoreError:
@@ -199,9 +209,9 @@ class EncryptedObjectStore:
         tenant = _opaque(tenant_ref, _TENANT)
         if type(reference) is not EncryptedObjectReference or reference.tenant_ref != tenant:
             _fail()
-        context = _aad(tenant_ref=tenant, object_ref=reference.object_ref, key_ref=reference.key_ref)
+        context = _aad(tenant_ref=tenant, object_ref=reference.object_ref, publication_ref=reference.publication_ref, key_ref=reference.key_ref)
         try:
-            envelope_bytes = self._transport.get(tenant_ref=tenant, object_ref=reference.object_ref,
+            envelope_bytes = self._transport.get(tenant_ref=tenant, object_ref=reference.object_ref, publication_ref=reference.publication_ref,
                                                  ciphertext_digest=reference.ciphertext_digest)
             if type(envelope_bytes) is not bytes:
                 _fail()
@@ -209,11 +219,48 @@ class EncryptedObjectStore:
                     or "sha256:" + sha256(envelope_bytes).hexdigest() != reference.ciphertext_digest):
                 _fail()
             envelope = _parse_envelope(envelope_bytes)
+            if envelope.publication_ref != reference.publication_ref:
+                _fail()
             plaintext_key = self._data_keys.unwrap(key_ref=reference.key_ref,
                                                     wrapped_key=envelope.wrapped_key, context=context)
             if type(plaintext_key) is not bytes or len(plaintext_key) != 32:
                 _fail()
             return AESGCM(plaintext_key).decrypt(envelope.nonce, envelope.ciphertext, context)
+        except EncryptedObjectStoreError:
+            raise
+        except (InvalidTag, ValueError, TypeError, UnicodeError):
+            _fail()
+        except Exception:
+            _fail()
+
+    def recover(self, *, tenant_ref: object, object_ref: object, publication_ref: object,
+                key_ref: object) -> EncryptedObjectReference:
+        """Reconstruct and authenticate a publication-bound object after an ambiguous create.
+
+        The caller must already have durably bound the opaque publication ref to
+        an immutable work plan. M39 provides that durable intent/fencing layer.
+        This method never adopts an object carrying a different publication ref.
+        """
+        tenant, object_id, publication, key = (_opaque(tenant_ref, _TENANT), _opaque(object_ref, _OBJECT),
+                                                _opaque(publication_ref, _PUBLICATION), _opaque(key_ref, _KEY))
+        context = _aad(tenant_ref=tenant, object_ref=object_id, publication_ref=publication, key_ref=key)
+        try:
+            envelope_bytes, digest = self._transport.recover(tenant_ref=tenant, object_ref=object_id,
+                                                              publication_ref=publication)
+            if type(envelope_bytes) is not bytes or type(digest) is not str:
+                _fail()
+            reference = self._reference(tenant_ref=tenant, object_ref=object_id, publication_ref=publication,
+                                        key_ref=key, envelope=envelope_bytes)
+            if reference.ciphertext_digest != digest:
+                _fail()
+            envelope = _parse_envelope(envelope_bytes)
+            if envelope.publication_ref != publication:
+                _fail()
+            plaintext_key = self._data_keys.unwrap(key_ref=key, wrapped_key=envelope.wrapped_key, context=context)
+            if type(plaintext_key) is not bytes or len(plaintext_key) != 32:
+                _fail()
+            AESGCM(plaintext_key).decrypt(envelope.nonce, envelope.ciphertext, context)
+            return reference
         except EncryptedObjectStoreError:
             raise
         except (InvalidTag, ValueError, TypeError, UnicodeError):

@@ -50,18 +50,19 @@ def config(**changes):
 
 TENANT = "tenantref:v1:" + "T" * 43
 OBJECT = "objectref:v1:" + "O" * 43
+PUBLICATION = "publicationref:v1:" + "P" * 43
 
 
 def test_create_only_upload_has_fixed_private_destination_and_ignores_etag():
     fake = FakeS3()
     ciphertext = b"already encrypted by another boundary"
     digest = hashlib.sha256(ciphertext).hexdigest()
-    stored = S3CiphertextTransport(config(), fake).store(tenant_id=TENANT, object_id=OBJECT, ciphertext=ciphertext, ciphertext_sha256=digest)
+    stored = S3CiphertextTransport(config(), fake).store(tenant_id=TENANT, object_id=OBJECT, publication_ref=PUBLICATION, ciphertext=ciphertext, ciphertext_sha256=digest)
     call = fake.calls[0]
     assert stored.sha256 == digest and stored.byte_count == len(ciphertext)
     assert call == {"Bucket": "anonflow-ciphertexts", "Key": stored.key, "Body": ciphertext,
                     "ContentLength": len(ciphertext), "ContentType": "application/octet-stream",
-                    "Metadata": {"anonflow-sha256": digest}, "ACL": "private", "IfNoneMatch": "*"}
+                    "Metadata": {"anonflow-publication-ref": PUBLICATION, "anonflow-sha256": digest}, "ACL": "private", "IfNoneMatch": "*"}
     assert TENANT not in stored.key and OBJECT not in stored.key
 
 
@@ -80,7 +81,7 @@ def test_conditional_conflicts_are_not_retried_or_replaced(status):
     ciphertext = b"ciphertext"
     fake = FakeS3(error=ConditionalError(status))
     with pytest.raises(ObjectAlreadyExistsError, match="already exists"):
-        S3CiphertextTransport(config(), fake).store(tenant_id=TENANT, object_id=OBJECT, ciphertext=ciphertext, ciphertext_sha256=hashlib.sha256(ciphertext).hexdigest())
+        S3CiphertextTransport(config(), fake).store(tenant_id=TENANT, object_id=OBJECT, publication_ref=PUBLICATION, ciphertext=ciphertext, ciphertext_sha256=hashlib.sha256(ciphertext).hexdigest())
     assert len(fake.calls) == 1
 
 
@@ -88,7 +89,7 @@ def test_conditional_conflicts_are_not_retried_or_replaced(status):
 def test_invalid_or_mismatched_ciphertext_never_reaches_sdk(ciphertext, digest):
     fake = FakeS3()
     with pytest.raises(ValueError):
-        S3CiphertextTransport(config(), fake).store(tenant_id=TENANT, object_id=OBJECT, ciphertext=ciphertext, ciphertext_sha256=digest)
+        S3CiphertextTransport(config(), fake).store(tenant_id=TENANT, object_id=OBJECT, publication_ref=PUBLICATION, ciphertext=ciphertext, ciphertext_sha256=digest)
     assert not fake.calls
 
 
@@ -101,19 +102,43 @@ def test_malformed_or_unbounded_responses_fail_closed(response):
     fake = FakeS3(response=response)
     ciphertext = b"ciphertext"
     with pytest.raises(CiphertextTransportError, match="unavailable"):
-        S3CiphertextTransport(config(), fake).store(tenant_id=TENANT, object_id=OBJECT, ciphertext=ciphertext, ciphertext_sha256=hashlib.sha256(ciphertext).hexdigest())
+        S3CiphertextTransport(config(), fake).store(tenant_id=TENANT, object_id=OBJECT, publication_ref=PUBLICATION, ciphertext=ciphertext, ciphertext_sha256=hashlib.sha256(ciphertext).hexdigest())
 
 
 def test_load_checks_declared_length_metadata_digest_and_closes_stream():
     ciphertext = b"encrypted payload"
     digest = hashlib.sha256(ciphertext).hexdigest()
     body = StreamingBody(ciphertext)
-    fake = FakeS3(response={"ContentLength": len(ciphertext), "Metadata": {"anonflow-sha256": digest},
+    fake = FakeS3(response={"ContentLength": len(ciphertext), "Metadata": {"anonflow-publication-ref": PUBLICATION, "anonflow-sha256": digest},
                             "Body": body, "ResponseMetadata": {"HTTPStatusCode": 200}})
-    loaded = S3CiphertextTransport(config(), fake).load(tenant_id=TENANT, object_id=OBJECT, ciphertext_sha256=digest)
+    loaded = S3CiphertextTransport(config(), fake).load(tenant_id=TENANT, object_id=OBJECT, publication_ref=PUBLICATION, ciphertext_sha256=digest)
     assert loaded.ciphertext == ciphertext and body.closed
     assert body.read_amount == config().max_ciphertext_bytes + 1
     assert fake.calls == [{"Bucket": "anonflow-ciphertexts", "Key": loaded.key}]
+
+
+def test_recover_requires_exact_publication_marker_and_rechecks_body_digest():
+    ciphertext = b"publication-bound-envelope"
+    digest = hashlib.sha256(ciphertext).hexdigest()
+    body = StreamingBody(ciphertext)
+    response = {"ContentLength": len(ciphertext),
+                "Metadata": {"anonflow-publication-ref": PUBLICATION, "anonflow-sha256": digest},
+                "Body": body, "ResponseMetadata": {"HTTPStatusCode": 200}}
+    recovered = S3CiphertextTransport(config(), FakeS3(response=response)).recover(
+        tenant_id=TENANT, object_id=OBJECT, publication_ref=PUBLICATION)
+    assert recovered.ciphertext == ciphertext and recovered.sha256 == digest and body.closed
+
+    wrong_marker = {**response, "Body": StreamingBody(ciphertext),
+                    "Metadata": {"anonflow-publication-ref": "publicationref:v1:" + "Q" * 43,
+                                 "anonflow-sha256": digest}}
+    with pytest.raises(CiphertextTransportError):
+        S3CiphertextTransport(config(), FakeS3(response=wrong_marker)).recover(
+            tenant_id=TENANT, object_id=OBJECT, publication_ref=PUBLICATION)
+
+    tampered = {**response, "Body": StreamingBody(b"changed"), "ContentLength": len(b"changed")}
+    with pytest.raises(CiphertextTransportError, match="integrity check failed"):
+        S3CiphertextTransport(config(), FakeS3(response=tampered)).recover(
+            tenant_id=TENANT, object_id=OBJECT, publication_ref=PUBLICATION)
 
 
 @pytest.mark.parametrize("response", [
@@ -124,7 +149,7 @@ def test_load_checks_declared_length_metadata_digest_and_closes_stream():
 def test_load_rejects_partial_invalid_metadata_or_short_length_and_closes_stream(response):
     body = response["Body"]
     with pytest.raises(CiphertextTransportError):
-        S3CiphertextTransport(config(), FakeS3(response=response)).load(tenant_id=TENANT, object_id=OBJECT, ciphertext_sha256="0" * 64)
+        S3CiphertextTransport(config(), FakeS3(response=response)).load(tenant_id=TENANT, object_id=OBJECT, publication_ref=PUBLICATION, ciphertext_sha256="0" * 64)
     assert body.closed
 
 

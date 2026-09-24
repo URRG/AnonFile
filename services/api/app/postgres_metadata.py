@@ -45,6 +45,7 @@ def _record_document(record: ControlPlaneMetadata) -> dict[str, object]:
     reference = None if encrypted is None else {
         "tenant_ref": encrypted.tenant_ref,
         "object_ref": encrypted.object_ref,
+        "publication_ref": encrypted.publication_ref,
         "key_ref": encrypted.key_ref,
         "ciphertext_digest": encrypted.ciphertext_digest,
         "ciphertext_size_bytes": encrypted.ciphertext_size_bytes,
@@ -77,7 +78,7 @@ def _decode_document(value: object, *, tenant_ref: str, record_id: str,
     encrypted = value["encrypted_object"]
     if encrypted is not None:
         if type(encrypted) is not dict or set(encrypted) != {
-                "tenant_ref", "object_ref", "key_ref", "ciphertext_digest",
+                "tenant_ref", "object_ref", "publication_ref", "key_ref", "ciphertext_digest",
                 "ciphertext_size_bytes", "encryption_algorithm"}:
             _fail()
         try:

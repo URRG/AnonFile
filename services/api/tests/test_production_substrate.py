@@ -11,6 +11,7 @@ from app.production_substrate import (ControlPlaneMetadata, EncryptedObjectRefer
 
 TENANT = "tenantref:v1:" + "A" * 43
 OBJECT = "objectref:v1:" + "B" * 43
+PUBLICATION = "publicationref:v1:" + "P" * 43
 RECORD = "metarecord:v1:" + "C" * 43
 OTHER_RECORD = "metarecord:v1:" + "D" * 43
 TX = "metatx:v1:" + "E" * 43
@@ -27,7 +28,7 @@ def fails(constructor, *args, **kwargs):
 
 
 def reference(**changes):
-    return EncryptedObjectReference(TENANT, OBJECT, "keyref:v1:production-data-key",
+    return EncryptedObjectReference(TENANT, OBJECT, PUBLICATION, "keyref:v1:production-data-key",
                                     "sha256:" + "a" * 64, 77, **changes)
 
 
@@ -50,7 +51,7 @@ def test_metadata_record_allows_only_opaque_encrypted_reference_and_safe_metadat
     item = record()
     assert item.encrypted_object.object_ref == OBJECT
     assert item.attributes["policy_digest"].startswith("sha256:")
-    fails(EncryptedObjectReference, TENANT, "s3://bucket/candidate", "keyref:v1:key", "sha256:" + "a" * 64, 1)
+    fails(EncryptedObjectReference, TENANT, "s3://bucket/candidate", PUBLICATION, "keyref:v1:key", "sha256:" + "a" * 64, 1)
     fails(lambda: record(encrypted_object=replace(reference(), tenant_ref="tenantref:v1:" + "Z" * 43)))
 
 
