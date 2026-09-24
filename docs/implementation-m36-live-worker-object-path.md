@@ -5,7 +5,7 @@ disposable, TLS-enabled services in CI: the pinned OpenBao 2.5.5 image and the
 pinned MinIO release already tested by M29 and M34. It does not modify the
 worker implementation or make a production deployment claim.
 
-The CI script generates and verifies private CAs/certificates, random masked
+The CI script generates and verifies trusted test certificates, random masked
 credentials, and two five-minute OpenBao tokens with no default policy. The
 full token is limited to metadata-read, plaintext-data-key, and decrypt paths
 for the one test key. The second token can read metadata but cannot decrypt.

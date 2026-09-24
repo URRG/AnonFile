@@ -15,7 +15,7 @@ import pytest
 from app.encrypted_object_store import EncryptedObjectStoreError
 from app.openbao_datakey import OpenBaoDataKeyConfig, OpenBaoDataKeyError, OpenBaoTransitDataKey
 from app.s3_ciphertext_transport import S3CiphertextTransport, S3CiphertextTransportConfig, opaque_object_key
-from app.worker_encrypted_objects import WorkerEncryptedObjects, WorkerEncryptedObjectsError
+from app.worker_encrypted_objects import WorkerEncryptedObjects
 
 
 pytestmark = pytest.mark.skipif(
@@ -86,7 +86,7 @@ def test_worker_object_path_against_live_openbao_and_s3():
     with pytest.raises(EncryptedObjectStoreError, match="^Encrypted object operation failed$"):
         worker.get(tenant_ref=OTHER_TENANT, reference=reference,
                    openbao_token=values["M36_OPENBAO_TOKEN"])
-    with pytest.raises(WorkerEncryptedObjectsError, match="^Worker encrypted object operation failed$"):
+    with pytest.raises(EncryptedObjectStoreError, match="^Encrypted object operation failed$"):
         worker.put(tenant_ref=TENANT, object_ref=OBJECT, key_ref=KEY_REF,
                    plaintext=b"m36 replacement marker", openbao_token=values["M36_OPENBAO_TOKEN"])
     assert worker.get(tenant_ref=TENANT, reference=reference,
@@ -99,7 +99,7 @@ def test_worker_object_path_against_live_openbao_and_s3():
         data_keys.unwrap(key_ref=KEY_REF, wrapped_key=envelope["wrapped_key"],
                          context=b"m36-wrong-associated-data", token=values["M36_OPENBAO_TOKEN"])
     # A separate exact policy token has metadata read but no decrypt capability.
-    with pytest.raises(WorkerEncryptedObjectsError, match="^Worker encrypted object operation failed$"):
+    with pytest.raises(EncryptedObjectStoreError, match="^Encrypted object operation failed$"):
         worker.get(tenant_ref=TENANT, reference=reference,
                    openbao_token=values["M36_OPENBAO_NO_DECRYPT_TOKEN"])
 
