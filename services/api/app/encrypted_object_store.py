@@ -44,7 +44,7 @@ class EncryptedObjectStoreError(ValueError):
 
 
 def _fail() -> None:
-    raise EncryptedObjectStoreError()
+    raise EncryptedObjectStoreError() from None
 
 
 def _opaque(value: object, expression: re.Pattern[str]) -> str:

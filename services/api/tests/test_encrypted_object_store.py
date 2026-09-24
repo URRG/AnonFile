@@ -2,6 +2,7 @@
 from dataclasses import replace
 from hashlib import sha256
 from os import urandom
+import traceback
 
 import pytest
 
@@ -140,6 +141,13 @@ def test_provider_and_transport_exceptions_do_not_leak_plaintext_or_key_material
     failed_put = EncryptedObjectStore(data_keys=BrokenKeys(), transport=Memory())
     failed_get = EncryptedObjectStore(data_keys=Keys(), transport=BrokenTransport())
     fails(lambda: failed_put.put(tenant_ref=TENANT, object_ref=OBJECT, key_ref=KEY, plaintext=b"private source"))
+    payload = b"private source"
+    try:
+        failed_put.put(tenant_ref=TENANT, object_ref=OBJECT, key_ref=KEY, plaintext=payload)
+    except EncryptedObjectStoreError as exc:
+        rendered = "".join(traceback.format_exception(exc))
+        assert "super-secret" not in rendered and "private source" not in rendered
+        assert exc.__suppress_context__
     reference = EncryptedObjectStore(data_keys=failed_get._data_keys, transport=Memory()).put(
         tenant_ref=TENANT, object_ref=OBJECT, key_ref=KEY, plaintext=b"private source")
     fails(lambda: failed_get.get(tenant_ref=TENANT, reference=reference))
