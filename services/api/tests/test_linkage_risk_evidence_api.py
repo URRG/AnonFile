@@ -46,8 +46,11 @@ def test_server_owned_reference_retains_only_signed_aggregate_evidence_without_l
     assert item["report"]["candidate_artifact_digest"] == run["candidate"]["artifact_digest"]
     assert item["report"]["linkage_key_commitment"].startswith("linkcfg:v1:")
     assert item["report"]["reference_commitment"].startswith("linkref:v1:")
-    for forbidden in ("synthetic@example.test", "code", "001", "development-linkage-a", "linksig:"):
+    for forbidden in ("synthetic@example.test", "code", "development-linkage-a", "linksig:"):
         assert forbidden not in response.text
+    # The source's short code must not appear as a JSON string value. A raw
+    # substring search for 001 also matches random digest/commitment bytes.
+    assert '"001"' not in response.text
     # This evidence is observational: it never changes candidate or release
     # lifecycle state and it cannot grant delivery or release authority.
     assert client.get(f"/processing-runs/{run['id']}", headers=auth()).json() == before
