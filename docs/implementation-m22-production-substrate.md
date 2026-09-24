@@ -7,8 +7,9 @@ production-route enablement.
 
 ## Contract guarantees
 
-- A `TenantMetadataTransaction` is explicitly one-tenant, bounded, has unique
-  record writes, and requires expected versions for optimistic concurrency.
+- A `TenantMetadataTransaction` is explicitly one-tenant and bounded. Its
+  writes are an exact immutable tuple with unique record ids; every write must
+  have an expected version for optimistic concurrency (`0` is create-only).
 - `ControlPlaneMetadata` copies and freezes a deliberately narrow metadata
   vocabulary: only named control/ciphertext SHA-256 commitments (not arbitrary
   `*_digest` fields such as a reversible `email_digest`), opaque

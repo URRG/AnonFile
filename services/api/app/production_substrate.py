@@ -180,7 +180,8 @@ class TenantMetadataTransaction:
     def __post_init__(self) -> None:
         _text(self.tenant_ref, _TENANT)
         _text(self.transaction_id, _TX)
-        if type(self.expected_versions) is not dict or not self.writes or len(self.writes) > 128:
+        if (type(self.expected_versions) is not dict or type(self.writes) is not tuple
+                or not self.writes or len(self.writes) > 128):
             _fail()
         versions: dict[str, int] = {}
         for record_id, version in self.expected_versions.items():
@@ -194,6 +195,11 @@ class TenantMetadataTransaction:
             if type(write) is not ControlPlaneMetadata or write.tenant_ref != self.tenant_ref or write.record_id in ids:
                 _fail()
             ids.add(write.record_id)
+        # Every write participates in optimistic concurrency.  ``0`` means a
+        # create-only write; omitting it would allow an adapter to make an
+        # unguarded overwrite despite the transaction claiming CAS semantics.
+        if set(versions) != ids:
+            _fail()
 
 
 @dataclass(frozen=True, slots=True)

@@ -81,9 +81,19 @@ def test_tenant_transaction_is_bounded_tenant_scoped_and_uses_explicit_versions(
     assert transaction.expected_versions == {RECORD: 1}
     fails(TenantMetadataTransaction, TENANT, TX, {RECORD: True}, (record(),))
     fails(TenantMetadataTransaction, TENANT, TX, {}, (record(), record(record_id=RECORD)))
+    fails(TenantMetadataTransaction, TENANT, TX, {}, (record(),))
     other_tenant = "tenantref:v1:" + "Z" * 43
     foreign = record(tenant_ref=other_tenant, encrypted_object=replace(reference(), tenant_ref=other_tenant))
-    fails(TenantMetadataTransaction, TENANT, TX, {}, (foreign,))
+    fails(TenantMetadataTransaction, TENANT, TX, {RECORD: 0}, (foreign,))
+
+
+def test_transaction_writes_are_an_immutable_exact_tuple_and_every_write_has_a_cas_version():
+    writes = [record()]
+    fails(TenantMetadataTransaction, TENANT, TX, {RECORD: 0}, writes)
+    transaction = TenantMetadataTransaction(TENANT, TX, {RECORD: 0}, tuple(writes))
+    writes.append(record(record_id=OTHER_RECORD))
+    assert tuple(item.record_id for item in transaction.writes) == (RECORD,)
+    fails(TenantMetadataTransaction, TENANT, TX, {RECORD: 0, OTHER_RECORD: 0}, (record(),))
 
 
 def test_worker_claim_is_fenced_bounded_and_records_reclaim_as_new_claim():
