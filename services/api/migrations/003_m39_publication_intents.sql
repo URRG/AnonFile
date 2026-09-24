@@ -42,12 +42,12 @@ CREATE TABLE IF NOT EXISTS anonflow_publication_intents (
     CHECK (document->>'policy_digest' ~ '^sha256:[0-9a-f]{64}$'),
     CHECK ((document->>'expected_version') ~ '^(0|[1-9][0-9]*)$'),
     CHECK (jsonb_typeof(document->'attributes') = 'object'),
-    CHECK (document->'attributes' - ARRAY['authorization_ref', 'release_case_ref', 'sequence'] = '{}'::jsonb),
-    CHECK (NOT (document->'attributes' ? 'authorization_ref')
+    CHECK ((document->'attributes') - ARRAY['authorization_ref', 'release_case_ref', 'sequence'] = '{}'::jsonb),
+    CHECK (NOT ((document->'attributes') ? 'authorization_ref')
            OR document->'attributes'->>'authorization_ref' ~ '^metarecord:v1:[A-Za-z0-9_-]{43}$'),
-    CHECK (NOT (document->'attributes' ? 'release_case_ref')
+    CHECK (NOT ((document->'attributes') ? 'release_case_ref')
            OR document->'attributes'->>'release_case_ref' ~ '^metarecord:v1:[A-Za-z0-9_-]{43}$'),
-    CHECK (NOT (document->'attributes' ? 'sequence')
+    CHECK (NOT ((document->'attributes') ? 'sequence')
            OR document->'attributes'->>'sequence' ~ '^[1-9][0-9]*$')
 );
 
