@@ -1,7 +1,9 @@
 """Adversarial tests for independently signed external audit receipts."""
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+import threading
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -108,4 +110,33 @@ def test_persisted_chain_is_reverified_before_it_can_be_used_as_a_parent(tmp_pat
     forged = replace(first, signature="external-audit-receipt-sig:v1:" + corrupted)
     store._connection.execute("UPDATE external_audit_receipts SET record=?", (__import__("json").dumps(forged.to_record()),))
     with pytest.raises(ExternalAuditReceiptError): store.head(TENANT, at=NOW)
+    store.close()
+
+
+def test_persisted_sql_index_columns_must_match_the_signed_receipt_record(tmp_path):
+    private, key, verifier = setup(); first = receipt(private, key)
+    store = ExternalAuditReceiptStore(tmp_path / "receipts.sqlite3", verifier)
+    store.accept(first, tenant_ref=TENANT, checkpoint_digest=CHECKPOINT_1, at=NOW)
+    store._connection.execute("UPDATE external_audit_receipts SET digest=?", ("sha256:" + "0" * 64,))
+    with pytest.raises(ExternalAuditReceiptError): store.head(TENANT, at=NOW)
+    store.close()
+
+
+def test_concurrent_admission_on_one_shared_store_has_one_atomic_winner(tmp_path):
+    private, key, verifier = setup(); first = receipt(private, key)
+    store = ExternalAuditReceiptStore(tmp_path / "receipts.sqlite3", verifier)
+    barrier = threading.Barrier(8)
+
+    def admit():
+        barrier.wait()
+        try:
+            return store.accept(first, tenant_ref=TENANT, checkpoint_digest=CHECKPOINT_1, at=NOW)
+        except ExternalAuditReceiptError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: admit(), range(8)))
+    assert results.count(first) == 1
+    assert results.count(None) == 7
+    assert store.head(TENANT, at=NOW) == first
     store.close()

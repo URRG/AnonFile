@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import threading
 from typing import Iterable
 
 from cryptography.exceptions import InvalidSignature
@@ -235,6 +236,10 @@ class ExternalAuditReceiptStore:
         if type(verifier) is not ExternalAuditReceiptVerifier:
             _fail()
         self._verifier = verifier
+        # ``check_same_thread=False`` is needed for a shared service object,
+        # but SQLite transactions remain connection-scoped rather than
+        # thread-scoped.  Serialize all connection access accordingly.
+        self._lock = threading.RLock()
         target = Path(path)
         if not target.name or target.is_symlink():
             _fail()
@@ -247,17 +252,24 @@ class ExternalAuditReceiptStore:
             os.chmod(target, 0o600)
 
     def close(self) -> None:
-        self._connection.close()
+        with self._lock:
+            self._connection.close()
 
     def _chain(self, tenant_ref: str, *, at: datetime) -> tuple[ExternalAuditReceipt, ...]:
         """Load and re-verify every persisted link before it becomes a parent."""
-        rows = self._connection.execute("SELECT record FROM external_audit_receipts WHERE tenant=? ORDER BY sequence", (tenant_ref,)).fetchall()
+        rows = self._connection.execute("SELECT tenant,sequence,digest,record FROM external_audit_receipts WHERE tenant=? ORDER BY sequence", (tenant_ref,)).fetchall()
         prior = None
         result = []
-        for (encoded,) in rows:
+        for row_tenant, row_sequence, row_digest, encoded in rows:
             try:
                 item = ExternalAuditReceipt.from_record(json.loads(encoded))
             except (TypeError, ValueError, UnicodeError, ExternalAuditReceiptError):
+                _fail()
+            # The signed JSON and its index columns are one integrity unit.
+            # Otherwise SQL-level tampering could alter ordering, tenant scope,
+            # or the advertised durable head without modifying a receipt blob.
+            if (row_tenant != item.tenant_ref or row_sequence != item.sequence
+                    or row_digest != item.digest):
                 _fail()
             if not self._verifier.verify(item, tenant_ref=tenant_ref, checkpoint_digest=item.checkpoint_digest,
                                          at=at, previous=prior):
@@ -269,26 +281,32 @@ class ExternalAuditReceiptStore:
     def head(self, tenant_ref: str, *, at: datetime | None = None) -> ExternalAuditReceipt | None:
         _match(tenant_ref, _TENANT)
         moment = _time(at) if at is not None else datetime.now(UTC).replace(microsecond=0)
-        chain = self._chain(tenant_ref, at=moment)
-        return chain[-1] if chain else None
+        with self._lock:
+            chain = self._chain(tenant_ref, at=moment)
+            return chain[-1] if chain else None
 
     def accept(self, receipt: object, *, tenant_ref: str, checkpoint_digest: str, at: datetime) -> ExternalAuditReceipt:
         _match(tenant_ref, _TENANT)
         _match(checkpoint_digest, _CHECKPOINT_DIGEST)
-        try:
-            self._connection.execute("BEGIN IMMEDIATE")
-            chain = self._chain(tenant_ref, at=_time(at))
-            previous = chain[-1] if chain else None
-            if not self._verifier.verify(receipt, tenant_ref=tenant_ref, checkpoint_digest=checkpoint_digest,
-                                         at=at, previous=previous):
-                _fail()
-            assert type(receipt) is ExternalAuditReceipt
-            encoded = _canonical(receipt.to_record())
-            self._connection.execute("INSERT INTO external_audit_receipts(tenant,sequence,digest,record) VALUES(?,?,?,?)", (tenant_ref, receipt.sequence, receipt.digest, encoded))
-            if self._connection.execute("SELECT changes()").fetchone()[0] != 1:
-                _fail()
-            self._connection.execute("COMMIT")
-            return receipt
-        except Exception:
-            self._connection.execute("ROLLBACK")
-            raise ExternalAuditReceiptError() from None
+        with self._lock:
+            started = False
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                started = True
+                chain = self._chain(tenant_ref, at=_time(at))
+                previous = chain[-1] if chain else None
+                if not self._verifier.verify(receipt, tenant_ref=tenant_ref, checkpoint_digest=checkpoint_digest,
+                                             at=at, previous=previous):
+                    _fail()
+                assert type(receipt) is ExternalAuditReceipt
+                encoded = _canonical(receipt.to_record())
+                self._connection.execute("INSERT INTO external_audit_receipts(tenant,sequence,digest,record) VALUES(?,?,?,?)", (tenant_ref, receipt.sequence, receipt.digest, encoded))
+                if self._connection.execute("SELECT changes()").fetchone()[0] != 1:
+                    _fail()
+                self._connection.execute("COMMIT")
+                started = False
+                return receipt
+            except Exception:
+                if started:
+                    self._connection.execute("ROLLBACK")
+                raise ExternalAuditReceiptError() from None
