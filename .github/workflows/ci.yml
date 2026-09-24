@@ -5,6 +5,22 @@ permissions:
 jobs:
   api:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: anonflow_test
+          POSTGRES_USER: anonflow
+          POSTGRES_PASSWORD: anonflow_test_only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U anonflow -d anonflow_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ANONFLOW_POSTGRES_TEST_DSN: postgresql://anonflow:anonflow_test_only@localhost:5432/anonflow_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
