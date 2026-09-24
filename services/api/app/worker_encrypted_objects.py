@@ -12,11 +12,12 @@ from hashlib import sha256
 import re
 
 from app.encrypted_object_store import (DataKeyProvider, EncryptedByteTransport,
-                                        EncryptedObjectStore, EncryptedObjectStoreError,
+                                        EncryptedObjectAlreadyExistsError, EncryptedObjectStore,
+                                        EncryptedObjectStoreError,
                                         GeneratedDataKey)
 from app.openbao_datakey import OpenBaoTransitDataKey, TransitDataKey
 from app.production_substrate import EncryptedObjectReference
-from app.s3_ciphertext_transport import (FetchedCiphertext, S3CiphertextTransport,
+from app.s3_ciphertext_transport import (FetchedCiphertext, ObjectAlreadyExistsError, S3CiphertextTransport,
                                          StoredCiphertext, opaque_object_key)
 
 
@@ -96,26 +97,29 @@ class _S3EnvelopeTransport(EncryptedByteTransport):
             _fail()
         self._ciphertexts = ciphertexts
 
-    def put(self, *, tenant_ref: str, object_ref: str, envelope: bytes, ciphertext_digest: str) -> None:
+    def put(self, *, tenant_ref: str, object_ref: str, publication_ref: str, envelope: bytes, ciphertext_digest: str) -> None:
         digest = _raw_digest(ciphertext_digest)
         if type(envelope) is not bytes or sha256(envelope).hexdigest() != digest:
             _fail()
         try:
-            stored = self._ciphertexts.store(tenant_id=tenant_ref, object_id=object_ref,
+            stored = self._ciphertexts.store(tenant_id=tenant_ref, object_id=object_ref, publication_ref=publication_ref,
                                              ciphertext=envelope, ciphertext_sha256=digest)
             expected_key = opaque_object_key(self._ciphertexts._config, tenant_ref, object_ref)
             if (type(stored) is not StoredCiphertext or stored.key != expected_key
-                    or stored.sha256 != digest or stored.byte_count != len(envelope)):
+                    or stored.sha256 != digest or stored.byte_count != len(envelope)
+                    or stored.publication_ref != publication_ref):
                 _fail()
+        except ObjectAlreadyExistsError:
+            raise EncryptedObjectAlreadyExistsError() from None
         except WorkerEncryptedObjectsError:
             raise
         except Exception:
             _fail()
 
-    def get(self, *, tenant_ref: str, object_ref: str, ciphertext_digest: str) -> bytes:
+    def get(self, *, tenant_ref: str, object_ref: str, publication_ref: str, ciphertext_digest: str) -> bytes:
         digest = _raw_digest(ciphertext_digest)
         try:
-            fetched = self._ciphertexts.load(tenant_id=tenant_ref, object_id=object_ref,
+            fetched = self._ciphertexts.load(tenant_id=tenant_ref, object_id=object_ref, publication_ref=publication_ref,
                                              ciphertext_sha256=digest)
             expected_key = opaque_object_key(self._ciphertexts._config, tenant_ref, object_ref)
             if (type(fetched) is not FetchedCiphertext or fetched.key != expected_key
@@ -123,6 +127,21 @@ class _S3EnvelopeTransport(EncryptedByteTransport):
                     or sha256(fetched.ciphertext).hexdigest() != digest):
                 _fail()
             return fetched.ciphertext
+        except WorkerEncryptedObjectsError:
+            raise
+        except Exception:
+            _fail()
+
+    def recover(self, *, tenant_ref: str, object_ref: str, publication_ref: str) -> tuple[bytes, str]:
+        try:
+            fetched = self._ciphertexts.recover(tenant_id=tenant_ref, object_id=object_ref,
+                                                publication_ref=publication_ref)
+            expected_key = opaque_object_key(self._ciphertexts._config, tenant_ref, object_ref)
+            if (type(fetched) is not FetchedCiphertext or fetched.key != expected_key
+                    or fetched.publication_ref != publication_ref or type(fetched.ciphertext) is not bytes
+                    or fetched.sha256 != sha256(fetched.ciphertext).hexdigest()):
+                _fail()
+            return fetched.ciphertext, "sha256:" + fetched.sha256
         except WorkerEncryptedObjectsError:
             raise
         except Exception:
@@ -152,15 +171,19 @@ class WorkerEncryptedObjects:
         self._openbao = openbao
         self._ciphertexts = ciphertexts
 
-    def put(self, *, tenant_ref: object, object_ref: object, key_ref: object,
+    def put(self, *, tenant_ref: object, object_ref: object, publication_ref: object, key_ref: object,
             plaintext: object, openbao_token: object) -> EncryptedObjectReference:
         try:
             # Keep the bearer token only in these active call frames.  In
             # particular, do not expose a token-bound store to a caller.
             store = EncryptedObjectStore(data_keys=_ScopedOpenBaoDataKeys(self._openbao, openbao_token),
                                          transport=_S3EnvelopeTransport(self._ciphertexts))
-            return store.put(tenant_ref=tenant_ref, object_ref=object_ref, key_ref=key_ref,
-                             plaintext=plaintext)
+            try:
+                return store.put(tenant_ref=tenant_ref, object_ref=object_ref, publication_ref=publication_ref,
+                                 key_ref=key_ref, plaintext=plaintext)
+            except EncryptedObjectAlreadyExistsError:
+                return store.recover(tenant_ref=tenant_ref, object_ref=object_ref,
+                                     publication_ref=publication_ref, key_ref=key_ref)
         except (WorkerEncryptedObjectsError, EncryptedObjectStoreError):
             raise
         except Exception:
