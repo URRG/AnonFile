@@ -1472,17 +1472,21 @@ class DevelopmentStore:
                 approvals=[ReleaseAuthorizationApproval.from_record(row["payload"]["approval"]) for row in self.controls["release_authorization_approval"].values() if row["tenant"]==tenant and row["payload"].get("request_id")==request.request_id]
                 roles={x.approval_role for x in approvals}
                 if (len(approvals)!=2 or roles!={"privacy_reviewer","release_authorizer"} or len({x.approver_subject for x in approvals})!=2
-                        or any(x.request_digest!=request.digest or x.scope_digest!=request.scope_digest or x.case_id!=case.case_id or x.processing_run_id!=run_id or not authorization_authority.verify_approval(x,at=moment) for x in approvals)): raise ValueError
+                        or any(x.request_digest!=request.digest or x.scope_digest!=request.scope_digest or x.case_id!=case.case_id or x.processing_run_id!=run_id or x.approved_at<request.issued_at or x.approved_at>moment or x.expires_at>request.expires_at or x.expires_at>authorization_authority.expires_at or not authorization_authority.verify_approval(x,at=moment) for x in approvals)): raise ValueError
+                # Replays are keyed by request+tenant+key, never by the wall
+                # clock.  Verify the original sealed record against *current*
+                # dependencies below; only then return it unchanged.
+                prior=next((row for row in self.controls["delivery_readiness"].values() if row["tenant"]==tenant and row["payload"].get("request_id")==request.request_id and row["payload"].get("idempotency_key")==payload["idempotency_key"]),None)
+                replay=prior is not None
+                if replay:
+                    data=detached(prior); payload=data["payload"]
                 item=DeliveryReadiness.from_record(payload["readiness"])
                 expires=min(case.expires_at,decision.expires_at,request.expires_at,authority.expires_at,*[x.expires_at for x in approvals])
                 valid=(item.readiness_id==data["id"] and item.tenant==tenant and item.request_id==request.request_id and item.request_digest==request.digest and item.case_id==case.case_id and item.case_digest==case.digest and item.privacy_decision_id==decision.decision_id and item.privacy_decision_digest==decision.digest and item.scope_digest==request.scope_digest and item.processing_run_id==run_id and item.candidate_artifact_digest==case.binding.candidate_artifact_digest and item.rights_digest==case.binding.rights_digest and item.contract_digest==case.binding.contract_digest and item.recipient_commitment==case.binding.recipient_commitment and item.purpose_code==case.binding.purpose_code and item.approval_digests==tuple(sorted(x.digest for x in approvals)) and item.expires_at==expires and item.expires_at.timestamp()==data["expires_at"] and authority.verifies(item,moment))
             except (KeyError,TypeError,ValueError,DeliveryReadinessError,ReleaseAuthorizationError,PrivacyDecisionError,ReleaseCaseError,HTTPException): valid=False
             if not valid: raise unavailable()
-            for old in self.controls["delivery_readiness"].values():
-                p=old["payload"]
-                if old["tenant"]==tenant and p.get("request_id")==request.request_id and p.get("idempotency_key")==payload["idempotency_key"]:
-                    if old["id"]!=data["id"] or p.get("readiness",{}).get("digest")!=item.digest: raise HTTPException(409,"Idempotency key conflicts with a different readiness record")
-                    return detached(old),True
+            if replay:
+                return detached(data),True
             if data["id"] in self.controls["delivery_readiness"] or self._used_identifier(data["id"],"delivery_readiness"): raise HTTPException(409,"Object already exists")
             self._append_event(tenant,"delivery_readiness.created",data["id"],actor,record=data);self.controls["delivery_readiness"][data["id"]]=data
             return detached(data),False

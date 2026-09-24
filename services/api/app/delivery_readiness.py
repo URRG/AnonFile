@@ -13,7 +13,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-_ID=re.compile(r"delivery-readiness:v1:[A-Za-z0-9_-]{43}\Z"); _SIG=re.compile(r"delivery-readiness-sig:v1:[A-Za-z0-9_-]{86}\Z"); _D=re.compile(r"sha256:[0-9a-f]{64}\Z"); _I=re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}\Z"); _CASE=re.compile(r"release-case:v1:[A-Za-z0-9_-]{43}\Z"); _DECISION=re.compile(r"privacy-decision:v1:[A-Za-z0-9_-]{43}\Z"); _REQUEST=re.compile(r"release-authorization-request:v1:[A-Za-z0-9_-]{43}\Z")
+_ID=re.compile(r"delivery-readiness:v1:[A-Za-z0-9_-]{43}\Z"); _SIG=re.compile(r"delivery-readiness-sig:v1:[A-Za-z0-9_-]{86}\Z"); _D=re.compile(r"sha256:[0-9a-f]{64}\Z"); _I=re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}\Z"); _CASE=re.compile(r"release-case:v1:[A-Za-z0-9_-]{43}\Z"); _DECISION=re.compile(r"privacy-decision:v1:[A-Za-z0-9_-]{43}\Z"); _REQUEST=re.compile(r"release-authorization-request:v1:[A-Za-z0-9_-]{43}\Z"); _RECIPIENT=re.compile(r"recipient-commitment:v1:[A-Za-z0-9_-]{43}\Z")
 class DeliveryReadinessError(ValueError):
     def __init__(self): super().__init__("Invalid delivery readiness input")
 def _fail(): raise DeliveryReadinessError()
@@ -47,7 +47,7 @@ class DeliveryReadiness:
             if type(getattr(self,n)) is not str or not _D.fullmatch(getattr(self,n)):_fail()
         if type(self.rights_digest) is not str or not re.fullmatch(r"[0-9a-f]{64}",self.rights_digest):_fail()
         if type(self.case_id) is not str or type(self.privacy_decision_id) is not str or type(self.request_id) is not str or not _CASE.fullmatch(self.case_id) or not _DECISION.fullmatch(self.privacy_decision_id) or not _REQUEST.fullmatch(self.request_id):_fail()
-        if type(self.recipient_commitment) is not str or not self.recipient_commitment.startswith("recipient-commitment:v1:"):_fail()
+        if type(self.recipient_commitment) is not str or not _RECIPIENT.fullmatch(self.recipient_commitment):_fail()
         if type(self.approval_digests) is not tuple or len(self.approval_digests)!=2 or len(set(self.approval_digests))!=2 or any(type(x) is not str or not _D.fullmatch(x) for x in self.approval_digests):_fail()
         object.__setattr__(self,"approval_digests",tuple(sorted(self.approval_digests)));object.__setattr__(self,"assessed_at",_time(self.assessed_at));object.__setattr__(self,"expires_at",_time(self.expires_at))
         if self.expires_at<=self.assessed_at or self.posture!="DELIVERY_READINESS_ONLY" or type(self.signature) is not str or not _SIG.fullmatch(self.signature):_fail()
@@ -71,7 +71,8 @@ class DeliveryReadinessAuthority:
     tenant:str; issuer_key_id:str; expires_at:datetime; private_key_b64:str=field(repr=False); _key:Ed25519PrivateKey=field(init=False,repr=False)
     def __post_init__(self):
         t,k,e,key=_id(self.tenant),_id(self.issuer_key_id),_time(self.expires_at),_key(self.private_key_b64)
-        if e<=datetime.now(UTC).replace(microsecond=0):_fail()
+        current=datetime.now(UTC).replace(microsecond=0)
+        if e<=current or (e-current).total_seconds()>366*24*3600:_fail()
         object.__setattr__(self,"tenant",t);object.__setattr__(self,"issuer_key_id",k);object.__setattr__(self,"expires_at",e);object.__setattr__(self,"_key",key)
     def active(self,at):
         try:return _time(at)<self.expires_at
@@ -82,21 +83,28 @@ class DeliveryReadinessAuthority:
         return "delivery-readiness:v1:"+base64.urlsafe_b64encode(hmac.new(raw,b"m21-readiness-id-v1:\0"+_canon({"request_id":request_id,"key":key}),hashlib.sha256).digest()).decode().rstrip("=")
     def issue(self,**values):
         at,expiry=_time(values.pop("assessed_at")),_time(values.pop("expires_at"))
-        if not self.active(at) or expiry>self.expires_at:_fail()
+        if at>datetime.now(UTC).replace(microsecond=0) or not self.active(at) or expiry>self.expires_at:_fail()
         blank="delivery-readiness-sig:v1:"+"A"*86
         item=DeliveryReadiness(tenant=self.tenant,issuer_key_id=self.issuer_key_id,assessed_at=at,expires_at=expiry,signature=blank,**values)
         sig="delivery-readiness-sig:v1:"+base64.urlsafe_b64encode(self._key.sign(b"delivery-readiness-v1:"+_canon(item.canonical()))).decode().rstrip("=")
         return DeliveryReadiness(tenant=self.tenant,issuer_key_id=self.issuer_key_id,assessed_at=at,expires_at=expiry,signature=sig,**values)
     def verifies(self,item,at):
         try:
-            if type(item) is not DeliveryReadiness or item.tenant!=self.tenant or item.issuer_key_id!=self.issuer_key_id or not self.active(at) or item.expires_at<=_time(at):return False
+            if type(item) is not DeliveryReadiness or item.tenant!=self.tenant or item.issuer_key_id!=self.issuer_key_id or not self.active(at) or item.assessed_at>_time(at) or item.expires_at<=_time(at) or item.expires_at>self.expires_at:return False
             self._key.public_key().verify(base64.urlsafe_b64decode(item.signature.split(":",2)[2]+"=="),b"delivery-readiness-v1:"+_canon(item.canonical()));return True
         except (InvalidSignature,ValueError,UnicodeError,DeliveryReadinessError):return False
 def load_delivery_readiness_authorities():
     raw=os.getenv("ANONFLOW_DELIVERY_READINESS_AUTHORITIES","")
     if not raw:return ()
+    if len(raw.encode("utf-8"))>65536:_fail()
     try:
-        values=json.loads(raw); out=[]
+        def unique(pairs):
+            result={}
+            for key,value in pairs:
+                if key in result:raise ValueError
+                result[key]=value
+            return result
+        values=json.loads(raw,object_pairs_hook=unique,parse_constant=lambda _:(_ for _ in ()).throw(ValueError())); out=[]
         if type(values) is not list or not values or len(values)>64:_fail()
         for x in values:
             if type(x) is not dict or set(x)!={"tenant","issuer_key_id","expires_at","private_key"}:_fail()

@@ -6,9 +6,10 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from app.delivery_readiness import DeliveryReadiness, DeliveryReadinessAuthority, DeliveryReadinessError
+from app.delivery_readiness import (DeliveryReadiness, DeliveryReadinessAuthority,
+    DeliveryReadinessError, load_delivery_readiness_authorities)
 
-NOW=datetime(2026,9,24,12,0,tzinfo=UTC)
+NOW=datetime.now(UTC).replace(microsecond=0)
 def signer():
     key=Ed25519PrivateKey.from_private_bytes(b"m"*32)
     raw=key.private_bytes(serialization.Encoding.Raw,serialization.PrivateFormat.Raw,serialization.NoEncryption())
@@ -29,8 +30,15 @@ def test_tampering_and_staleness_fail_closed():
     assert not authority.verifies(item,item.expires_at)
     forged=item.to_record(); forged["approval_digests"]=["sha256:"+"9"*64,"sha256:"+"3"*64]
     with pytest.raises(DeliveryReadinessError): DeliveryReadiness.from_record(forged)
+    assert not authority.verifies(replace(item,assessed_at=NOW+timedelta(seconds=1)),NOW)
 
 def test_idempotency_identifier_is_scoped_to_request_and_key():
     authority=signer()
     assert authority.readiness_id("release-authorization-request:v1:"+"A"*43,"one") != authority.readiness_id("release-authorization-request:v1:"+"A"*43,"two")
     with pytest.raises(DeliveryReadinessError): authority.readiness_id("wrong","key")
+
+def test_authority_config_rejects_duplicate_keys_and_non_finite_values(monkeypatch):
+    monkeypatch.setenv("ANONFLOW_DELIVERY_READINESS_AUTHORITIES", '[{"tenant":"tenant-a","tenant":"tenant-b"}]')
+    with pytest.raises(DeliveryReadinessError): load_delivery_readiness_authorities()
+    monkeypatch.setenv("ANONFLOW_DELIVERY_READINESS_AUTHORITIES", '[NaN]')
+    with pytest.raises(DeliveryReadinessError): load_delivery_readiness_authorities()
