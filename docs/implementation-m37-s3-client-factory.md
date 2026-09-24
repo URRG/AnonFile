@@ -36,3 +36,7 @@ server and CA configuration end to end.
 The implementation follows the documented [`Session.client`](https://docs.aws.amazon.com/boto3/latest/reference/core/session.html)
 arguments and botocore [`Config`](https://botocore.amazonaws.com/v1/documentation/api/latest/reference/config.html)
 for retries, timeouts, S3 addressing and signature behavior.
+
+`boto3==1.37.38` is a runtime dependency. M34's disposable TLS integration
+test constructs its application transport through this factory; its separate
+raw client remains solely for test-only bucket setup and privileged tampering.

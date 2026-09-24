@@ -16,9 +16,9 @@ import pytest
 from app.s3_ciphertext_transport import (
     CiphertextTransportError,
     ObjectAlreadyExistsError,
-    S3CiphertextTransport,
-    S3CiphertextTransportConfig,
 )
+from app.s3_client_factory import (S3ClientFactoryConfig, S3StaticCredentials,
+                                   build_s3_ciphertext_transport)
 
 
 pytestmark = pytest.mark.skipif(
@@ -34,7 +34,7 @@ RACING_OBJECT = "objectref:v1:" + "E" * 43
 BUCKET = "m34-ciphertext-ci"
 
 
-def _client():
+def _required():
     required = {
         name: os.environ[name]
         for name in (
@@ -44,6 +44,11 @@ def _client():
             "S3_CIPHERTEXT_INTEGRATION_SECRET_KEY",
         )
     }
+    return required
+
+
+def _privileged_client():
+    required = _required()
     return boto3.client(
         "s3",
         endpoint_url=required["S3_CIPHERTEXT_INTEGRATION_ENDPOINT"],
@@ -55,17 +60,26 @@ def _client():
     )
 
 
-def _transport(client):
-    return S3CiphertextTransport(
-        S3CiphertextTransportConfig(endpoint_url=os.environ["S3_CIPHERTEXT_INTEGRATION_ENDPOINT"], bucket=BUCKET),
-        client,
+def _transport():
+    required = _required()
+    return build_s3_ciphertext_transport(
+        S3ClientFactoryConfig(
+            endpoint_url=required["S3_CIPHERTEXT_INTEGRATION_ENDPOINT"],
+            bucket=BUCKET,
+            region_name="us-east-1",
+            ca_bundle=required["S3_CIPHERTEXT_INTEGRATION_CA_FILE"],
+            credentials=S3StaticCredentials(
+                required["S3_CIPHERTEXT_INTEGRATION_ACCESS_KEY"],
+                required["S3_CIPHERTEXT_INTEGRATION_SECRET_KEY"],
+            ),
+        )
     )
 
 
 def test_s3_ciphertext_transport_against_pinned_server():
-    client = _client()
+    client = _privileged_client()
     client.create_bucket(Bucket=BUCKET)
-    transport = _transport(client)
+    transport = _transport()
     ciphertext = b"m34-ci-ciphertext-one"
     digest = hashlib.sha256(ciphertext).hexdigest()
 
@@ -83,7 +97,7 @@ def test_s3_ciphertext_transport_against_pinned_server():
 
     def create_once():
         try:
-            _transport(_client()).store(tenant_id=TENANT, object_id=RACING_OBJECT, ciphertext=race_bytes, ciphertext_sha256=race_digest)
+            _transport().store(tenant_id=TENANT, object_id=RACING_OBJECT, ciphertext=race_bytes, ciphertext_sha256=race_digest)
             return "stored"
         except ObjectAlreadyExistsError:
             return "exists"
