@@ -14,10 +14,43 @@ from app.postgres_publication_finalizer import (PostgresPublicationFinalizationE
 from app.postgres_publication_intents import PostgresPublicationIntents, PublicationIntent
 from app.postgres_worker_jobs import PostgresLeasedWorkerJobs
 from app.production_substrate import ControlPlaneMetadata, EncryptedObjectReference, TenantMetadataTransaction
+from app.production_substrate import LeasedWorkerClaim
+from datetime import UTC, datetime, timedelta
+from app.worker_encrypted_objects import WorkerEncryptedObjects
+import traceback
 
 
 def opaque(prefix: str) -> str: return prefix + secrets.token_urlsafe(32)
 def digest() -> str: return "sha256:" + secrets.token_hex(32)
+
+
+def test_finalizer_rejects_unverified_reference_before_opening_a_connection(monkeypatch):
+    tenant, publication, object_ref = opaque("tenantref:v1:"), opaque("publicationref:v1:"), opaque("objectref:v1:")
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    claim = LeasedWorkerClaim(tenant, opaque("workref:v1:"), opaque("workerclaim:v1:"),
+                              opaque("workerref:v1:"), 1, 1, now, now + timedelta(seconds=10))
+    authorized = EncryptedObjectReference(tenant, object_ref, publication, "keyref:v1:verify", digest(), 1)
+    opened = []
+    objects = object.__new__(WorkerEncryptedObjects)
+    monkeypatch.setattr(WorkerEncryptedObjects, "recover", lambda *_args, **_kwargs: authorized)
+    finalizer = PostgresPublicationFinalizer(lambda: opened.append(True), objects)
+    fabricated = EncryptedObjectReference(tenant, object_ref, publication, "keyref:v1:verify", digest(), 1)
+    with pytest.raises(PostgresPublicationFinalizationError):
+        finalizer.finalize(claim=claim, reference=fabricated, openbao_token="test-token")
+    assert opened == []
+
+
+def test_finalizer_suppresses_recovery_exception_context(monkeypatch):
+    tenant, publication, object_ref = opaque("tenantref:v1:"), opaque("publicationref:v1:"), opaque("objectref:v1:")
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    claim = LeasedWorkerClaim(tenant, opaque("workref:v1:"), opaque("workerclaim:v1:"), opaque("workerref:v1:"), 1, 1, now, now + timedelta(seconds=10))
+    reference = EncryptedObjectReference(tenant, object_ref, publication, "keyref:v1:verify", digest(), 1)
+    objects = object.__new__(WorkerEncryptedObjects)
+    def bad(*_args, **_kwargs): raise RuntimeError("openbao-token=secret-marker")
+    monkeypatch.setattr(WorkerEncryptedObjects, "recover", bad)
+    with pytest.raises(PostgresPublicationFinalizationError) as error:
+        PostgresPublicationFinalizer(lambda: None, objects).finalize(claim=claim, reference=reference, openbao_token="test-token")
+    assert "secret-marker" not in "".join(traceback.format_exception(error.type, error.value, error.tb))
 
 
 def test_postgresql_finalization_is_fenced_atomic_and_idempotent_when_configured():
@@ -42,9 +75,14 @@ def test_postgresql_finalization_is_fenced_atomic_and_idempotent_when_configured
     assert jobs.enqueue(tenant, work)
     claim = jobs.claim(tenant, opaque("workerref:v1:"), lease_seconds=30)
     reference = EncryptedObjectReference(tenant, object_ref, publication, key, digest(), 99)
-    finalizer = PostgresPublicationFinalizer(connect, lambda value: value)
-    assert finalizer.finalize(claim=claim, reference=reference).already_finalized is False
-    assert finalizer.finalize(claim=claim, reference=reference).already_finalized is True
+    # The service test is CI-gated; the live M36 composition supplies this
+    # concrete worker boundary in deployment wiring.
+    objects = object.__new__(WorkerEncryptedObjects)
+    monkeypatch = pytest.MonkeyPatch(); monkeypatch.setattr(WorkerEncryptedObjects, "recover", lambda *_a, **_k: reference)
+    finalizer = PostgresPublicationFinalizer(connect, objects)
+    assert finalizer.finalize(claim=claim, reference=reference, openbao_token="test-token").already_finalized is False
+    assert finalizer.finalize(claim=claim, reference=reference, openbao_token="test-token").already_finalized is True
+    monkeypatch.undo()
     assert metadata.read(tenant, target).version == 2
     assert jobs.acknowledge(claim) is False
     with pytest.raises(PostgresPublicationFinalizationError):
