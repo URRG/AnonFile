@@ -109,8 +109,12 @@ def test_postgres_cross_tenant_and_terminal_fence(postgres_authority):
     authority = PostgresTenantIdentityAuthority(lambda: psycopg.connect(dsn, autocommit=True))
     item = identity(app="tenant-live-" + secrets.token_hex(8), tenant=opaque("tenantref:v1:"))
     authority.create(item)
-    with pytest.raises(PostgresTenantIdentityError): authority.create(identity("tenant-b"))
-    with pytest.raises(PostgresTenantIdentityError): authority.fence(application_tenant="tenant-a",tenant_ref=OTHER,expected_generation=0)
+    with pytest.raises(PostgresTenantIdentityError):
+        authority.create(identity(app="tenant-other-" + secrets.token_hex(8),
+                                  tenant=item.tenant_ref))
+    with pytest.raises(PostgresTenantIdentityError):
+        authority.fence(application_tenant=item.application_tenant,
+                        tenant_ref=OTHER, expected_generation=0)
     authority.terminal(application_tenant=item.application_tenant, tenant_ref=item.tenant_ref,
                        expected_generation=0, state="QUARANTINED", event_ref=opaque("tenantfence:v1:"))
     with pytest.raises(PostgresTenantIdentityError):
