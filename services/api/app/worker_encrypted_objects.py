@@ -9,6 +9,7 @@ leaves this boundary.
 from __future__ import annotations
 
 from hashlib import sha256
+from hmac import compare_digest
 import re
 
 from app.encrypted_object_store import (DataKeyProvider, EncryptedByteTransport,
@@ -178,16 +179,49 @@ class WorkerEncryptedObjects:
             # particular, do not expose a token-bound store to a caller.
             store = EncryptedObjectStore(data_keys=_ScopedOpenBaoDataKeys(self._openbao, openbao_token),
                                          transport=_S3EnvelopeTransport(self._ciphertexts))
-            try:
-                return store.put(tenant_ref=tenant_ref, object_ref=object_ref, publication_ref=publication_ref,
-                                 key_ref=key_ref, plaintext=plaintext)
-            except EncryptedObjectAlreadyExistsError:
-                return store.recover(tenant_ref=tenant_ref, object_ref=object_ref,
-                                     publication_ref=publication_ref, key_ref=key_ref)
+            return store.put(tenant_ref=tenant_ref, object_ref=object_ref, publication_ref=publication_ref,
+                             key_ref=key_ref, plaintext=plaintext)
         except (WorkerEncryptedObjectsError, EncryptedObjectStoreError):
             raise
         except Exception:
             _fail()
+
+    def recover(self, *, tenant_ref: object, object_ref: object, publication_ref: object,
+                key_ref: object, openbao_token: object) -> EncryptedObjectReference:
+        try:
+            store = EncryptedObjectStore(data_keys=_ScopedOpenBaoDataKeys(self._openbao, openbao_token),
+                                         transport=_S3EnvelopeTransport(self._ciphertexts))
+            return store.recover(tenant_ref=tenant_ref, object_ref=object_ref,
+                                 publication_ref=publication_ref, key_ref=key_ref)
+        except (WorkerEncryptedObjectsError, EncryptedObjectStoreError):
+            raise
+        except Exception:
+            _fail()
+
+    def put_or_recover(self, *, tenant_ref: object, object_ref: object, publication_ref: object,
+                       key_ref: object, plaintext: object, openbao_token: object) -> EncryptedObjectReference:
+        """Create once, or recover only the same pre-authorized publication.
+
+        Callers must persist an immutable publication intent before invoking
+        this method; M39 supplies that protocol. Ordinary ``put`` deliberately
+        reports a duplicate instead of silently adopting it.
+        """
+        try:
+            return self.put(tenant_ref=tenant_ref, object_ref=object_ref, publication_ref=publication_ref,
+                            key_ref=key_ref, plaintext=plaintext, openbao_token=openbao_token)
+        except EncryptedObjectAlreadyExistsError:
+            reference = self.recover(tenant_ref=tenant_ref, object_ref=object_ref,
+                                     publication_ref=publication_ref, key_ref=key_ref,
+                                     openbao_token=openbao_token)
+            # A publication marker proves that this is the intended durable
+            # object slot, not that a newly supplied retry payload is equal.
+            # Authenticate the recovered bytes before accepting a retry with a
+            # plaintext argument. Explicit ``recover`` has no plaintext and is
+            # reserved for M39's immutable, durable publication intent.
+            recovered = self.get(tenant_ref=tenant_ref, reference=reference, openbao_token=openbao_token)
+            if type(plaintext) is not bytes or not compare_digest(recovered, plaintext):
+                _fail()
+            return reference
 
     def get(self, *, tenant_ref: object, reference: object, openbao_token: object) -> bytes:
         try:

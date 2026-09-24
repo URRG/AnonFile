@@ -23,9 +23,11 @@ storage is complete.
   permitted key shape:
   `anonflow-ciphertext-v1/<tenant-sha256>/<object-sha256>`. They cannot provide
   a path, bucket, prefix, ACL, or delivery URL.
-- `store` accepts bytes called `ciphertext`, checks a caller-provided lowercase
-  SHA-256 against those exact bytes, adds that digest as metadata, and enforces
-  a 64 MiB ceiling. It never receives plaintext or cryptographic keys.
+- `store` accepts bytes called `ciphertext`, a mandatory opaque publication
+  reference, checks a caller-provided lowercase SHA-256 against those exact
+  bytes, adds both values as fixed metadata, and enforces a 64 MiB ceiling.
+  The publication reference is not a path or URL. It never receives plaintext
+  or cryptographic keys.
 - It issues one `PutObject` with `IfNoneMatch="*"` and `ACL="private"`.
   A 409/412 or the corresponding SDK condition codes is an existing-object
   failure. There is no HEAD-then-PUT or overwrite fallback.
@@ -37,6 +39,11 @@ storage is complete.
   at most the configured maximum plus one byte, verifies the bytes again, and
   closes the SDK streaming body on every path. Partial (206), malformed,
   oversized, short, or digest-mismatched responses fail closed.
+- `recover` is not a listing primitive. It requests that same derived key only
+  for a caller-supplied publication reference, requires exact publication and
+  digest metadata, then recomputes the digest over the bounded body. M38's
+  enclosing envelope boundary additionally validates canonical structure,
+  OpenBao associated data, and AES-GCM before accepting recovery.
 
 ## Operational requirements and limitations
 

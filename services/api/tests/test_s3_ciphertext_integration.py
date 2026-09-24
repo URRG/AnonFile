@@ -31,6 +31,7 @@ OTHER_TENANT = "tenantref:v1:" + "C" * 43
 OBJECT = "objectref:v1:" + "B" * 43
 OTHER_OBJECT = "objectref:v1:" + "D" * 43
 RACING_OBJECT = "objectref:v1:" + "E" * 43
+PUBLICATION = "publicationref:v1:" + "P" * 43
 BUCKET = "m34-ciphertext-ci"
 
 
@@ -83,13 +84,13 @@ def test_s3_ciphertext_transport_against_pinned_server():
     ciphertext = b"m34-ci-ciphertext-one"
     digest = hashlib.sha256(ciphertext).hexdigest()
 
-    stored = transport.store(tenant_id=TENANT, object_id=OBJECT, ciphertext=ciphertext, ciphertext_sha256=digest)
-    assert transport.load(tenant_id=TENANT, object_id=OBJECT, ciphertext_sha256=digest).ciphertext == ciphertext
+    stored = transport.store(tenant_id=TENANT, object_id=OBJECT, publication_ref=PUBLICATION, ciphertext=ciphertext, ciphertext_sha256=digest)
+    assert transport.load(tenant_id=TENANT, object_id=OBJECT, publication_ref=PUBLICATION, ciphertext_sha256=digest).ciphertext == ciphertext
 
     # A repeat must be rejected and must leave the first exact bytes intact.
     with pytest.raises(ObjectAlreadyExistsError):
-        transport.store(tenant_id=TENANT, object_id=OBJECT, ciphertext=b"replacement", ciphertext_sha256=hashlib.sha256(b"replacement").hexdigest())
-    assert transport.load(tenant_id=TENANT, object_id=OBJECT, ciphertext_sha256=digest).ciphertext == ciphertext
+        transport.store(tenant_id=TENANT, object_id=OBJECT, publication_ref=PUBLICATION, ciphertext=b"replacement", ciphertext_sha256=hashlib.sha256(b"replacement").hexdigest())
+    assert transport.load(tenant_id=TENANT, object_id=OBJECT, publication_ref=PUBLICATION, ciphertext_sha256=digest).ciphertext == ciphertext
 
     # Concurrent create-only calls against an absent derived key admit exactly one.
     race_bytes = b"m34-ci-racing-ciphertext"
@@ -97,7 +98,7 @@ def test_s3_ciphertext_transport_against_pinned_server():
 
     def create_once():
         try:
-            _transport().store(tenant_id=TENANT, object_id=RACING_OBJECT, ciphertext=race_bytes, ciphertext_sha256=race_digest)
+            _transport().store(tenant_id=TENANT, object_id=RACING_OBJECT, publication_ref=PUBLICATION, ciphertext=race_bytes, ciphertext_sha256=race_digest)
             return "stored"
         except ObjectAlreadyExistsError:
             return "exists"
@@ -106,13 +107,13 @@ def test_s3_ciphertext_transport_against_pinned_server():
         outcomes = list(executor.map(lambda _: create_once(), range(8)))
     assert outcomes.count("stored") == 1
     assert outcomes.count("exists") == 7
-    assert transport.load(tenant_id=TENANT, object_id=RACING_OBJECT, ciphertext_sha256=race_digest).ciphertext == race_bytes
+    assert transport.load(tenant_id=TENANT, object_id=RACING_OBJECT, publication_ref=PUBLICATION, ciphertext_sha256=race_digest).ciphertext == race_bytes
 
     # Different valid scopes derive different locations; they cannot read ours.
     with pytest.raises(CiphertextTransportError):
-        transport.load(tenant_id=OTHER_TENANT, object_id=OBJECT, ciphertext_sha256=digest)
+        transport.load(tenant_id=OTHER_TENANT, object_id=OBJECT, publication_ref=PUBLICATION, ciphertext_sha256=digest)
     with pytest.raises(CiphertextTransportError):
-        transport.load(tenant_id=TENANT, object_id=OTHER_OBJECT, ciphertext_sha256=digest)
+        transport.load(tenant_id=TENANT, object_id=OTHER_OBJECT, publication_ref=PUBLICATION, ciphertext_sha256=digest)
 
     # Simulate an out-of-band overwrite by privileged infrastructure.  The
     # application must reject altered bytes even if metadata is left unchanged.
@@ -123,8 +124,8 @@ def test_s3_ciphertext_transport_against_pinned_server():
         Body=altered,
         ContentLength=len(altered),
         ContentType="application/octet-stream",
-        Metadata={"anonflow-sha256": digest},
+        Metadata={"anonflow-publication-ref": PUBLICATION, "anonflow-sha256": digest},
         ACL="private",
     )
     with pytest.raises(CiphertextTransportError, match="integrity check failed"):
-        transport.load(tenant_id=TENANT, object_id=OBJECT, ciphertext_sha256=digest)
+        transport.load(tenant_id=TENANT, object_id=OBJECT, publication_ref=PUBLICATION, ciphertext_sha256=digest)
