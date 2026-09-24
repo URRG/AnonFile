@@ -156,7 +156,10 @@ def _decode_intent(row: tuple[object, ...] | None) -> CandidateCustodyIntent | N
 
 
 class PostgresCandidateCustodyAuthority:
-    """Durable inert intent and terminal-fence authority; never storage or release access."""
+    """Durable inert intent and terminal-fence authority.
+
+    This class never provides storage access or release authorization.
+    """
     def __init__(self, connection_factory: Callable[[], Any]) -> None:
         if not callable(connection_factory):
             _fail()
@@ -170,13 +173,17 @@ class PostgresCandidateCustodyAuthority:
 
     @staticmethod
     def _close(connection: Any) -> None:
-        try: connection.close()
-        except Exception: pass
+        try:
+            connection.close()
+        except Exception:
+            pass
 
     @staticmethod
     def _rollback(connection: Any) -> None:
-        try: connection.rollback()
-        except Exception: pass
+        try:
+            connection.rollback()
+        except Exception:
+            pass
 
     @staticmethod
     def _lock(cursor: Any, *, tenant_ref: str, custody_ref: str) -> CandidateCustodyIntent | None:
@@ -203,7 +210,9 @@ class PostgresCandidateCustodyAuthority:
             _fail()
         connection = None
         try:
-            connection = self._connection(); cursor = connection.cursor(); cursor.execute("BEGIN")
+            connection = self._connection()
+            cursor = connection.cursor()
+            cursor.execute("BEGIN")
             _read_committed(cursor)
             if intent.expires_at <= _now(cursor):
                 _fail()
@@ -230,7 +239,8 @@ class PostgresCandidateCustodyAuthority:
                 result = self._latest(cursor, intent)
                 if result is None:
                     _fail()
-            connection.commit(); return result
+            connection.commit()
+            return result
         except PostgresCandidateCustodyError:
             if connection is not None: self._rollback(connection)
             raise
@@ -242,7 +252,9 @@ class PostgresCandidateCustodyAuthority:
 
     def lock_pending(self, cursor: Any, *, tenant_ref: str, custody_ref: str,
                      expected_generation: int, expected_intent_digest: str) -> CandidateCustodyFence:
-        _text(tenant_ref, _TENANT); _text(custody_ref, _CUSTODY); _generation(expected_generation)
+        _text(tenant_ref, _TENANT)
+        _text(custody_ref, _CUSTODY)
+        _generation(expected_generation)
         _text(expected_intent_digest, _DIGEST)
         try:
             _read_committed(cursor)
@@ -253,17 +265,22 @@ class PostgresCandidateCustodyAuthority:
                     or intent.expires_at <= _now(cursor)):
                 _fail()
             return latest
-        except PostgresCandidateCustodyError: raise
-        except Exception: _fail()
+        except PostgresCandidateCustodyError:
+            raise
+        except Exception:
+            _fail()
 
     def fence(self, *, tenant_ref: str, custody_ref: str, expected_generation: int,
               expected_intent_digest: str) -> CandidateCustodyFence:
         connection = None
         try:
-            connection = self._connection(); cursor = connection.cursor(); cursor.execute("BEGIN")
+            connection = self._connection()
+            cursor = connection.cursor()
+            cursor.execute("BEGIN")
             result = self.lock_pending(cursor, tenant_ref=tenant_ref, custody_ref=custody_ref,
                                        expected_generation=expected_generation, expected_intent_digest=expected_intent_digest)
-            connection.commit(); return result
+            connection.commit()
+            return result
         except PostgresCandidateCustodyError:
             if connection is not None: self._rollback(connection)
             raise
@@ -275,18 +292,26 @@ class PostgresCandidateCustodyAuthority:
 
     def terminal(self, *, tenant_ref: str, custody_ref: str, expected_generation: int,
                  state: str, event_ref: str) -> CandidateCustodyFence:
-        _text(tenant_ref, _TENANT); _text(custody_ref, _CUSTODY); _generation(expected_generation)
-        if type(state) is not str or state not in _TERMINAL: _fail()
+        _text(tenant_ref, _TENANT)
+        _text(custody_ref, _CUSTODY)
+        _generation(expected_generation)
+        if type(state) is not str or state not in _TERMINAL:
+            _fail()
         _text(event_ref, _EVENT)
         connection = None
         try:
-            connection = self._connection(); cursor = connection.cursor(); cursor.execute("BEGIN")
+            connection = self._connection()
+            cursor = connection.cursor()
+            cursor.execute("BEGIN")
             _read_committed(cursor)
             intent = self._lock(cursor, tenant_ref=tenant_ref, custody_ref=custody_ref)
             latest = None if intent is None else self._latest(cursor, intent)
-            if latest is None: _fail()
-            if latest.generation == expected_generation + 1 and latest.state == state and latest.event_ref == event_ref:
-                connection.commit(); return latest
+            if latest is None:
+                _fail()
+            if (latest.generation == expected_generation + 1 and latest.state == state
+                    and latest.event_ref == event_ref):
+                connection.commit()
+                return latest
             moment = _now(cursor)
             if (latest.generation != expected_generation or latest.state != "PENDING_UPLOAD"
                     or (state == "EXPIRED" and moment < intent.expires_at)):
@@ -294,9 +319,11 @@ class PostgresCandidateCustodyAuthority:
             cursor.execute("INSERT INTO anonflow_candidate_custody_fences "
                            "(tenant_ref,custody_ref,generation,state,event_ref,changed_at) VALUES (%s,%s,%s,%s,%s,%s)",
                            (tenant_ref, custody_ref, expected_generation + 1, state, event_ref, moment))
-            if cursor.rowcount != 1: _fail()
+            if cursor.rowcount != 1:
+                _fail()
             result = CandidateCustodyFence(intent, expected_generation + 1, state, event_ref, moment)
-            connection.commit(); return result
+            connection.commit()
+            return result
         except PostgresCandidateCustodyError:
             if connection is not None: self._rollback(connection)
             raise
