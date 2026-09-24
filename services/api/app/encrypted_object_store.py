@@ -8,7 +8,7 @@ the plaintext, data key, wrapped data key, nonce, tag, or ciphertext bytes.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from hashlib import sha256
 import json
@@ -44,7 +44,7 @@ class EncryptedObjectStoreError(ValueError):
 
 
 def _fail() -> None:
-    raise EncryptedObjectStoreError()
+    raise EncryptedObjectStoreError() from None
 
 
 def _opaque(value: object, expression: re.Pattern[str]) -> str:
@@ -91,7 +91,7 @@ class GeneratedDataKey:
     in ``EncryptedObjectReference`` or returned by the object store.
     """
 
-    plaintext_key: bytes
+    plaintext_key: bytes = field(repr=False)
     wrapped_key: str
 
     def __post_init__(self) -> None:
