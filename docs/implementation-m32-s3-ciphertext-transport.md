@@ -56,3 +56,7 @@ threat modelling and end-to-end tests before a production release path can use
 this adapter.
 
 Primary semantics: [AWS PutObject conditional writes](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html) and [PutObject response fields](https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObject.html).
+
+M34 adds a CI-only [pinned interoperability gate](implementation-m34-s3-interoperability-ci.md)
+for one disposable S3-compatible configuration. It is not a provider
+certification and does not relax these deployment-specific requirements.
