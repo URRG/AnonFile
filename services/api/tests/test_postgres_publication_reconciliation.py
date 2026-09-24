@@ -5,9 +5,11 @@ from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
 import secrets
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from app.postgres_publication_intents import (PostgresPublicationIntents, PublicationIntent,
                                               _plan_digest)
@@ -16,6 +18,8 @@ from app.publication_payload_binding import (PublicationPayloadBinding,
 from app.postgres_publication_reconciliation import (PostgresPublicationReconciliationError,
                                                       PostgresPublicationReconciler)
 from app.postgres_worker_jobs import PostgresLeasedWorkerJobs
+from app.publication_authorization import (PinnedPublicationAuthorizationVerifier,
+                                           PublicationAuthorizationAttestation)
 
 
 def opaque(prefix: str) -> str:
@@ -24,6 +28,38 @@ def opaque(prefix: str) -> str:
 
 def digest() -> str:
     return "sha256:" + secrets.token_hex(32)
+
+
+ISSUER = Ed25519PrivateKey.generate()
+
+
+def verifier(*tenants: str) -> PinnedPublicationAuthorizationVerifier:
+    raw = ISSUER.public_key().public_bytes(serialization.Encoding.Raw,
+                                           serialization.PublicFormat.Raw)
+    return PinnedPublicationAuthorizationVerifier({(tenant, "m43-reconciliation-test"): raw
+                                                   for tenant in tenants})
+
+
+def authorization(intent: PublicationIntent, payload: PublicationPayloadBinding) -> PublicationAuthorizationAttestation:
+    now = datetime.now(UTC).replace(microsecond=0)
+    values = dict(
+        tenant_ref=intent.tenant_ref, publication_ref=intent.publication_ref,
+        plan_digest=_plan_digest(intent), target_ref=intent.target_ref,
+        metadata_kind=intent.metadata_kind, binding_digest=payload.binding_digest,
+        release_case_id=opaque("release-case:v1:"), release_case_digest=digest(),
+        privacy_decision_id=opaque("privacy-decision:v1:"), privacy_decision_digest=digest(),
+        approval_digests=(digest(), digest()), rights_digest=secrets.token_hex(32),
+        contract_digest=digest(), recipient_commitment=opaque("recipient-commitment:v1:"),
+        purpose_code="model_training", issuer_key_id="m43-reconciliation-test",
+        issued_at=now, expires_at=now + timedelta(minutes=5))
+    unsigned = PublicationAuthorizationAttestation(
+        signature="publication-authorization-sig:v1:" + "A" * 86, **values)
+    import base64, json
+    signature = "publication-authorization-sig:v1:" + base64.urlsafe_b64encode(ISSUER.sign(
+        b"anonflow-publication-authorization-attestation:v1:\x00" + json.dumps(
+            unsigned.canonical(), ensure_ascii=True, allow_nan=False, sort_keys=True,
+            separators=(",", ":")).encode("ascii"))).decode("ascii").rstrip("=")
+    return PublicationAuthorizationAttestation(signature=signature, **values)
 
 
 def plan(tenant: str, *, publication: str | None = None, work: str | None = None) -> PublicationIntent:
@@ -70,19 +106,23 @@ def pg_reconciliation():
     migrations = [Path(__file__).parents[1] / "migrations" / name for name in (
         "001_m26_postgres_metadata.sql", "002_m28_postgres_worker_jobs.sql",
         "003_m39_publication_intents.sql", "004_m40_publication_finalizations.sql",
-        "005_m41_publication_reconciliation.sql", "006_m42_publication_payload_bindings.sql")]
+        "005_m41_publication_reconciliation.sql", "006_m42_publication_payload_bindings.sql",
+        "007_m43_publication_authorizations.sql")]
     with psycopg.connect(dsn, autocommit=True) as connection:
         for migration in migrations:
             connection.execute(migration.read_text(encoding="utf-8"))
     connect = lambda: psycopg.connect(dsn, autocommit=True)
     tenant = opaque("tenantref:v1:")
     intent = plan(tenant)
-    intents = PostgresPublicationIntents(connect)
-    assert intents.begin(intent, binding(intent)) == intent
+    authority = verifier(tenant)
+    intents = PostgresPublicationIntents(connect, authority)
+    payload = binding(intent)
+    assert intents.begin(intent, payload, authorization(intent, payload)) == intent
     with psycopg.connect(dsn, autocommit=True) as connection:
         connection.execute("UPDATE anonflow_publication_intents SET created_at=clock_timestamp()-interval '2 minutes' "
                            "WHERE tenant_ref=%s AND publication_ref=%s", (tenant, intent.publication_ref))
-    return {"psycopg": psycopg, "dsn": dsn, "connect": connect, "tenant": tenant, "intent": intent}
+    return {"psycopg": psycopg, "dsn": dsn, "connect": connect, "tenant": tenant,
+            "intent": intent, "verifier": authority}
 
 
 def _scan(state, **kwargs):
@@ -99,7 +139,9 @@ def _event_count(state) -> int:
 def test_postgresql_scan_is_tenant_scoped_bounded_and_single_scanner(pg_reconciliation):
     state = pg_reconciliation
     other = plan(opaque("tenantref:v1:"))
-    assert PostgresPublicationIntents(state["connect"]).begin(other, binding(other)) == other
+    payload = binding(other)
+    assert PostgresPublicationIntents(state["connect"], verifier(other.tenant_ref)).begin(
+        other, payload, authorization(other, payload)) == other
     with state["psycopg"].connect(state["dsn"], autocommit=True) as connection:
         connection.execute("UPDATE anonflow_publication_intents SET created_at=clock_timestamp()-interval '2 minutes' "
                            "WHERE tenant_ref=%s AND publication_ref=%s", (other.tenant_ref, other.publication_ref))
@@ -114,12 +156,14 @@ def test_postgresql_scan_is_tenant_scoped_bounded_and_single_scanner(pg_reconcil
 
 def test_postgresql_scan_filters_more_than_one_hundred_live_observations_before_limit(pg_reconciliation):
     state = pg_reconciliation
-    intents = PostgresPublicationIntents(state["connect"])
+    intents = PostgresPublicationIntents(state["connect"], state["verifier"])
     active = [plan(state["tenant"]) for _unused in range(101)]
     for pending in active:
-        assert intents.begin(pending, binding(pending)) == pending
+        payload = binding(pending)
+        assert intents.begin(pending, payload, authorization(pending, payload)) == pending
     eligible = plan(state["tenant"])
-    assert intents.begin(eligible, binding(eligible)) == eligible
+    eligible_payload = binding(eligible)
+    assert intents.begin(eligible, eligible_payload, authorization(eligible, eligible_payload)) == eligible
     with state["psycopg"].connect(state["dsn"], autocommit=True) as connection:
         for pending in [state["intent"], *active, eligible]:
             connection.execute("UPDATE anonflow_publication_intents SET created_at=clock_timestamp()-interval '2 minutes' "

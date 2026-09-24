@@ -9,6 +9,8 @@ import secrets
 import traceback
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from app.openbao_datakey import OpenBaoTransitDataKey
 from app.postgres_metadata import PostgresControlPlaneMetadata
@@ -17,6 +19,8 @@ from app.postgres_publication_finalizer import (PostgresPublicationFinalizationE
 from app.postgres_publication_intents import (PostgresPublicationIntents, PublicationIntent,
                                                _canonical, _document, _plan_digest)
 from app.postgres_publication_reconciliation import PostgresPublicationReconciler
+from app.publication_authorization import (PinnedPublicationAuthorizationVerifier,
+                                           PublicationAuthorizationAttestation)
 from app.publication_payload_binding import (PublicationPayloadBinding,
                                              payload_digest)
 from app.postgres_worker_jobs import PostgresLeasedWorkerJobs
@@ -34,6 +38,39 @@ def digest() -> str:
     return "sha256:" + secrets.token_hex(32)
 
 
+ISSUER = Ed25519PrivateKey.generate()
+
+
+def _verifier(tenant: str) -> PinnedPublicationAuthorizationVerifier:
+    raw = ISSUER.public_key().public_bytes(serialization.Encoding.Raw,
+                                           serialization.PublicFormat.Raw)
+    return PinnedPublicationAuthorizationVerifier({(tenant, "m43-finalizer-test"): raw})
+
+
+def _authorization(plan: PublicationIntent, binding: PublicationPayloadBinding,
+                   *, at: datetime | None = None) -> PublicationAuthorizationAttestation:
+    moment = (at or datetime.now(UTC)).replace(microsecond=0)
+    values = dict(
+        tenant_ref=plan.tenant_ref, publication_ref=plan.publication_ref,
+        plan_digest=_plan_digest(plan), target_ref=plan.target_ref,
+        metadata_kind=plan.metadata_kind, binding_digest=binding.binding_digest,
+        release_case_id=opaque("release-case:v1:"), release_case_digest=digest(),
+        privacy_decision_id=opaque("privacy-decision:v1:"), privacy_decision_digest=digest(),
+        approval_digests=(digest(), digest()), rights_digest=secrets.token_hex(32),
+        contract_digest=digest(), recipient_commitment=opaque("recipient-commitment:v1:"),
+        purpose_code="model_training", issuer_key_id="m43-finalizer-test",
+        issued_at=moment, expires_at=moment + timedelta(minutes=5))
+    unsigned = PublicationAuthorizationAttestation(
+        signature="publication-authorization-sig:v1:" + "A" * 86, **values)
+    import base64
+    payload = b"anonflow-publication-authorization-attestation:v1:\x00" + __import__("json").dumps(
+        unsigned.canonical(), ensure_ascii=True, allow_nan=False, sort_keys=True,
+        separators=(",", ":")).encode("ascii")
+    signature = "publication-authorization-sig:v1:" + base64.urlsafe_b64encode(
+        ISSUER.sign(payload)).decode("ascii").rstrip("=")
+    return PublicationAuthorizationAttestation(signature=signature, **values)
+
+
 def _worker() -> WorkerEncryptedObjects:
     """A genuine worker composition; its recovery boundary is monkeypatched."""
     return WorkerEncryptedObjects(openbao=object.__new__(OpenBaoTransitDataKey),
@@ -48,7 +85,7 @@ def test_finalizer_rejects_cross_tenant_reference_before_opening_a_connection():
                                           "keyref:v1:verify", digest(), 1, digest())
     opened: list[bool] = []
     with pytest.raises(PostgresPublicationFinalizationError):
-        PostgresPublicationFinalizer(lambda: opened.append(True), _worker()).finalize(
+        PostgresPublicationFinalizer(lambda: opened.append(True), _worker(), _verifier(tenant)).finalize(
             claim=claim, reference=authorized, openbao_token="test-token")
     assert opened == []
 
@@ -59,20 +96,22 @@ def pg_finalizer(monkeypatch):
     if not dsn: pytest.skip("set ANONFLOW_POSTGRES_TEST_DSN to run PostgreSQL integration")
     psycopg = pytest.importorskip("psycopg")
     migrations = [Path(__file__).parents[1] / "migrations" / name for name in (
-        "001_m26_postgres_metadata.sql", "002_m28_postgres_worker_jobs.sql", "003_m39_publication_intents.sql", "004_m40_publication_finalizations.sql", "005_m41_publication_reconciliation.sql", "006_m42_publication_payload_bindings.sql")]
+        "001_m26_postgres_metadata.sql", "002_m28_postgres_worker_jobs.sql", "003_m39_publication_intents.sql", "004_m40_publication_finalizations.sql", "005_m41_publication_reconciliation.sql", "006_m42_publication_payload_bindings.sql", "007_m43_publication_authorizations.sql")]
     with psycopg.connect(dsn, autocommit=True) as connection:
         for migration in migrations: connection.execute(migration.read_text(encoding="utf-8"))
     connect = lambda: psycopg.connect(dsn, autocommit=True)
     tenant, publication, object_ref, work, target = (opaque("tenantref:v1:"), opaque("publicationref:v1:"), opaque("objectref:v1:"), opaque("workref:v1:"), opaque("metarecord:v1:"))
     key = "keyref:v1:finalization-key"
-    metadata, jobs, intents = PostgresControlPlaneMetadata(connect), PostgresLeasedWorkerJobs(connect), PostgresPublicationIntents(connect)
+    verifier = _verifier(tenant)
+    metadata, jobs, intents = PostgresControlPlaneMetadata(connect), PostgresLeasedWorkerJobs(connect), PostgresPublicationIntents(connect, verifier)
     metadata.commit(TenantMetadataTransaction(tenant, opaque("metatx:v1:"), {target: 0}, (ControlPlaneMetadata(tenant, target, "release_artifact", 1, {}),)))
     plan = PublicationIntent(tenant, publication, opaque("metatx:v1:"), object_ref, key, work, target, "release_artifact", digest(), digest(), 1, {})
     binding = PublicationPayloadBinding.create(tenant_ref=tenant, publication_ref=publication,
         object_ref=object_ref, key_ref=key, plan_digest=_plan_digest(plan),
         payload_digest=payload_digest(b"release-bytes"), payload_size_bytes=len(b"release-bytes"),
         serialization_id="binary-v1")
-    assert intents.begin(plan, binding) == plan and jobs.enqueue(tenant, work)
+    authorization = _authorization(plan, binding)
+    assert intents.begin(plan, binding, authorization) == plan and jobs.enqueue(tenant, work)
     claim = jobs.claim(tenant, opaque("workerref:v1:"), lease_seconds=60)
     reference = EncryptedObjectReference(tenant, object_ref, publication, key, digest(), 99,
                                          binding.binding_digest)
@@ -80,11 +119,12 @@ def pg_finalizer(monkeypatch):
     def recover(_self, **kwargs):
         calls.append((kwargs["tenant_ref"], kwargs["object_ref"], kwargs["binding"])); return reference
     monkeypatch.setattr(WorkerEncryptedObjects, "recover", recover)
-    return {"psycopg": psycopg, "dsn": dsn, "connect": connect, "metadata": metadata, "jobs": jobs, "intents": intents, "plan": plan, "binding": binding, "claim": claim, "reference": reference, "objects": _worker(), "calls": calls}
+    return {"psycopg": psycopg, "dsn": dsn, "connect": connect, "metadata": metadata, "jobs": jobs, "intents": intents, "plan": plan, "binding": binding, "authorization": authorization, "verifier": verifier, "claim": claim, "reference": reference, "objects": _worker(), "calls": calls}
 
 
-def _finalizer(state, connect=None):
-    return PostgresPublicationFinalizer(connect or state["connect"], state["objects"])
+def _finalizer(state, connect=None, verifier=None):
+    return PostgresPublicationFinalizer(connect or state["connect"], state["objects"],
+                                        verifier or state["verifier"])
 
 
 def _count(state, table: str) -> int:
@@ -138,6 +178,84 @@ def test_postgresql_finalization_concurrent_same_claim_commits_exactly_once(pg_f
     assert {result.metadata.version for result in results} == {2}
     assert _count(state, "anonflow_publication_finalizations") == 1
     assert len(state["calls"]) == 2
+    with state["psycopg"].connect(state["dsn"], autocommit=True) as connection:
+        receipt = connection.execute(
+            "SELECT result_document FROM anonflow_publication_finalizations "
+            "WHERE tenant_ref=%s AND publication_ref=%s",
+            (state["plan"].tenant_ref, state["plan"].publication_ref)).fetchone()[0]
+    assert receipt["authorization"]["attestation_digest"] == state["authorization"].digest
+    assert receipt["authorization"]["issuer_key_id"] == "m43-finalizer-test"
+
+
+def test_postgresql_finalization_rejects_unpinned_persisted_grant_before_recovery(pg_finalizer):
+    state = pg_finalizer
+    other = Ed25519PrivateKey.generate().public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    unpinned = PinnedPublicationAuthorizationVerifier(
+        {(state["plan"].tenant_ref, "m43-finalizer-test"): other})
+    with pytest.raises(PostgresPublicationFinalizationError):
+        _finalizer(state, verifier=unpinned).finalize(
+            claim=state["claim"], reference=state["reference"], openbao_token="test-token")
+    assert state["calls"] == []
+    _assert_unfinalized(state)
+
+
+def test_postgresql_finalization_expiring_during_recovery_rolls_back_everything(pg_finalizer,
+                                                                                  monkeypatch):
+    """Model a DB-clock tick after recovery without a flaky wall-clock sleep."""
+    state = pg_finalizer
+    clock_reads = [0]
+    class ClockCursor:
+        def __init__(self, cursor):
+            self._cursor, self._clock = cursor, False
+        def execute(self, sql, params=None):
+            self._clock = "SELECT date_trunc('second', clock_timestamp())" in sql
+            return self._cursor.execute(sql, params)
+        def fetchone(self):
+            row = self._cursor.fetchone()
+            if self._clock:
+                clock_reads[0] += 1
+                # Preflight and locked write verification see the live DB
+                # result; the final just-before-commit recheck sees expiry.
+                if clock_reads[0] >= 3:
+                    return (state["authorization"].expires_at,)
+            return row
+        def __getattr__(self, name): return getattr(self._cursor, name)
+    class ClockConnection:
+        autocommit = True
+        def __init__(self, connection): self._connection = connection
+        def cursor(self): return ClockCursor(self._connection.cursor())
+        def close(self): return self._connection.close()
+    with pytest.raises(PostgresPublicationFinalizationError):
+        _finalizer(state, lambda: ClockConnection(state["connect"]())).finalize(
+            claim=state["claim"], reference=state["reference"], openbao_token="test-token")
+    assert clock_reads[0] >= 3
+    _assert_unfinalized(state)
+
+
+def test_postgresql_finalization_exact_replay_after_grant_expiry_fails_closed(pg_finalizer):
+    state = pg_finalizer
+    assert _finalizer(state).finalize(
+        claim=state["claim"], reference=state["reference"], openbao_token="test-token").already_finalized is False
+    class ExpiredCursor:
+        def __init__(self, cursor): self._cursor, self._clock = cursor, False
+        def execute(self, sql, params=None):
+            self._clock = "SELECT date_trunc('second', clock_timestamp())" in sql
+            return self._cursor.execute(sql, params)
+        def fetchone(self):
+            row = self._cursor.fetchone()
+            return (state["authorization"].expires_at,) if self._clock else row
+        def __getattr__(self, name): return getattr(self._cursor, name)
+    class ExpiredConnection:
+        autocommit = True
+        def __init__(self, connection): self._connection = connection
+        def cursor(self): return ExpiredCursor(self._connection.cursor())
+        def close(self): return self._connection.close()
+    with pytest.raises(PostgresPublicationFinalizationError):
+        _finalizer(state, lambda: ExpiredConnection(state["connect"]())).finalize(
+            claim=state["claim"], reference=state["reference"], openbao_token="test-token")
+    assert _count(state, "anonflow_publication_finalizations") == 1
+    assert state["metadata"].read(state["plan"].tenant_ref, state["plan"].target_ref).version == 2
 
 
 def test_postgresql_finalization_rejects_expired_and_reclaimed_claim_without_write(pg_finalizer):

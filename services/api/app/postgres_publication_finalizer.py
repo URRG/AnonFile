@@ -12,7 +12,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.postgres_metadata import PostgresControlPlaneMetadata
-from app.postgres_publication_intents import (_MAX_ROW_BYTES, _decode, _decode_binding)
+from app.postgres_publication_intents import (_MAX_ROW_BYTES, _database_now, _decode,
+                                              _decode_authorization, _decode_binding)
+from app.publication_authorization import (PinnedPublicationAuthorizationVerifier,
+                                           PublicationAuthorizationAttestation)
 from app.publication_payload_binding import PublicationPayloadBinding
 from app.production_substrate import (ControlPlaneMetadata, EncryptedObjectReference,
                                       LeasedWorkerClaim, TenantMetadataTransaction)
@@ -58,6 +61,18 @@ def _binding_fields(binding: PublicationPayloadBinding) -> dict[str, object]:
     }
 
 
+def _authorization_fields(attestation: PublicationAuthorizationAttestation) -> dict[str, object]:
+    """The non-secret identity of the grant that authorized this receipt."""
+    if type(attestation) is not PublicationAuthorizationAttestation:
+        _fail()
+    return {
+        "attestation_digest": attestation.digest,
+        "issuer_key_id": attestation.issuer_key_id,
+        "issued_at": attestation.issued_at.isoformat(),
+        "expires_at": attestation.expires_at.isoformat(),
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class PublicationFinalization:
     tenant_ref: str
@@ -69,15 +84,20 @@ class PublicationFinalization:
 class PostgresPublicationFinalizer:
     """Finalize intent, metadata CAS and worker acknowledgement atomically.
 
-    Lock order is intent, immutable payload binding, reconciliation observation,
-    completion, worker job, metadata idempotency row, then metadata record.  Object and key service I/O
-    happens only in the preflight read/recovery phase, before the write locks.
+    Lock order is intent, immutable payload binding, immutable authorization,
+    reconciliation observation, completion, worker job, metadata idempotency
+    row, then metadata record. Object and key service I/O happens only in the
+    preflight read/recovery phase, before the write locks.
     """
     def __init__(self, connection_factory: Callable[[], Any],
-                 encrypted_objects: WorkerEncryptedObjects) -> None:
-        if not callable(connection_factory) or type(encrypted_objects) is not WorkerEncryptedObjects: _fail()
+                 encrypted_objects: WorkerEncryptedObjects,
+                 authorization_verifier: PinnedPublicationAuthorizationVerifier) -> None:
+        if (not callable(connection_factory) or type(encrypted_objects) is not WorkerEncryptedObjects
+                or type(authorization_verifier) is not PinnedPublicationAuthorizationVerifier):
+            _fail()
         self._connection_factory = connection_factory
         self._encrypted_objects = encrypted_objects
+        self._authorization_verifier = authorization_verifier
 
     @staticmethod
     def _close(connection: Any) -> None:
@@ -91,7 +111,8 @@ class PostgresPublicationFinalizer:
 
     def _preflight_binding(self, *, tenant_ref: str, publication_ref: str,
                            claim: LeasedWorkerClaim,
-                           reference: EncryptedObjectReference) -> PublicationPayloadBinding:
+                           reference: EncryptedObjectReference) -> tuple[PublicationPayloadBinding,
+                                                                         PublicationAuthorizationAttestation]:
         """Load a coherent immutable authorization before object-store recovery.
 
         An M39-only row has no commitment to the bytes that were authorized,
@@ -126,8 +147,19 @@ class PostgresPublicationFinalizer:
                     or reference.key_ref != binding.key_ref
                     or reference.binding_digest != binding.binding_digest):
                 _fail()
+            cursor.execute(
+                "SELECT attestation_digest, expires_at, "
+                "CASE WHEN octet_length(document::text) <= %s THEN document ELSE NULL END "
+                "FROM anonflow_publication_authorizations "
+                "WHERE tenant_ref=%s AND publication_ref=%s",
+                (_MAX_ROW_BYTES, tenant_ref, publication_ref))
+            authorization = _decode_authorization(
+                _row(cursor), intent=intent, binding=binding,
+                verifier=self._authorization_verifier, at=_database_now(cursor))
+            if type(authorization) is not PublicationAuthorizationAttestation:
+                _fail()
             cursor.execute("COMMIT")
-            return binding
+            return binding, authorization
         except PostgresPublicationFinalizationError:
             if connection is not None:
                 self._rollback(connection)
@@ -145,9 +177,9 @@ class PostgresPublicationFinalizer:
         if type(claim) is not LeasedWorkerClaim or type(reference) is not EncryptedObjectReference:
             _fail()
         if claim.tenant_ref != reference.tenant_ref: _fail()
-        binding = self._preflight_binding(tenant_ref=claim.tenant_ref,
-                                          publication_ref=reference.publication_ref,
-                                          claim=claim, reference=reference)
+        binding, authorization = self._preflight_binding(
+            tenant_ref=claim.tenant_ref, publication_ref=reference.publication_ref,
+            claim=claim, reference=reference)
         # Authenticate the exact S3 object and OpenBao-wrapped key before the
         # write transaction.  Never keep DB row locks across remote I/O.
         # The token remains call-scoped; the finalizer never stores it.
@@ -185,6 +217,18 @@ class PostgresPublicationFinalizer:
             locked_binding = _decode_binding(_row(cursor), intent=intent, plan_digest=row[1])
             if locked_binding != binding or reference.binding_digest != locked_binding.binding_digest:
                 _fail()
+            cursor.execute(
+                "SELECT attestation_digest, expires_at, "
+                "CASE WHEN octet_length(document::text) <= %s THEN document ELSE NULL END "
+                "FROM anonflow_publication_authorizations "
+                "WHERE tenant_ref=%s AND publication_ref=%s FOR UPDATE",
+                (_MAX_ROW_BYTES, claim.tenant_ref, reference.publication_ref))
+            locked_authorization = _decode_authorization(
+                _row(cursor), intent=intent, binding=locked_binding,
+                verifier=self._authorization_verifier, at=_database_now(cursor))
+            if (type(locked_authorization) is not PublicationAuthorizationAttestation
+                    or locked_authorization != authorization):
+                _fail()
             # An explicit M41 operator quarantine is terminal for this
             # publication.  Take the same row lock used by quarantine after
             # the intent/binding lock order, so a quarantine racing recovery
@@ -206,6 +250,7 @@ class PostgresPublicationFinalizer:
                           "leased_at": claim.leased_at.isoformat(),
                           "lease_expires_at": claim.lease_expires_at.isoformat(),
                           "binding": _binding_fields(locked_binding),
+                          "authorization": _authorization_fields(locked_authorization),
                           "reference": {
                               "tenant_ref": reference.tenant_ref, "object_ref": reference.object_ref,
                               "publication_ref": reference.publication_ref, "key_ref": reference.key_ref,
@@ -231,6 +276,14 @@ class PostgresPublicationFinalizer:
                 from app.postgres_metadata import _decode_document
                 if _decode_document(stored[1], tenant_ref=intent.tenant_ref, record_id=intent.target_ref,
                                     version=stored[0]) != metadata: _fail()
+                # A replay is itself a finalization operation. Do not let a
+                # prior receipt turn an expired or revoked grant into a live
+                # positive result.
+                if _decode_authorization(
+                        (locked_authorization.digest, locked_authorization.expires_at,
+                         locked_authorization.to_record()), intent=intent, binding=locked_binding,
+                        verifier=self._authorization_verifier, at=_database_now(cursor)) != locked_authorization:
+                    _fail()
                 cursor.execute("COMMIT")
                 return PublicationFinalization(intent.tenant_ref, intent.publication_ref, metadata, True)
             # 3. Fence the current lease immediately before metadata mutation.
@@ -258,6 +311,15 @@ class PostgresPublicationFinalizer:
                            "(tenant_ref, publication_ref, completion_digest, result_document) VALUES (%s,%s,%s,%s::jsonb)",
                            (intent.tenant_ref, intent.publication_ref, completion_digest, _canonical(completion)))
             if cursor.rowcount != 1: _fail()
+            # The transaction may have waited on a completion/job/metadata
+            # lock after its first authorization check. Revalidate at the DB
+            # clock immediately before commit; a failure rolls back every
+            # metadata, acknowledgement and receipt mutation above.
+            if _decode_authorization(
+                    (locked_authorization.digest, locked_authorization.expires_at,
+                     locked_authorization.to_record()), intent=intent, binding=locked_binding,
+                    verifier=self._authorization_verifier, at=_database_now(cursor)) != locked_authorization:
+                _fail()
             cursor.execute("COMMIT")
             return PublicationFinalization(intent.tenant_ref, intent.publication_ref, metadata)
         except PostgresPublicationFinalizationError:
