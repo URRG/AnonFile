@@ -155,7 +155,8 @@ def test_postgresql_service_claim_reclaim_and_stale_ack_when_configured():
     assert first.delivery_attempt == first.lease_epoch == 1
     # Make expiry server-side without relying on a host clock or a sleep.
     with psycopg.connect(dsn, autocommit=True) as connection:
-        connection.execute("UPDATE anonflow_worker_jobs SET lease_expires_at=clock_timestamp() - interval '1 second' "
+        connection.execute("UPDATE anonflow_worker_jobs SET leased_at=clock_timestamp() - interval '2 seconds', "
+                           "lease_expires_at=clock_timestamp() - interval '1 second' "
                            "WHERE tenant_ref=%s AND work_ref=%s", (tenant, work))
     second = jobs.claim(tenant, opaque("workerref:v1:"), lease_seconds=5)
     assert second.delivery_attempt == second.lease_epoch == 2
