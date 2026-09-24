@@ -7,7 +7,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from app.openbao_transit import (OpenBaoTransitConfig, OpenBaoTransitEd25519,
-                                 OpenBaoTransitError, TransitEd25519Signature)
+                                 OpenBaoTransitError, TransitEd25519Signature, _envelope)
 
 
 PRIVATE_KEY = Ed25519PrivateKey.from_private_bytes(b"p" * 32)
@@ -44,6 +44,14 @@ def client(transport):
 
 
 def metadata(): return Response(body=b'{"data":{"type":"ed25519","exportable":false,"allow_plaintext_backup":false}}')
+
+
+def test_standard_openbao_null_envelope_fields_are_accepted_without_accepting_wrapped_auth():
+    ordinary = {"data": {}, "auth": None, "wrap_info": None, "warnings": None,
+                "lease_id": "", "lease_duration": 0, "renewable": False}
+    assert _envelope(ordinary)
+    assert not _envelope({**ordinary, "auth": {"client_token": "secret"}})
+    assert not _envelope({**ordinary, "wrap_info": {"token": "wrapped"}})
 
 
 def test_sign_and_verify_use_only_pinned_transit_endpoints_and_bind_version():

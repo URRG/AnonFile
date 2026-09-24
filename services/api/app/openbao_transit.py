@@ -204,8 +204,14 @@ def _envelope(value: object) -> bool:
     """Accept only bounded, documented non-secret Vault response envelope fields."""
     if type(value) is not dict or "data" not in value or type(value["data"]) is not dict:
         return False
-    permitted = {"data", "request_id", "lease_id", "renewable", "lease_duration", "warnings", "mount_type"}
+    permitted = {"data", "request_id", "lease_id", "renewable", "lease_duration",
+                 "warnings", "mount_type", "auth", "wrap_info"}
     if not set(value).issubset(permitted):
+        return False
+    # OpenBao's ordinary response envelope carries these fields as null.
+    # A wrapped response or auth material must never be interpreted as a
+    # normal Transit result.
+    if any(name in value and value[name] is not None for name in ("auth", "wrap_info")):
         return False
     scalar_strings = ("request_id", "lease_id", "mount_type")
     if any(name in value and (type(value[name]) is not str or len(value[name]) > 256) for name in scalar_strings):
@@ -214,5 +220,5 @@ def _envelope(value: object) -> bool:
         return False
     if "lease_duration" in value and (type(value["lease_duration"]) is not int or isinstance(value["lease_duration"], bool) or not 0 <= value["lease_duration"] <= 86_400):
         return False
-    return ("warnings" not in value or type(value["warnings"]) is list
+    return ("warnings" not in value or value["warnings"] is None or type(value["warnings"]) is list
             and len(value["warnings"]) <= 16 and all(type(item) is str and len(item) <= 256 for item in value["warnings"]))
