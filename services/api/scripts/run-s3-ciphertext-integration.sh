@@ -55,4 +55,4 @@ S3_CIPHERTEXT_INTEGRATION_ENDPOINT="$endpoint" \
 S3_CIPHERTEXT_INTEGRATION_CA_FILE="$cert_dir/public.crt" \
 S3_CIPHERTEXT_INTEGRATION_ACCESS_KEY="$root_user" \
 S3_CIPHERTEXT_INTEGRATION_SECRET_KEY="$root_password" \
-python -m pytest -q tests/test_s3_ciphertext_integration.py
+python -m pytest -q tests/test_s3_ciphertext_integration.py tests/test_s3_versioned_ciphertext_integration.py
