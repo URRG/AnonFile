@@ -44,7 +44,7 @@ handling. Rotate by a separately approved operator process, then deploy a
 configuration pinned to the new version only after dependent signatures have a
 defined retention/migration plan.
 
-There is no live service test in the repository: it would require an explicitly
-configured self-hosted endpoint and secret-manager token. Unit tests use a fake
-HTTP transport for success, redirects, timeouts, malformed payloads, oversized
-or forged responses, and signature-version mismatch.
+Unit tests use a fake HTTP transport for success, redirects, timeouts, malformed
+payloads, oversized or forged responses, and signature-version mismatch. The
+separate M29 integration harness verifies interoperability with a genuine,
+disposable OpenBao server; see `implementation-m29-openbao-integration.md`.
