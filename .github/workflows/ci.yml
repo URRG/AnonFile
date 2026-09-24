@@ -44,6 +44,18 @@ jobs:
           # Official OpenBao image, pinned to the linux/amd64 2.5.5 manifest.
           OPENBAO_IMAGE: openbao/openbao:2.5.5@sha256:e59b4c73cfce6875363d25548222819433c6ce0af9c6d3ec9ede220e905723f9
         run: bash services/api/scripts/run-openbao-transit-integration.sh
+  s3-ciphertext-integration:
+    # CI-only: one disposable MinIO instance with a generated, verified TLS
+    # certificate. This proves only the pinned image/configuration below.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r services/api/requirements-dev.txt
+      - name: Verify ciphertext transport against pinned S3-compatible storage
+        run: bash services/api/scripts/run-s3-ciphertext-integration.sh
   web:
     runs-on: ubuntu-latest
     steps:
