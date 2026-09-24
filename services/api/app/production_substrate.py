@@ -23,6 +23,7 @@ _OPAQUE = r"[A-Za-z0-9_-]{43}"
 _TENANT = re.compile(r"tenantref:v1:" + _OPAQUE + r"\Z")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _OBJECT = re.compile(r"objectref:v1:" + _OPAQUE + r"\Z")
+_PUBLICATION = re.compile(r"publicationref:v1:" + _OPAQUE + r"\Z")
 _KEY = re.compile(r"keyref:v1:[a-z0-9][a-z0-9._:-]{0,95}\Z")
 _TX = re.compile(r"metatx:v1:" + _OPAQUE + r"\Z")
 _RECORD = re.compile(r"metarecord:v1:" + _OPAQUE + r"\Z")
@@ -72,7 +73,7 @@ def _instant(value: object) -> datetime:
 
 def _opaque_reference(value: object) -> str:
     if type(value) is not str or not any(expression.fullmatch(value) for expression in
-                                         (_OBJECT, _KEY, _RECORD, _WORK, _CLAIM, _WORKER)):
+                                         (_OBJECT, _PUBLICATION, _KEY, _RECORD, _WORK, _CLAIM, _WORKER)):
         _fail()
     return value
 
@@ -118,6 +119,7 @@ class EncryptedObjectReference:
 
     tenant_ref: str
     object_ref: str
+    publication_ref: str
     key_ref: str
     ciphertext_digest: str
     ciphertext_size_bytes: int
@@ -126,6 +128,7 @@ class EncryptedObjectReference:
     def __post_init__(self) -> None:
         _text(self.tenant_ref, _TENANT)
         _text(self.object_ref, _OBJECT)
+        _text(self.publication_ref, _PUBLICATION)
         _text(self.key_ref, _KEY)
         _text(self.ciphertext_digest, _DIGEST)
         if (type(self.ciphertext_size_bytes) is not int or isinstance(self.ciphertext_size_bytes, bool)
@@ -162,6 +165,7 @@ class ControlPlaneMetadata:
             "ciphertext_size_bytes": self.encrypted_object.ciphertext_size_bytes,
             "encryption_algorithm": self.encrypted_object.encryption_algorithm,
             "key_ref": self.encrypted_object.key_ref, "object_ref": self.encrypted_object.object_ref,
+            "publication_ref": self.encrypted_object.publication_ref,
         }
         if _canonical_size({"tenant_ref": self.tenant_ref, "record_id": self.record_id,
                             "kind": self.kind, "version": self.version,

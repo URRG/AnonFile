@@ -17,6 +17,7 @@ from urllib.parse import urlsplit, urlunsplit
 _NAMESPACE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _TENANT_REF = re.compile(r"tenantref:v1:[A-Za-z0-9_-]{43}\Z")
 _OBJECT_REF = re.compile(r"objectref:v1:[A-Za-z0-9_-]{43}\Z")
+_PUBLICATION_REF = re.compile(r"publicationref:v1:[A-Za-z0-9_-]{43}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _MAX_RESPONSE_KEYS = 16
 
@@ -96,6 +97,7 @@ class StoredCiphertext:
     key: str
     sha256: str
     byte_count: int
+    publication_ref: str
 
 
 @dataclass(frozen=True)
@@ -105,6 +107,7 @@ class FetchedCiphertext:
     key: str
     sha256: str
     ciphertext: bytes
+    publication_ref: str
 
 
 class S3CiphertextTransport:
@@ -118,7 +121,7 @@ class S3CiphertextTransport:
         self._config = config
         self._client = client
 
-    def store(self, *, tenant_id: str, object_id: str, ciphertext: bytes,
+    def store(self, *, tenant_id: str, object_id: str, publication_ref: str, ciphertext: bytes,
               ciphertext_sha256: str) -> StoredCiphertext:
         """Store bounded ciphertext with ``IfNoneMatch='*'`` and no fallback.
 
@@ -134,6 +137,8 @@ class S3CiphertextTransport:
         if calculated != ciphertext_sha256:
             raise ValueError("ciphertext digest mismatch")
         key = opaque_object_key(self._config, tenant_id, object_id)
+        if type(publication_ref) is not str or not _PUBLICATION_REF.fullmatch(publication_ref):
+            raise ValueError("invalid publication reference")
         try:
             response = self._client.put_object(
                 Bucket=self._config.bucket,
@@ -141,7 +146,7 @@ class S3CiphertextTransport:
                 Body=ciphertext,
                 ContentLength=len(ciphertext),
                 ContentType="application/octet-stream",
-                Metadata={"anonflow-sha256": ciphertext_sha256},
+                Metadata={"anonflow-publication-ref": publication_ref, "anonflow-sha256": ciphertext_sha256},
                 ACL="private",
                 IfNoneMatch="*",
             )
@@ -151,18 +156,20 @@ class S3CiphertextTransport:
             raise CiphertextTransportError("ciphertext storage unavailable") from None
         if not _valid_put_response(response):
             raise CiphertextTransportError("ciphertext storage unavailable")
-        return StoredCiphertext(key=key, sha256=ciphertext_sha256, byte_count=len(ciphertext))
+        return StoredCiphertext(key=key, sha256=ciphertext_sha256, byte_count=len(ciphertext), publication_ref=publication_ref)
 
-    def load(self, *, tenant_id: str, object_id: str, ciphertext_sha256: str) -> FetchedCiphertext:
+    def load(self, *, tenant_id: str, object_id: str, publication_ref: str, ciphertext_sha256: str) -> FetchedCiphertext:
         """Read and verify only a bounded ciphertext object at its derived key."""
         if type(ciphertext_sha256) is not str or not _SHA256.fullmatch(ciphertext_sha256):
             raise ValueError("invalid ciphertext digest")
         key = opaque_object_key(self._config, tenant_id, object_id)
+        if type(publication_ref) is not str or not _PUBLICATION_REF.fullmatch(publication_ref):
+            raise ValueError("invalid publication reference")
         try:
             response = self._client.get_object(Bucket=self._config.bucket, Key=key)
         except Exception:
             raise CiphertextTransportError("ciphertext storage unavailable") from None
-        if not _valid_get_response(response, ciphertext_sha256, self._config.max_ciphertext_bytes):
+        if not _valid_get_response(response, ciphertext_sha256, publication_ref, self._config.max_ciphertext_bytes):
             _close_body(response)
             raise CiphertextTransportError("ciphertext storage unavailable")
         body = response["Body"]
@@ -176,7 +183,34 @@ class S3CiphertextTransport:
             raise CiphertextTransportError("ciphertext storage unavailable")
         if hashlib.sha256(value).hexdigest() != ciphertext_sha256:
             raise CiphertextTransportError("ciphertext integrity check failed")
-        return FetchedCiphertext(key=key, sha256=ciphertext_sha256, ciphertext=value)
+        return FetchedCiphertext(key=key, sha256=ciphertext_sha256, ciphertext=value, publication_ref=publication_ref)
+
+    def recover(self, *, tenant_id: str, object_id: str, publication_ref: str) -> FetchedCiphertext:
+        """Read a pre-existing object only when its exact publication marker proves ownership."""
+        if type(publication_ref) is not str or not _PUBLICATION_REF.fullmatch(publication_ref):
+            raise ValueError("invalid publication reference")
+        key = opaque_object_key(self._config, tenant_id, object_id)
+        try:
+            response = self._client.get_object(Bucket=self._config.bucket, Key=key)
+        except Exception:
+            raise CiphertextTransportError("ciphertext storage unavailable") from None
+        if not _valid_recovery_response(response, publication_ref, self._config.max_ciphertext_bytes):
+            _close_body(response)
+            raise CiphertextTransportError("ciphertext storage unavailable")
+        assert isinstance(response, Mapping)
+        body = response["Body"]
+        digest = response["Metadata"]["anonflow-sha256"]
+        try:
+            value = body.read(self._config.max_ciphertext_bytes + 1)
+        except Exception:
+            raise CiphertextTransportError("ciphertext storage unavailable") from None
+        finally:
+            _close_body(response)
+        if (type(value) is not bytes or len(value) != response["ContentLength"]
+                or len(value) > self._config.max_ciphertext_bytes
+                or hashlib.sha256(value).hexdigest() != digest):
+            raise CiphertextTransportError("ciphertext integrity check failed")
+        return FetchedCiphertext(key=key, sha256=digest, ciphertext=value, publication_ref=publication_ref)
 
 
 def _is_conditional_conflict(exc: Exception) -> bool:
@@ -224,7 +258,7 @@ def _normalized_client_endpoint(value: str) -> str | None:
     return urlunsplit(("https", parsed.netloc, "", "", ""))
 
 
-def _valid_get_response(response: object, expected_digest: str, maximum: int) -> bool:
+def _valid_get_response(response: object, expected_digest: str, expected_publication: str, maximum: int) -> bool:
     if not _valid_response_shape(response, expected_status=200):
         return False
     assert isinstance(response, Mapping)
@@ -232,7 +266,21 @@ def _valid_get_response(response: object, expected_digest: str, maximum: int) ->
     metadata = response.get("Metadata")
     body = response.get("Body")
     return (type(content_length) is int and 0 <= content_length <= maximum
-            and isinstance(metadata, Mapping) and metadata == {"anonflow-sha256": expected_digest}
+            and isinstance(metadata, Mapping) and metadata == {"anonflow-publication-ref": expected_publication,
+                                                                 "anonflow-sha256": expected_digest}
+            and callable(getattr(body, "read", None)) and callable(getattr(body, "close", None)))
+
+
+def _valid_recovery_response(response: object, expected_publication: str, maximum: int) -> bool:
+    if not _valid_response_shape(response, expected_status=200):
+        return False
+    assert isinstance(response, Mapping)
+    content_length, metadata, body = response.get("ContentLength"), response.get("Metadata"), response.get("Body")
+    digest = metadata.get("anonflow-sha256") if isinstance(metadata, Mapping) else None
+    return (type(content_length) is int and 0 <= content_length <= maximum
+            and isinstance(metadata, Mapping) and metadata == {"anonflow-publication-ref": expected_publication,
+                                                                "anonflow-sha256": digest}
+            and type(digest) is str and bool(_SHA256.fullmatch(digest))
             and callable(getattr(body, "read", None)) and callable(getattr(body, "close", None)))
 
 

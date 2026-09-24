@@ -23,7 +23,9 @@ the returned key and digest before M31 performs its own canonical-envelope and
 AES-GCM checks. Misuse, token/KMS/S3 failures, duplicate objects, tenant or AAD
 mismatches, and malformed adapter results fail closed.
 
-This is still a bounded composition, not a production release path. It has no
-worker scheduler, token issuer, credential rotation, object lifecycle/erasure,
-multipart support, retry protocol, route wiring, deployment configuration, or
+M38 adds an explicit publication-bound create-or-recover operation above this
+composition; see [M38](implementation-m38-publication-object-recovery.md).
+This is still not a production release path. It has no worker scheduler, token
+issuer, credential rotation, object lifecycle/erasure, multipart support,
+durable publication intent/fencing, route wiring, deployment configuration, or
 end-to-end infrastructure certification.
