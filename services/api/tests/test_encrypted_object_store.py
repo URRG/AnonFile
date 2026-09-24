@@ -8,6 +8,7 @@ import pytest
 
 from app.encrypted_object_store import (DataKeyProvider, EncryptedByteTransport, EncryptedObjectStore,
     EncryptedObjectStoreError, GeneratedDataKey, _MAX_ENVELOPE_BYTES, _MAX_PLAINTEXT_BYTES, _TAG_BYTES)
+from app.publication_payload_binding import PublicationPayloadBinding, payload_digest
 
 
 TENANT = "tenantref:v1:" + "A" * 43
@@ -17,6 +18,14 @@ OTHER_OBJECT = "objectref:v1:" + "C" * 43
 KEY = "keyref:v1:production-data-key"
 OTHER_KEY = "keyref:v1:other-data-key"
 PUBLICATION = "publicationref:v1:" + "P" * 43
+PLAN = "sha256:" + "a" * 64
+
+
+def binding(payload: bytes, *, publication: str = PUBLICATION, object_ref: str = OBJECT,
+            key_ref: str = KEY, tenant: str = TENANT) -> PublicationPayloadBinding:
+    return PublicationPayloadBinding.create(tenant_ref=tenant, publication_ref=publication, object_ref=object_ref,
+                                            key_ref=key_ref, plan_digest=PLAN, payload_digest=payload_digest(payload),
+                                            payload_size_bytes=len(payload), serialization_id="binary-v1")
 
 
 class Keys(DataKeyProvider):
@@ -72,8 +81,10 @@ def test_round_trip_returns_only_reference_and_keeps_key_material_out_of_metadat
     assert len(secret) == 32
     assert "secret-dek-marker" not in repr(GeneratedDataKey(secret, "wrapped:test"))
     value = store()
-    reference = value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, plaintext=b"private source")
-    assert value.get(tenant_ref=TENANT, reference=reference) == b"private source"
+    payload = b"private source"
+    bound = binding(payload)
+    reference = value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, binding=bound, plaintext=payload)
+    assert value.get(tenant_ref=TENANT, reference=reference, binding=bound) == payload
     assert reference.tenant_ref == TENANT and reference.object_ref == OBJECT and reference.key_ref == KEY
     assert reference.encryption_algorithm == "AES-256-GCM"
     assert "private" not in repr(reference) and "wrapped" not in repr(reference)
@@ -81,16 +92,65 @@ def test_round_trip_returns_only_reference_and_keeps_key_material_out_of_metadat
 
 def test_context_binds_tenant_object_and_key_and_wrong_tenant_or_key_fails_closed():
     value = store()
-    reference = value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, plaintext=b"x")
-    fails(lambda: value.get(tenant_ref=OTHER_TENANT, reference=reference))
-    fails(lambda: value.get(tenant_ref=TENANT, reference=replace(reference, key_ref=OTHER_KEY)))
-    fails(lambda: value.get(tenant_ref=TENANT, reference=replace(reference, object_ref=OTHER_OBJECT)))
+    bound = binding(b"x")
+    reference = value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, binding=bound, plaintext=b"x")
+    fails(lambda: value.get(tenant_ref=OTHER_TENANT, reference=reference, binding=bound))
+    fails(lambda: value.get(tenant_ref=TENANT, reference=replace(reference, key_ref=OTHER_KEY), binding=bound))
+    fails(lambda: value.get(tenant_ref=TENANT, reference=replace(reference, object_ref=OTHER_OBJECT), binding=bound))
 
 
 def test_create_only_transport_rejects_a_second_put_for_the_same_tenant_object():
     value = store()
-    value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, plaintext=b"first")
-    fails(lambda: value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, plaintext=b"second"))
+    value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, binding=binding(b"first"), plaintext=b"first")
+    fails(lambda: value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, binding=binding(b"second"), plaintext=b"second"))
+
+
+def test_wrong_initial_payload_never_calls_kms_or_transport_even_when_its_size_matches():
+    keys, memory = Keys(), Memory()
+    value = EncryptedObjectStore(data_keys=keys, transport=memory)
+    authorized = binding(b"equal-size-A")
+    fails(lambda: value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION,
+                            key_ref=KEY, binding=authorized, plaintext=b"equal-size-B"))
+    assert keys.contexts == [] and memory.values == {}
+
+
+def test_v3_envelope_recovery_rejects_forged_payload_commitment_and_reference_mismatch():
+    value = store()
+    payload, bound = b"release payload", binding(b"release payload")
+    reference = value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION,
+                          key_ref=KEY, binding=bound, plaintext=payload)
+    forged = binding(b"release payloae")
+    fails(lambda: value.get(tenant_ref=TENANT, reference=reference, binding=forged))
+    fails(lambda: value.get(tenant_ref=TENANT, reference=replace(reference, binding_digest=forged.binding_digest),
+                            binding=forged))
+
+
+def test_forged_envelope_payload_metadata_is_rejected_even_with_an_updated_transport_digest():
+    value = store()
+    payload, bound = b"release payload", binding(b"release payload")
+    reference = value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION,
+                          key_ref=KEY, binding=bound, plaintext=payload)
+    identity = (TENANT, OBJECT)
+    decoded = __import__("json").loads(value._transport.values[identity])
+    decoded["payload_digest"] = payload_digest(b"release payloae")
+    forged = __import__("json").dumps(decoded, ensure_ascii=True, sort_keys=True,
+                                        separators=(",", ":")).encode("ascii")
+    value._transport.values[identity] = forged
+    fails(lambda: value.get(tenant_ref=TENANT,
+                            reference=replace(reference, ciphertext_digest="sha256:" + sha256(forged).hexdigest(),
+                                              ciphertext_size_bytes=len(forged)), binding=bound))
+
+
+def test_legacy_v2_envelope_is_fail_closed():
+    value = store()
+    payload, bound = b"private", binding(b"private")
+    reference = value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION,
+                          key_ref=KEY, binding=bound, plaintext=payload)
+    legacy = value._transport.values[(TENANT, OBJECT)].replace(b'"version":3', b'"version":2')
+    value._transport.values[(TENANT, OBJECT)] = legacy
+    fails(lambda: value.get(tenant_ref=TENANT,
+                            reference=replace(reference, ciphertext_digest="sha256:" + sha256(legacy).hexdigest(),
+                                              ciphertext_size_bytes=len(legacy)), binding=bound))
 
 
 @pytest.mark.parametrize("mutation", [
@@ -100,15 +160,17 @@ def test_create_only_transport_rejects_a_second_put_for_the_same_tenant_object()
 ])
 def test_digest_and_canonical_envelope_reject_tampering(mutation):
     value = store()
-    reference = value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, plaintext=b"x")
+    bound = binding(b"x")
+    reference = value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, binding=bound, plaintext=b"x")
     identity = (TENANT, OBJECT)
     value._transport.values[identity] = mutation(value._transport.values[identity])
-    fails(lambda: value.get(tenant_ref=TENANT, reference=reference))
+    fails(lambda: value.get(tenant_ref=TENANT, reference=reference, binding=bound))
 
 
 def test_nonce_tag_ciphertext_and_wrapped_key_tampering_are_all_rejected_even_with_matching_digest():
     value = store()
-    reference = value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, plaintext=b"x")
+    bound = binding(b"x")
+    reference = value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, binding=bound, plaintext=b"x")
     identity = (TENANT, OBJECT)
     original = value._transport.values[identity]
     for old, new in ((b'"nonce":"', b'"nonce":"A'), (b'"ciphertext":"', b'"ciphertext":"A'),
@@ -117,14 +179,14 @@ def test_nonce_tag_ciphertext_and_wrapped_key_tampering_are_all_rejected_even_wi
         updated = replace(reference, ciphertext_digest="sha256:" + __import__("hashlib").sha256(modified).hexdigest(),
                           ciphertext_size_bytes=len(modified))
         value._transport.values[identity] = modified
-        fails(lambda: value.get(tenant_ref=TENANT, reference=updated))
+        fails(lambda: value.get(tenant_ref=TENANT, reference=updated, binding=bound))
     value._transport.values[identity] = original
 
 
 def test_invalid_input_and_transport_or_provider_failure_have_one_non_leaking_error():
     value = store()
-    fails(lambda: value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, plaintext="private"))
-    fails(lambda: value.put(tenant_ref=TENANT, object_ref="bucket/private", publication_ref=PUBLICATION, key_ref=KEY, plaintext=b"x"))
+    fails(lambda: value.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, binding=binding(b"private"), plaintext="private"))
+    fails(lambda: value.put(tenant_ref=TENANT, object_ref="bucket/private", publication_ref=PUBLICATION, key_ref=KEY, binding=binding(b"x"), plaintext=b"x"))
 
 
 def test_size_contract_has_space_for_base64_tag_and_worst_case_wrapped_key_escaping():
@@ -145,14 +207,15 @@ def test_provider_and_transport_exceptions_do_not_leak_plaintext_or_key_material
 
     failed_put = EncryptedObjectStore(data_keys=BrokenKeys(), transport=Memory())
     failed_get = EncryptedObjectStore(data_keys=Keys(), transport=BrokenTransport())
-    fails(lambda: failed_put.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, plaintext=b"private source"))
+    bound = binding(b"private source")
+    fails(lambda: failed_put.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, binding=bound, plaintext=b"private source"))
     payload = b"private source"
     try:
-        failed_put.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, plaintext=payload)
+        failed_put.put(tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, binding=bound, plaintext=payload)
     except EncryptedObjectStoreError as exc:
         rendered = "".join(traceback.format_exception(exc))
         assert "super-secret" not in rendered and "private source" not in rendered
         assert exc.__suppress_context__
     reference = EncryptedObjectStore(data_keys=failed_get._data_keys, transport=Memory()).put(
-        tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, plaintext=b"private source")
-    fails(lambda: failed_get.get(tenant_ref=TENANT, reference=reference))
+        tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION, key_ref=KEY, binding=bound, plaintext=b"private source")
+    fails(lambda: failed_get.get(tenant_ref=TENANT, reference=reference, binding=bound))

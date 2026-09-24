@@ -6,14 +6,17 @@ provide a concrete S3 client, configure credentials, or make a production
 deployment claim.
 
 `EncryptedObjectStore.put` receives a strictly shaped tenant reference, object
-reference, key reference, and at most 32 MiB of bytes. The resulting canonical
+reference, key reference, immutable `PublicationPayloadBinding`, and at most
+32 MiB of bytes. It recomputes the domain-separated payload digest and exact
+size **before** asking KMS or S3 to do anything. The resulting canonical v3
 envelope is bounded to 48 MiB, including Base64 expansion and the bounded
 wrapped-key field; that remains below the companion transport's 64 MiB cap. It
 asks an injected
 `DataKeyProvider` for an ephemeral AES-256 data key and a wrapped-key string,
 then stores one canonical JSON envelope through an injected
-`EncryptedByteTransport`.  The envelope has only version, wrapped data key,
-96-bit nonce, and AES-GCM ciphertext-plus-tag.  Its digest and exact byte size
+`EncryptedByteTransport`.  The envelope contains version, publication ref,
+binding digest, payload digest, payload size, serialization identifier,
+wrapped data key, 96-bit nonce, and AES-GCM ciphertext-plus-tag. Its digest and exact byte size
 are recorded in `production_substrate.EncryptedObjectReference`; neither the
 reference nor the control plane contains the wrapped key, nonce, ciphertext,
 plaintext, or plaintext data key.
@@ -22,12 +25,16 @@ but workers still must not log or retain that object.
 
 Both Transit key operations and AES-GCM use the same canonical
 domain-separated context: envelope version, tenant reference, object
-reference, and key reference.  Reads require the caller tenant to equal the
+reference, key reference, and immutable binding digest. Reads and recovery require the caller tenant to equal the
 reference tenant, verify the exact stored-envelope digest and size, reject
 noncanonical envelopes, unwrap the key with the same context, and authenticate
 the GCM tag.  Any malformed input, provider/transport exception, digest
-mismatch, context mismatch, or authentication failure becomes the fixed
+mismatch, binding/payload mismatch, context mismatch, or authentication failure becomes the fixed
 `Encrypted object operation failed` error, without payload or key material.
+
+Envelope versions before v3 are deliberately unreadable. Recovery decrypts,
+recomputes the exact payload commitment, and verifies every embedded binding
+field before returning a reference carrying the binding digest.
 
 The data-key provider and byte transport are intentional integration seams.
 A future OpenBao provider must bind its wrapped-data-key generation and unwrap

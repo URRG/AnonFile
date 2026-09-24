@@ -9,7 +9,6 @@ leaves this boundary.
 from __future__ import annotations
 
 from hashlib import sha256
-from hmac import compare_digest
 import re
 
 from app.encrypted_object_store import (DataKeyProvider, EncryptedByteTransport,
@@ -173,33 +172,34 @@ class WorkerEncryptedObjects:
         self._ciphertexts = ciphertexts
 
     def put(self, *, tenant_ref: object, object_ref: object, publication_ref: object, key_ref: object,
-            plaintext: object, openbao_token: object) -> EncryptedObjectReference:
+            binding: object, plaintext: object, openbao_token: object) -> EncryptedObjectReference:
         try:
             # Keep the bearer token only in these active call frames.  In
             # particular, do not expose a token-bound store to a caller.
             store = EncryptedObjectStore(data_keys=_ScopedOpenBaoDataKeys(self._openbao, openbao_token),
                                          transport=_S3EnvelopeTransport(self._ciphertexts))
             return store.put(tenant_ref=tenant_ref, object_ref=object_ref, publication_ref=publication_ref,
-                             key_ref=key_ref, plaintext=plaintext)
+                             key_ref=key_ref, binding=binding, plaintext=plaintext)
         except (WorkerEncryptedObjectsError, EncryptedObjectStoreError):
             raise
         except Exception:
             _fail()
 
     def recover(self, *, tenant_ref: object, object_ref: object, publication_ref: object,
-                key_ref: object, openbao_token: object) -> EncryptedObjectReference:
+                key_ref: object, binding: object, openbao_token: object) -> EncryptedObjectReference:
         try:
             store = EncryptedObjectStore(data_keys=_ScopedOpenBaoDataKeys(self._openbao, openbao_token),
                                          transport=_S3EnvelopeTransport(self._ciphertexts))
             return store.recover(tenant_ref=tenant_ref, object_ref=object_ref,
-                                 publication_ref=publication_ref, key_ref=key_ref)
+                                 publication_ref=publication_ref, key_ref=key_ref, binding=binding)
         except (WorkerEncryptedObjectsError, EncryptedObjectStoreError):
             raise
         except Exception:
             _fail()
 
     def put_or_recover(self, *, tenant_ref: object, object_ref: object, publication_ref: object,
-                       key_ref: object, plaintext: object, openbao_token: object) -> EncryptedObjectReference:
+                       key_ref: object, binding: object, plaintext: object,
+                       openbao_token: object) -> EncryptedObjectReference:
         """Create once, or recover only the same pre-authorized publication.
 
         Callers must persist an immutable publication intent before invoking
@@ -208,27 +208,23 @@ class WorkerEncryptedObjects:
         """
         try:
             return self.put(tenant_ref=tenant_ref, object_ref=object_ref, publication_ref=publication_ref,
-                            key_ref=key_ref, plaintext=plaintext, openbao_token=openbao_token)
+                            key_ref=key_ref, binding=binding, plaintext=plaintext, openbao_token=openbao_token)
         except EncryptedObjectAlreadyExistsError:
             reference = self.recover(tenant_ref=tenant_ref, object_ref=object_ref,
                                      publication_ref=publication_ref, key_ref=key_ref,
-                                     openbao_token=openbao_token)
-            # A publication marker proves that this is the intended durable
-            # object slot, not that a newly supplied retry payload is equal.
-            # Authenticate the recovered bytes before accepting a retry with a
-            # plaintext argument. Explicit ``recover`` has no plaintext and is
-            # reserved for M39's immutable, durable publication intent.
-            recovered = self.get(tenant_ref=tenant_ref, reference=reference, openbao_token=openbao_token)
-            if type(plaintext) is not bytes or not compare_digest(recovered, plaintext):
-                _fail()
+                                     binding=binding, openbao_token=openbao_token)
+            # ``recover`` authenticated the stored envelope against the same
+            # immutable payload commitment; it never needs to expose recovered
+            # plaintext merely to compare a retry.
             return reference
 
-    def get(self, *, tenant_ref: object, reference: object, openbao_token: object) -> bytes:
+    def get(self, *, tenant_ref: object, reference: object, binding: object,
+            openbao_token: object) -> bytes:
         try:
             # See ``put``: this temporary store cannot escape the operation.
             store = EncryptedObjectStore(data_keys=_ScopedOpenBaoDataKeys(self._openbao, openbao_token),
                                          transport=_S3EnvelopeTransport(self._ciphertexts))
-            return store.get(tenant_ref=tenant_ref, reference=reference)
+            return store.get(tenant_ref=tenant_ref, reference=reference, binding=binding)
         except (WorkerEncryptedObjectsError, EncryptedObjectStoreError):
             raise
         except Exception:
