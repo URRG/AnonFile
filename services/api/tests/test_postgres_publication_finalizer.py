@@ -117,8 +117,9 @@ def test_postgresql_finalization_rejects_expired_and_reclaimed_claim_without_wri
     state = pg_finalizer
     with state["psycopg"].connect(state["dsn"], autocommit=True) as connection:
         leased_at, lease_expires_at = connection.execute(
-            "UPDATE anonflow_worker_jobs SET leased_at=clock_timestamp()-interval '3 seconds', "
-            "lease_expires_at=clock_timestamp()-interval '1 second' "
+            "WITH database_clock AS (SELECT date_trunc('second', clock_timestamp()) AS now) "
+            "UPDATE anonflow_worker_jobs SET leased_at=database_clock.now-interval '3 seconds', "
+            "lease_expires_at=database_clock.now-interval '1 second' FROM database_clock "
             "WHERE tenant_ref=%s AND work_ref=%s RETURNING leased_at, lease_expires_at",
             (state["plan"].tenant_ref, state["plan"].work_ref)).fetchone()
     expired_claim = LeasedWorkerClaim(
