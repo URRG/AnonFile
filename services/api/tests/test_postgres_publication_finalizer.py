@@ -116,8 +116,16 @@ def test_postgresql_finalization_concurrent_same_claim_commits_exactly_once(pg_f
 def test_postgresql_finalization_rejects_expired_and_reclaimed_claim_without_write(pg_finalizer):
     state = pg_finalizer
     with state["psycopg"].connect(state["dsn"], autocommit=True) as connection:
-        connection.execute("UPDATE anonflow_worker_jobs SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE tenant_ref=%s AND work_ref=%s", (state["plan"].tenant_ref, state["plan"].work_ref))
-    with pytest.raises(PostgresPublicationFinalizationError): _finalizer(state).finalize(claim=state["claim"], reference=state["reference"], openbao_token="test-token")
+        leased_at, lease_expires_at = connection.execute(
+            "UPDATE anonflow_worker_jobs SET leased_at=clock_timestamp()-interval '3 seconds', "
+            "lease_expires_at=clock_timestamp()-interval '1 second' "
+            "WHERE tenant_ref=%s AND work_ref=%s RETURNING leased_at, lease_expires_at",
+            (state["plan"].tenant_ref, state["plan"].work_ref)).fetchone()
+    expired_claim = LeasedWorkerClaim(
+        state["claim"].tenant_ref, state["claim"].work_ref, state["claim"].claim_id,
+        state["claim"].worker_ref, state["claim"].delivery_attempt,
+        state["claim"].lease_epoch, leased_at, lease_expires_at)
+    with pytest.raises(PostgresPublicationFinalizationError): _finalizer(state).finalize(claim=expired_claim, reference=state["reference"], openbao_token="test-token")
     replacement = state["jobs"].claim(state["plan"].tenant_ref, opaque("workerref:v1:"), lease_seconds=60)
     assert replacement is not None and replacement.lease_epoch == state["claim"].lease_epoch + 1
     with pytest.raises(PostgresPublicationFinalizationError): _finalizer(state).finalize(claim=state["claim"], reference=state["reference"], openbao_token="test-token")
