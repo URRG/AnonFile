@@ -62,6 +62,9 @@ def fails(call):
 
 
 def test_round_trip_returns_only_reference_and_keeps_key_material_out_of_metadata():
+    secret = b"secret-dek-marker-32-bytes-12345"
+    assert len(secret) == 32
+    assert "secret-dek-marker" not in repr(GeneratedDataKey(secret, "wrapped:test"))
     value = store()
     reference = value.put(tenant_ref=TENANT, object_ref=OBJECT, key_ref=KEY, plaintext=b"private source")
     assert value.get(tenant_ref=TENANT, reference=reference) == b"private source"

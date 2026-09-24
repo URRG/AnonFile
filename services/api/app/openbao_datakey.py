@@ -9,7 +9,7 @@ operation; this module has no persistence facility for it.
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import re
 import socket
@@ -82,7 +82,7 @@ class OpenBaoDataKeyConfig:
 class TransitDataKey:
     """Ephemeral plaintext DEK paired with its opaque Transit-wrapped form."""
 
-    plaintext_key: bytes
+    plaintext_key: bytes = field(repr=False)
     wrapped_key: str
     key_version: int
 

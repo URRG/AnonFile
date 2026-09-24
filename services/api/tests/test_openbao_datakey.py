@@ -116,6 +116,9 @@ def test_rejects_invalid_config_inputs_context_tokens_and_redirects():
 
 
 def test_plaintext_is_not_representable_in_the_wrapped_key_or_response_contract():
+    secret = b"secret-dek-marker-32-bytes-12345"
+    assert len(secret) == 32
+    assert "secret-dek-marker" not in repr(TransitDataKey(secret, WRAPPED, 7))
     with pytest.raises(ValueError, match="^invalid Transit data key$"):
         TransitDataKey(bytearray(b"p" * 32), WRAPPED, 7)
     with pytest.raises(OpenBaoDataKeyError, match="^data-key unwrap unavailable$"):

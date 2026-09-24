@@ -32,7 +32,8 @@ only that same opaque `key_ref`, exact ciphertext version, and context, and
 returns only an exact 32-byte plaintext key. Callers must use the plaintext key
 immediately for local authenticated encryption/decryption and must never persist
 or log it. Python cannot guarantee memory zeroization, so this module makes no
-such claim. M31 may persist only `wrapped_key` inside its authenticated ciphertext
+such claim. The temporary result's representation redacts the plaintext key;
+that is defense in depth, not permission to log result objects. M31 may persist only `wrapped_key` inside its authenticated ciphertext
 envelope, never in metadata.
 
 ## Exact least-privilege policy

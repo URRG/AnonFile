@@ -17,6 +17,8 @@ then stores one canonical JSON envelope through an injected
 are recorded in `production_substrate.EncryptedObjectReference`; neither the
 reference nor the control plane contains the wrapped key, nonce, ciphertext,
 plaintext, or plaintext data key.
+The temporary generated-key object's representation redacts its plaintext key,
+but workers still must not log or retain that object.
 
 Both Transit key operations and AES-GCM use the same canonical
 domain-separated context: envelope version, tenant reference, object
