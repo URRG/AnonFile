@@ -294,7 +294,8 @@ def test_postgres_rotation_blocks_old_reader_until_new_version_is_current(postgr
     authority.create(item)
     authority.terminal(tenant_ref=TENANT, destination_ref=item.destination_ref, version=1,
                        expected_generation=0, state="DEACTIVATED", event_ref=opaque("destinationfence:v1:"))
-    successor = profile(destination_ref=item.destination_ref, version=2, expires_at=item.expires_at)
+    successor = profile(destination_ref=item.destination_ref, version=2,
+                        not_before=item.not_before, expires_at=item.expires_at)
     with psycopg.connect(dsn, autocommit=True) as blocker:
         cursor = blocker.cursor()
         cursor.execute("BEGIN")
