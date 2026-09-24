@@ -82,10 +82,14 @@ def _digest(value: object) -> str:
 def _signature(value: object) -> bytes:
     value = _match(value, _SIGNATURE)
     try:
-        result = base64.urlsafe_b64decode(value.rsplit(":", 1)[1] + "==")
+        encoded = value.rsplit(":", 1)[1]
+        result = base64.urlsafe_b64decode(encoded + "==")
     except (ValueError, UnicodeError):
         _fail()
-    if len(result) != 64:
+    # ``urlsafe_b64decode`` permits non-zero unused low bits in the final
+    # sextet.  Treating those alternative spellings as distinct signed text
+    # would produce distinct receipt digests for the same Ed25519 signature.
+    if len(result) != 64 or base64.urlsafe_b64encode(result).decode("ascii").rstrip("=") != encoded:
         _fail()
     return result
 
@@ -208,7 +212,8 @@ class ExternalAuditReceiptVerifier:
                 if receipt.sequence != 1 or receipt.previous_receipt_digest is not None:
                     return False
             elif (type(previous) is not ExternalAuditReceipt or receipt.sequence != previous.sequence + 1
-                  or receipt.previous_receipt_digest != previous.digest or receipt.tenant_ref != previous.tenant_ref):
+                  or receipt.previous_receipt_digest != previous.digest or receipt.tenant_ref != previous.tenant_ref
+                  or receipt.anchored_at < previous.anchored_at):
                 return False
             key._public_key.verify(_signature(receipt.signature), b"external-audit-receipt-v1:" + _canonical(receipt.canonical()))
             return True

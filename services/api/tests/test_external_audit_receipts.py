@@ -47,9 +47,30 @@ def test_unknown_key_wrong_fingerprint_bad_signature_and_future_receipt_fail_clo
     item = receipt(private, key)
     assert not ExternalAuditReceiptVerifier((AnchorServiceKey(service_id=SERVICE, key_id="other", public_key_b64=key.public_key_b64),)).verify(item, tenant_ref=TENANT, checkpoint_digest=CHECKPOINT_1, at=NOW)
     assert not verifier.verify(replace(item, public_key_fingerprint="sha256:" + "0" * 64), tenant_ref=TENANT, checkpoint_digest=CHECKPOINT_1, at=NOW)
-    assert not verifier.verify(replace(item, signature="external-audit-receipt-sig:v1:" + "Z" * 86), tenant_ref=TENANT, checkpoint_digest=CHECKPOINT_1, at=NOW)
+    encoded = item.signature.rsplit(":", 1)[1]
+    corrupted = ("A" if encoded[0] != "A" else "B") + encoded[1:]
+    assert not verifier.verify(replace(item, signature="external-audit-receipt-sig:v1:" + corrupted), tenant_ref=TENANT, checkpoint_digest=CHECKPOINT_1, at=NOW)
     future = receipt(private, key, when=NOW + timedelta(seconds=1))
     assert not verifier.verify(future, tenant_ref=TENANT, checkpoint_digest=CHECKPOINT_1, at=NOW)
+
+
+def test_signature_requires_canonical_base64url_encoding_without_unused_bit_aliases():
+    private, key, _ = setup(); item = receipt(private, key)
+    encoded = item.signature.rsplit(":", 1)[1]
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    # A 64-byte signature leaves four unused bits in its final base64url
+    # sextet.  Toggle one: permissive decoders recover the same bytes.
+    alternate = encoded[:-1] + alphabet[alphabet.index(encoded[-1]) ^ 1]
+    assert base64.urlsafe_b64decode(encoded + "==") == base64.urlsafe_b64decode(alternate + "==")
+    with pytest.raises(ExternalAuditReceiptError):
+        replace(item, signature="external-audit-receipt-sig:v1:" + alternate)
+
+
+def test_link_rejects_an_anchor_time_that_precedes_its_verified_predecessor():
+    private, key, verifier = setup(); first = receipt(private, key, when=NOW)
+    second = receipt(private, key, 2, CHECKPOINT_2, first.digest, NOW - timedelta(seconds=1))
+    assert not verifier.verify(second, tenant_ref=TENANT, checkpoint_digest=CHECKPOINT_2, at=NOW,
+                               previous=first)
 
 
 def test_safe_record_parse_rejects_extra_fields_and_digest_tampering():
@@ -82,7 +103,9 @@ def test_persisted_chain_is_reverified_before_it_can_be_used_as_a_parent(tmp_pat
     store.accept(first, tenant_ref=TENANT, checkpoint_digest=CHECKPOINT_1, at=NOW)
     # Simulate an attacker with database write access who can recompute record
     # digests but cannot make an independent anchor-service signature.
-    forged = replace(first, signature="external-audit-receipt-sig:v1:" + "Z" * 86)
+    encoded = first.signature.rsplit(":", 1)[1]
+    corrupted = ("A" if encoded[0] != "A" else "B") + encoded[1:]
+    forged = replace(first, signature="external-audit-receipt-sig:v1:" + corrupted)
     store._connection.execute("UPDATE external_audit_receipts SET record=?", (__import__("json").dumps(forged.to_record()),))
     with pytest.raises(ExternalAuditReceiptError): store.head(TENANT, at=NOW)
     store.close()
