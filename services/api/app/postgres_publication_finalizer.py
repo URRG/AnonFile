@@ -12,9 +12,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.postgres_metadata import PostgresControlPlaneMetadata
-from app.postgres_publication_intents import PublicationIntent, _decode
+from app.postgres_publication_intents import _decode
 from app.production_substrate import (ControlPlaneMetadata, EncryptedObjectReference,
                                       LeasedWorkerClaim, TenantMetadataTransaction)
+from app.worker_encrypted_objects import WorkerEncryptedObjects
 
 
 class PostgresPublicationFinalizationError(RuntimeError):
@@ -23,7 +24,7 @@ class PostgresPublicationFinalizationError(RuntimeError):
 
 
 def _fail() -> None:
-    raise PostgresPublicationFinalizationError()
+    raise PostgresPublicationFinalizationError() from None
 
 
 def _canonical(value: object) -> str:
@@ -58,10 +59,10 @@ class PostgresPublicationFinalizer:
     then metadata record.  The helper called below owns no transaction boundary.
     """
     def __init__(self, connection_factory: Callable[[], Any],
-                 reference_verifier: Callable[[EncryptedObjectReference], EncryptedObjectReference]) -> None:
-        if not callable(connection_factory) or not callable(reference_verifier): _fail()
+                 encrypted_objects: WorkerEncryptedObjects) -> None:
+        if not callable(connection_factory) or type(encrypted_objects) is not WorkerEncryptedObjects: _fail()
         self._connection_factory = connection_factory
-        self._reference_verifier = reference_verifier
+        self._encrypted_objects = encrypted_objects
 
     @staticmethod
     def _close(connection: Any) -> None:
@@ -73,14 +74,18 @@ class PostgresPublicationFinalizer:
         try: connection.cursor().execute("ROLLBACK")
         except Exception: pass
 
-    def finalize(self, *, claim: LeasedWorkerClaim, reference: EncryptedObjectReference) -> PublicationFinalization:
+    def finalize(self, *, claim: LeasedWorkerClaim, reference: EncryptedObjectReference,
+                 openbao_token: str) -> PublicationFinalization:
         if type(claim) is not LeasedWorkerClaim or type(reference) is not EncryptedObjectReference:
             _fail()
         if claim.tenant_ref != reference.tenant_ref: _fail()
-        # This occurs before BEGIN: a verifier must use the worker's narrowly
-        # scoped M38 recovery/get path to authenticate envelope, AAD and key.
+        # Authenticate the exact S3 object and OpenBao-wrapped key before BEGIN.
+        # The token remains call-scoped; the finalizer never stores it.
         try:
-            verified = self._reference_verifier(reference)
+            verified = self._encrypted_objects.recover(
+                tenant_ref=reference.tenant_ref, object_ref=reference.object_ref,
+                publication_ref=reference.publication_ref, key_ref=reference.key_ref,
+                openbao_token=openbao_token)
         except Exception:
             _fail()
         if type(verified) is not EncryptedObjectReference or verified != reference:
@@ -101,7 +106,12 @@ class PostgresPublicationFinalizer:
             if (intent.work_ref != claim.work_ref or intent.object_ref != reference.object_ref
                     or intent.key_ref != reference.key_ref): _fail()
             completion = {"plan_digest": row[1], "claim_id": claim.claim_id,
-                          "lease_epoch": claim.lease_epoch, "reference": {
+                          "worker_ref": claim.worker_ref,
+                          "delivery_attempt": claim.delivery_attempt,
+                          "lease_epoch": claim.lease_epoch,
+                          "leased_at": claim.leased_at.isoformat(),
+                          "lease_expires_at": claim.lease_expires_at.isoformat(),
+                          "reference": {
                               "tenant_ref": reference.tenant_ref, "object_ref": reference.object_ref,
                               "publication_ref": reference.publication_ref, "key_ref": reference.key_ref,
                               "ciphertext_digest": reference.ciphertext_digest,

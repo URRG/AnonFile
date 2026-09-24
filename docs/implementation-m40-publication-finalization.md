@@ -1,9 +1,11 @@
 # M40b claim-fenced publication finalization
 
-`PostgresPublicationFinalizer` is a database-only orchestration seam.  Before
-calling it, a worker must create/recover and cryptographically authenticate the
-M38 encrypted object; no S3 or OpenBao request occurs while this adapter holds
-a PostgreSQL transaction.
+`PostgresPublicationFinalizer` requires a concrete `WorkerEncryptedObjects`
+adapter and a per-call OpenBao token. It recovers and cryptographically
+authenticates the exact M38 encrypted object **before** opening the database
+transaction. The token is never stored on the finalizer, and no S3 or OpenBao
+request occurs while it holds a PostgreSQL transaction. A caller cannot replace
+the verification step with an identity callback.
 
 Construction requires a deployment-owned reference verifier.  It must recover
 and authenticate the exact M38 object (including the publication-bound AAD)
