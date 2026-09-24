@@ -1,10 +1,13 @@
 # M20: OIDC/OAuth access-token identity foundation
 
 This increment is a narrow, fail-closed resource-server identity foundation.
-It does not enable customer processing, customer-data admission, export,
-approval, delivery, or a production deployment.  Existing release and output
-gates remain closed; durable storage, KMS/HSM custody, network isolation,
-operations, and independent security review are still required.
+In `production`, the application exposes only `GET /health` and authenticated
+`GET /identity`; every intake, processing, evidence, release, and approval
+route is blocked with a fixed 503 response before route handling.  It does not
+enable customer processing, customer-data admission, export, approval,
+delivery, or a production deployment.  Existing release and output gates
+remain closed; durable storage, KMS/HSM custody, network isolation, operations,
+and independent security review are still required.
 
 ## Explicit configuration
 

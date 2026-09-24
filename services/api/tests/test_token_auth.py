@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
+from app.main import create_app
 from app.security import configure_auth, require_roles
 
 
@@ -338,6 +339,28 @@ def test_production_requires_explicit_jwt_configuration(config, monkeypatch, pri
     monkeypatch.setenv("ANONFLOW_AUTH_MODE", "dev-token")
     with pytest.raises(RuntimeError, match="^Production requires JWT authentication$"):
         app()
+
+
+def test_production_exposes_only_health_and_identity(config, monkeypatch, private_key):
+    monkeypatch.setenv("ANONFLOW_ENV", "production")
+    client = TestClient(create_app())
+    authorization = {"Authorization": "Bearer " + token(private_key)}
+    assert client.get("/health").json() == {
+        "status": "ok", "service": "anonflow-api", "mode": "production", "production_ready": False,
+    }
+    assert client.get("/identity", headers=authorization).json() == {
+        "subject": "synthetic-subject", "tenant": "server-tenant", "roles": ["processor"],
+    }
+    for path, payload in (
+        ("/datasets", {"name": "synthetic", "content": "example@example.test"}),
+        ("/processing-runs", {}),
+        ("/release-cases/missing/privacy-decisions", {}),
+        ("/release-cases/missing/release-authorization-requests", {}),
+        ("/release-authorization-requests/missing/approvals", {}),
+    ):
+        response = client.post(path, headers=authorization, json=payload)
+        assert response.status_code == 503
+        assert response.json() == {"detail": "Production workflow is unavailable"}
 
 
 def test_pinned_jwks_rotation_and_revocation_take_effect_per_request(config, private_key):

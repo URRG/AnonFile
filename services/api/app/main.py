@@ -1,4 +1,4 @@
-"""Fail-closed development API. Synthetic data only; no release qualification."""
+"""Fail-closed development API with a narrowly exposed production identity boundary."""
 from __future__ import annotations
 import copy
 import hashlib
@@ -993,9 +993,27 @@ def create_app() -> FastAPI:
         response.headers["X-Content-Type-Options"] = "nosniff"
         return response
 
+    @app.middleware("http")
+    async def production_route_guard(request: Request, call_next):
+        # M20 establishes only a resource-server identity foundation.  Do not
+        # accidentally expose the development intake, processing, evidence,
+        # release, or approval workflows simply because production JWT
+        # verification is configured.  This guard runs before route handling.
+        if (app.state.auth_environment == "production"
+                and request.url.path not in {"/health", "/identity"}):
+            return JSONResponse({"detail": "Production workflow is unavailable"}, status_code=503,
+                                headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+        return await call_next(request)
+
     @app.get("/health")
     def health():
-        return {"status": "ok", "service": "anonflow-api", "mode": "development", "production_ready": False}
+        return {"status": "ok", "service": "anonflow-api", "mode": app.state.auth_environment,
+                "production_ready": False}
+
+    @app.get("/identity")
+    def identity(principal: Principal = Depends(require_roles("processor", "reviewer", "buyer", "evaluator"))):
+        """Return only the server-bound authenticated identity."""
+        return {"subject": principal.subject, "tenant": principal.tenant, "roles": sorted(principal.roles)}
 
     @app.post("/datasets", response_model=DatasetSummary, status_code=201)
     def create_dataset(request: DatasetCreate, principal: Principal = Depends(require_roles("processor"))):
