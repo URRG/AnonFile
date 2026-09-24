@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+from threading import Barrier
 
 import pytest
 
@@ -198,6 +199,21 @@ def test_idempotent_replay_rejects_a_valid_but_tampered_result_document():
         adapter.commit(request)
 
 
+def test_late_cas_conflict_rolls_back_every_earlier_write_and_transaction_claim():
+    database = FakeDatabase()
+    adapter, _connections = fake_adapter(database)
+    adapter.commit(transaction())
+    new_record = opaque("metarecord:v1:")
+    late_conflict = TenantMetadataTransaction(
+        TENANT, opaque("metatx:v1:"), {new_record: 0, RECORD: 0},
+        (metadata(record_id=new_record), metadata(record_id=RECORD)))
+
+    with pytest.raises(PostgresMetadataError):
+        adapter.commit(late_conflict)
+    assert (TENANT, new_record) not in database.records
+    assert (TENANT, late_conflict.transaction_id) not in database.transactions
+
+
 def test_postgresql_service_commit_cas_and_idempotency_when_configured():
     dsn = os.environ.get("ANONFLOW_POSTGRES_TEST_DSN")
     if not dsn:
@@ -226,6 +242,43 @@ def test_postgresql_service_commit_cas_and_idempotency_when_configured():
         results = list(executor.map(lambda _unused: adapter.commit(concurrent_request), range(2)))
     assert results == [(concurrent_write,), (concurrent_write,)]
     assert adapter.read(tenant, concurrent_record) == concurrent_write
+
+    # Unlike same-ID replay, independently named requests racing the same
+    # version are a real compare-and-swap conflict: exactly one may commit.
+    cas_tx_a, cas_tx_b = opaque("metatx:v1:"), opaque("metatx:v1:")
+    cas_a = transaction(transaction_id=cas_tx_a,
+                        write=metadata(tenant=tenant, record_id=record_id, version=2, state="RUNNING"),
+                        expected={record_id: 1})
+    cas_b = transaction(transaction_id=cas_tx_b,
+                        write=metadata(tenant=tenant, record_id=record_id, version=2, state="FAILED"),
+                        expected={record_id: 1})
+    barrier = Barrier(2)
+
+    def race(request):
+        barrier.wait()
+        try:
+            return adapter.commit(request)
+        except PostgresMetadataError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        cas_results = list(executor.map(race, (cas_a, cas_b)))
+    winners = [result for result in cas_results if result is not None]
+    assert len(winners) == 1
+    assert adapter.read(tenant, record_id) == winners[0][0]
+
+    new_record, rollback_tx = opaque("metarecord:v1:"), opaque("metatx:v1:")
+    late_conflict = TenantMetadataTransaction(
+        tenant, rollback_tx, {new_record: 0, record_id: 0},
+        (metadata(tenant=tenant, record_id=new_record), metadata(tenant=tenant, record_id=record_id)))
+    with pytest.raises(PostgresMetadataError):
+        adapter.commit(late_conflict)
+    assert adapter.read(tenant, new_record) is None
+    with psycopg.connect(dsn, autocommit=True) as connection:
+        count = connection.execute("SELECT COUNT(*) FROM anonflow_metadata_transactions "
+                                   "WHERE tenant_ref=%s AND transaction_id=%s",
+                                   (tenant, rollback_tx)).fetchone()[0]
+    assert count == 0
 
     with psycopg.connect(dsn, autocommit=True) as connection:
         connection.execute("UPDATE anonflow_metadata_records SET document=%s::jsonb "
