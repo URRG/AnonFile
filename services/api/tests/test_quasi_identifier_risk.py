@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from itertools import repeat
 
 import pytest
 
@@ -64,6 +65,15 @@ def test_canonical_numeric_and_boolean_types_do_not_collapse():
     assert report.threshold_distribution[1].record_count == 4
 
 
+def test_groups_larger_than_largest_reporting_threshold_remain_assessed():
+    report = assess([{"age": "30-39", "district": "west"} for _ in range(11)])
+    assert report.status is QuasiIdentifierRiskStatus.ASSESSED
+    assert report.record_count == 11
+    assert report.minimum_group_size == 11
+    assert report.singleton_record_count == 0
+    assert all(item.record_count == 0 for item in report.threshold_distribution)
+
+
 def test_scope_identity_is_hmac_bound_and_wrong_authority_abstains():
     config_a = AUTHORITY.create_config(["age"], scope="tenant-a")
     config_b = AUTHORITY.create_config(["age"], scope="tenant-b")
@@ -91,6 +101,10 @@ def test_limits_and_unsafe_config_fail_with_a_fixed_error(monkeypatch):
         AUTHORITY.create_config(["bad.path"], scope="tenant-a")
     with pytest.raises(QuasiIdentifierRiskError):
         AUTHORITY.create_config([f"f{i}" for i in range(33)], scope="tenant-a")
+    with pytest.raises(QuasiIdentifierRiskError):
+        AUTHORITY.create_config(["age", {}], scope="tenant-a")
+    with pytest.raises(QuasiIdentifierRiskError):
+        AUTHORITY.create_config(repeat("age"), scope="tenant-a")
     # Candidate construction is separately bounded; patching the local ceiling proves the assessment closes its own limit.
     monkeypatch.setattr("app.quasi_identifier_risk.MAX_RECORDS", 1)
     report = assess([{"age": "30", "district": "x"}, {"age": "30", "district": "x"}])

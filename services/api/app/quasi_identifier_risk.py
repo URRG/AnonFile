@@ -14,6 +14,7 @@ from enum import StrEnum
 import base64
 import hashlib
 import hmac
+from itertools import islice
 import json
 import math
 import re
@@ -77,11 +78,12 @@ def _fields(values: Iterable[str]) -> tuple[str, ...]:
     if isinstance(values, (str, bytes)):
         _fail()
     try:
-        selected = tuple(values)
+        selected = tuple(islice(values, MAX_QUASI_IDENTIFIERS + 1))
     except TypeError:
         _fail()
-    if (not 1 <= len(selected) <= MAX_QUASI_IDENTIFIERS or len(set(selected)) != len(selected)
-            or any(type(value) is not str or not _FIELD.fullmatch(value) for value in selected)):
+    if (not 1 <= len(selected) <= MAX_QUASI_IDENTIFIERS
+            or any(type(value) is not str or not _FIELD.fullmatch(value) for value in selected)
+            or len(set(selected)) != len(selected)):
         _fail()
     try:
         if any(len(value.encode("utf-8")) > MAX_FIELD_NAME_BYTES for value in selected):
@@ -197,7 +199,11 @@ class QuasiIdentifierRiskReport:
               or any(type(item) is not ThresholdDistribution for item in self.threshold_distribution)
               or any(item.record_count > self.record_count for item in self.threshold_distribution)
               or self.threshold_distribution[0].record_count != self.singleton_record_count
-              or self.threshold_distribution[-1].record_count != self.record_count
+              or any(item.record_count != 0 for item in self.threshold_distribution
+                     if item.maximum_group_size < self.minimum_group_size)
+              or (self.minimum_group_size <= THRESHOLDS[-1]
+                  and not any(item.record_count > 0 for item in self.threshold_distribution
+                              if item.maximum_group_size >= self.minimum_group_size))
               or (self.minimum_group_size == 1 and self.singleton_record_count == 0)
               or (self.minimum_group_size > 1 and self.singleton_record_count != 0)
               or any(left.record_count > right.record_count for left, right in zip(self.threshold_distribution, self.threshold_distribution[1:]))):
