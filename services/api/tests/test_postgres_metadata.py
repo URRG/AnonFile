@@ -164,6 +164,43 @@ def test_commit_is_atomic_exact_cas_and_idempotent_with_a_fake_connection():
     assert adapter.read(TENANT, RECORD) == second_write
 
 
+def test_prepared_cursor_helper_owns_no_transaction_boundary_and_can_be_rolled_back():
+    """M40 may compose this private seam with its own claim transaction."""
+    database = FakeDatabase()
+    adapter, _connections = fake_adapter(database)
+    request = transaction()
+    digest, documents = adapter._transaction_document(request)
+    connection = FakeConnection(database)
+    raw_cursor = connection.cursor()
+    raw_cursor.execute("BEGIN")
+
+    class CallerOwnedCursor:
+        def execute(self, sql, params=()):
+            # The helper may issue only data statements; its caller owns the
+            # outer transaction and will decide whether to commit or rollback.
+            assert " ".join(sql.split()) not in {"BEGIN", "COMMIT", "ROLLBACK"}
+            return raw_cursor.execute(sql, params)
+
+        def fetchone(self):
+            return raw_cursor.fetchone()
+
+        @property
+        def rowcount(self):
+            return raw_cursor.rowcount
+
+    result = adapter._apply_prepared_transaction(CallerOwnedCursor(), request, digest, documents)
+    assert result == request.writes
+    assert connection.committed is False
+    assert connection.rolled_back is False
+    # The fake exposes the transaction's private snapshot, so a successful
+    # helper call is not durable until the caller elects to commit.
+    assert database.records == {}
+
+    raw_cursor.execute("ROLLBACK")
+    assert connection.rolled_back is True
+    assert database.records == {}
+
+
 def test_conflicts_and_reused_ids_with_different_requests_fail_closed_and_rollback():
     database = FakeDatabase()
     adapter, connections = fake_adapter(database)

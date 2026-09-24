@@ -154,6 +154,96 @@ class PostgresControlPlaneMetadata:
         except Exception:
             pass
 
+    @staticmethod
+    def _apply_prepared_transaction(cursor: Any, transaction: TenantMetadataTransaction,
+                                    request_digest: str,
+                                    documents: list[dict[str, object]]) -> tuple[ControlPlaneMetadata, ...]:
+        """Apply one prepared M26 commit through a caller-owned transaction.
+
+        This deliberately performs neither ``BEGIN``/``COMMIT`` nor rollback.
+        The public :meth:`commit` method remains the only public transaction
+        owner.  A later bounded orchestration adapter can use this private seam
+        with a locked worker claim without splitting metadata CAS and job
+        acknowledgement across database transactions.
+
+        ``request_digest`` and ``documents`` must be produced by
+        :meth:`_transaction_document` for this exact ``transaction`` before
+        opening the caller-owned transaction.  Keeping preparation separate
+        preserves ``commit``'s existing fail-before-connect behavior.
+        """
+        if (cursor is None or type(transaction) is not TenantMetadataTransaction
+                or type(request_digest) is not str or type(documents) is not list):
+            _fail()
+        # Recompute only the small metadata representation to ensure a future
+        # internal caller cannot pair a valid transaction with another plan.
+        # This is validation, not a transaction operation.
+        expected_digest, expected_documents = PostgresControlPlaneMetadata._transaction_document(transaction)
+        if request_digest != expected_digest or documents != expected_documents:
+            _fail()
+        if not callable(getattr(cursor, "execute", None)):
+            _fail()
+        cursor.execute(
+            "INSERT INTO anonflow_metadata_transactions "
+            "(tenant_ref, transaction_id, request_digest, result_document) "
+            "VALUES (%s, %s, %s, NULL) ON CONFLICT DO NOTHING RETURNING transaction_id",
+            (transaction.tenant_ref, transaction.transaction_id, request_digest))
+        claimed = _row(cursor)
+        if claimed is None:
+            cursor.execute(
+                "SELECT request_digest, CASE WHEN octet_length(result_document::text) <= %s "
+                "THEN result_document ELSE NULL END, result_document IS NOT NULL "
+                "FROM anonflow_metadata_transactions "
+                "WHERE tenant_ref=%s AND transaction_id=%s FOR UPDATE",
+                (MAX_TRANSACTION_RESULT_BYTES, transaction.tenant_ref, transaction.transaction_id))
+            prior = _row(cursor)
+            if (prior is None or len(prior) != 3 or prior[0] != request_digest
+                    or prior[1] is None or prior[2] is not True):
+                _fail()
+            if type(prior[1]) is str:
+                prior_document = json.loads(prior[1])
+            else:
+                prior_document = prior[1]
+            if (type(prior_document) is not list or len(prior_document) != len(documents)
+                    or _canonical(prior_document) != _canonical(documents)):
+                _fail()
+            return tuple(_decode_document(item, tenant_ref=transaction.tenant_ref,
+                                          record_id=write.record_id, version=write.version)
+                         for item, write in zip(prior_document, transaction.writes, strict=True))
+        if len(claimed) != 1 or claimed[0] != transaction.transaction_id:
+            _fail()
+        for write, document in zip(transaction.writes, documents, strict=True):
+            expected = transaction.expected_versions[write.record_id]
+            cursor.execute(
+                "SELECT version FROM anonflow_metadata_records "
+                "WHERE tenant_ref=%s AND record_id=%s FOR UPDATE",
+                (transaction.tenant_ref, write.record_id))
+            existing = _row(cursor)
+            if expected == 0:
+                if existing is not None:
+                    _fail()
+                cursor.execute(
+                    "INSERT INTO anonflow_metadata_records (tenant_ref, record_id, version, document) "
+                    "VALUES (%s, %s, %s, %s::jsonb) ON CONFLICT DO NOTHING",
+                    (transaction.tenant_ref, write.record_id, write.version, _canonical(document)))
+            else:
+                if (existing is None or len(existing) != 1 or existing[0] != expected):
+                    _fail()
+                cursor.execute(
+                    "UPDATE anonflow_metadata_records SET version=%s, document=%s::jsonb "
+                    "WHERE tenant_ref=%s AND record_id=%s AND version=%s",
+                    (write.version, _canonical(document), transaction.tenant_ref,
+                     write.record_id, expected))
+            if cursor.rowcount != 1:
+                _fail()
+        result_document = _canonical(documents)
+        cursor.execute(
+            "UPDATE anonflow_metadata_transactions SET result_document=%s::jsonb "
+            "WHERE tenant_ref=%s AND transaction_id=%s AND request_digest=%s AND result_document IS NULL",
+            (result_document, transaction.tenant_ref, transaction.transaction_id, request_digest))
+        if cursor.rowcount != 1:
+            _fail()
+        return tuple(transaction.writes)
+
     def commit(self, transaction: TenantMetadataTransaction) -> tuple[ControlPlaneMetadata, ...]:
         """Atomically apply exact-version writes, or return the prior same-ID commit.
 
@@ -168,70 +258,9 @@ class PostgresControlPlaneMetadata:
                 _fail()
             cursor = connection.cursor()
             cursor.execute("BEGIN")
-            cursor.execute(
-                "INSERT INTO anonflow_metadata_transactions "
-                "(tenant_ref, transaction_id, request_digest, result_document) "
-                "VALUES (%s, %s, %s, NULL) ON CONFLICT DO NOTHING RETURNING transaction_id",
-                (transaction.tenant_ref, transaction.transaction_id, request_digest))
-            claimed = _row(cursor)
-            if claimed is None:
-                cursor.execute(
-                    "SELECT request_digest, CASE WHEN octet_length(result_document::text) <= %s "
-                    "THEN result_document ELSE NULL END, result_document IS NOT NULL "
-                    "FROM anonflow_metadata_transactions "
-                    "WHERE tenant_ref=%s AND transaction_id=%s FOR UPDATE",
-                    (MAX_TRANSACTION_RESULT_BYTES, transaction.tenant_ref, transaction.transaction_id))
-                prior = _row(cursor)
-                if (prior is None or len(prior) != 3 or prior[0] != request_digest
-                        or prior[1] is None or prior[2] is not True):
-                    _fail()
-                if type(prior[1]) is str:
-                    prior_document = json.loads(prior[1])
-                else:
-                    prior_document = prior[1]
-                if (type(prior_document) is not list or len(prior_document) != len(documents)
-                        or _canonical(prior_document) != _canonical(documents)):
-                    _fail()
-                result = tuple(_decode_document(item, tenant_ref=transaction.tenant_ref,
-                                                 record_id=write.record_id, version=write.version)
-                               for item, write in zip(prior_document, transaction.writes, strict=True))
-                self._commit(connection)
-                return result
-            if len(claimed) != 1 or claimed[0] != transaction.transaction_id:
-                _fail()
-            for write, document in zip(transaction.writes, documents, strict=True):
-                expected = transaction.expected_versions[write.record_id]
-                cursor.execute(
-                    "SELECT version FROM anonflow_metadata_records "
-                    "WHERE tenant_ref=%s AND record_id=%s FOR UPDATE",
-                    (transaction.tenant_ref, write.record_id))
-                existing = _row(cursor)
-                if expected == 0:
-                    if existing is not None:
-                        _fail()
-                    cursor.execute(
-                        "INSERT INTO anonflow_metadata_records (tenant_ref, record_id, version, document) "
-                        "VALUES (%s, %s, %s, %s::jsonb) ON CONFLICT DO NOTHING",
-                        (transaction.tenant_ref, write.record_id, write.version, _canonical(document)))
-                else:
-                    if (existing is None or len(existing) != 1 or existing[0] != expected):
-                        _fail()
-                    cursor.execute(
-                        "UPDATE anonflow_metadata_records SET version=%s, document=%s::jsonb "
-                        "WHERE tenant_ref=%s AND record_id=%s AND version=%s",
-                        (write.version, _canonical(document), transaction.tenant_ref,
-                         write.record_id, expected))
-                if cursor.rowcount != 1:
-                    _fail()
-            result_document = _canonical(documents)
-            cursor.execute(
-                "UPDATE anonflow_metadata_transactions SET result_document=%s::jsonb "
-                "WHERE tenant_ref=%s AND transaction_id=%s AND request_digest=%s AND result_document IS NULL",
-                (result_document, transaction.tenant_ref, transaction.transaction_id, request_digest))
-            if cursor.rowcount != 1:
-                _fail()
+            result = self._apply_prepared_transaction(cursor, transaction, request_digest, documents)
             self._commit(connection)
-            return tuple(transaction.writes)
+            return result
         except PostgresMetadataError:
             if connection is not None:
                 self._rollback(connection)
