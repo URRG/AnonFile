@@ -1,13 +1,14 @@
 import base64
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from app.postgres_publication_intents import PublicationIntent, _plan_digest
 from app.publication_authorization import (PinnedPublicationAuthorizationVerifier,
-                                           PublicationAuthorizationAttestation)
+                                           PublicationAuthorizationAttestation,
+                                           PublicationAuthorizationError, _time)
 from app.publication_payload_binding import PublicationPayloadBinding, payload_digest
 
 
@@ -56,7 +57,7 @@ def _signed(private, intent, binding, *, issued_at=NOW, expires_at=NOW + timedel
 
 
 def _verifier(private):
-    return PinnedPublicationAuthorizationVerifier({"issuer-a": private.public_key().public_bytes(
+    return PinnedPublicationAuthorizationVerifier({(TENANT, "issuer-a"): private.public_key().public_bytes(
         serialization.Encoding.Raw, serialization.PublicFormat.Raw)})
 
 
@@ -156,3 +157,24 @@ def test_rejects_expired_future_and_untrusted_issuer():
         expires_at=future + timedelta(minutes=1)), intent=intent, binding=binding, at=NOW)
     outsider = Ed25519PrivateKey.generate()
     assert not verifier.verify(attestation=_signed(outsider, intent, binding), intent=intent, binding=binding, at=NOW)
+
+
+def test_rejects_a_valid_signature_when_the_pin_is_for_another_tenant():
+    private = Ed25519PrivateKey.generate()
+    other_tenant = "tenantref:v1:" + "J" * 43
+    other_intent = PublicationIntent(other_tenant, "publicationref:v1:" + "K" * 43,
+        "metatx:v1:" + "L" * 43, "objectref:v1:" + "M" * 43, KEY,
+        "workref:v1:" + "N" * 43, TARGET, "release_output", "sha256:" + "1" * 64,
+        "sha256:" + "2" * 64, 0, {})
+    other_binding = _binding(other_intent)
+    other_attestation = _signed(private, other_intent, other_binding)
+    assert not _verifier(private).verify(attestation=other_attestation, intent=other_intent,
+                                         binding=other_binding, at=NOW)
+
+
+def test_extreme_aware_timestamp_is_a_fixed_validation_error():
+    try:
+        _time(datetime.max.replace(tzinfo=timezone(-timedelta(hours=1))))
+        assert False, "overflowing timestamp accepted"
+    except PublicationAuthorizationError:
+        pass

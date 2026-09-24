@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 import hashlib
 import json
 import re
@@ -214,6 +215,44 @@ def _decode_binding(row: tuple[object, ...] | None, *, intent: PublicationIntent
     return binding
 
 
+def _authorization_types() -> tuple[type, type]:
+    """Defer the reverse import: M43a's contract names this intent type."""
+    from app.publication_authorization import (PinnedPublicationAuthorizationVerifier,
+                                               PublicationAuthorizationAttestation)
+    return PinnedPublicationAuthorizationVerifier, PublicationAuthorizationAttestation
+
+
+def _database_now(cursor: Any) -> datetime:
+    cursor.execute("SELECT date_trunc('second', clock_timestamp())")
+    row = _row(cursor)
+    if row is None or len(row) != 1 or type(row[0]) is not datetime or row[0].tzinfo is None:
+        _fail()
+    result = row[0].astimezone(UTC)
+    if result.microsecond:
+        _fail()
+    return result
+
+
+def _decode_authorization(row: tuple[object, ...] | None, *, intent: PublicationIntent,
+                          binding: PublicationPayloadBinding, verifier: object,
+                          at: datetime) -> object:
+    verifier_type, attestation_type = _authorization_types()
+    if type(verifier) is not verifier_type or row is None or len(row) != 3:
+        _fail()
+    digest, expires_at, document = row
+    try:
+        if type(document) is str:
+            document = json.loads(document)
+        attestation = attestation_type.from_record(document)
+    except (AttributeError, TypeError, ValueError):
+        _fail()
+    if (attestation.digest != digest or attestation.expires_at != expires_at
+            or not verifier.verify(attestation=attestation, intent=intent,
+                                    binding=binding, at=at)):
+        _fail()
+    return attestation
+
+
 class PostgresPublicationIntents:
     """Atomic create-or-return ledger for immutable PENDING publication plans.
 
@@ -221,10 +260,12 @@ class PostgresPublicationIntents:
     literal ``autocommit=True``.  This adapter owns its explicit transaction.
     """
 
-    def __init__(self, connection_factory: Callable[[], Any]) -> None:
-        if not callable(connection_factory):
+    def __init__(self, connection_factory: Callable[[], Any], authorization_verifier: object) -> None:
+        verifier_type, _ = _authorization_types()
+        if not callable(connection_factory) or type(authorization_verifier) is not verifier_type:
             _fail()
         self._connection_factory = connection_factory
+        self._authorization_verifier = authorization_verifier
 
     @staticmethod
     def _rollback(connection: Any) -> None:
@@ -253,14 +294,16 @@ class PostgresPublicationIntents:
             _fail()
         return connection
 
-    def begin(self, intent: PublicationIntent,
-              binding: PublicationPayloadBinding) -> PublicationIntent:
-        """Atomically create or return an exact plan *and* payload binding.
+    def begin(self, intent: PublicationIntent, binding: PublicationPayloadBinding,
+              attestation: object) -> PublicationIntent:
+        """Atomically create or return an exact plan, binding, and authorization.
 
         Reusing either immutable identity (publication ref or tenant-scoped
         transaction id) with any altered canonical plan fails closed.
         """
-        if type(intent) is not PublicationIntent or type(binding) is not PublicationPayloadBinding:
+        _, attestation_type = _authorization_types()
+        if (type(intent) is not PublicationIntent or type(binding) is not PublicationPayloadBinding
+                or type(attestation) is not attestation_type):
             _fail()
         document, digest = _canonical(_document(intent)), _plan_digest(intent)
         if (binding.tenant_ref != intent.tenant_ref or binding.publication_ref != intent.publication_ref
@@ -272,6 +315,10 @@ class PostgresPublicationIntents:
             connection = self._connection()
             cursor = connection.cursor()
             cursor.execute("BEGIN")
+            moment = _database_now(cursor)
+            if not self._authorization_verifier.verify(attestation=attestation, intent=intent,
+                                                       binding=binding, at=moment):
+                _fail()
             cursor.execute(
                 "INSERT INTO anonflow_publication_intents "
                 "(publication_ref, tenant_ref, transaction_id, object_ref, plan_digest, document) "
@@ -326,6 +373,46 @@ class PostgresPublicationIntents:
             loaded_binding = _decode_binding(stored_binding, intent=loaded, plan_digest=digest)
             if loaded_binding != binding:
                 _fail()
+            authorization_document = json.dumps(attestation.to_record(), ensure_ascii=True,
+                                                 allow_nan=False, sort_keys=True,
+                                                 separators=(",", ":"))
+            if len(authorization_document.encode("ascii")) > _MAX_ROW_BYTES:
+                _fail()
+            if inserted_intent:
+                cursor.execute(
+                    "INSERT INTO anonflow_publication_authorizations "
+                    "(tenant_ref, publication_ref, attestation_digest, expires_at, document) "
+                    "SELECT %s, %s, %s, %s, %s::jsonb "
+                    "WHERE %s <= date_trunc('second', clock_timestamp()) "
+                    "AND %s > date_trunc('second', clock_timestamp()) "
+                    "RETURNING attestation_digest, expires_at, document",
+                    (intent.tenant_ref, intent.publication_ref, attestation.digest,
+                     attestation.expires_at, authorization_document, attestation.issued_at,
+                     attestation.expires_at))
+                stored_authorization = _row(cursor)
+                if cursor.rowcount != 1:
+                    _fail()
+            else:
+                cursor.execute(
+                    "SELECT attestation_digest, expires_at, "
+                    "CASE WHEN octet_length(document::text) <= %s THEN document ELSE NULL END "
+                    "FROM anonflow_publication_authorizations "
+                    "WHERE tenant_ref=%s AND publication_ref=%s FOR UPDATE",
+                    (_MAX_ROW_BYTES, intent.tenant_ref, intent.publication_ref))
+                stored_authorization = _row(cursor)
+            if _decode_authorization(stored_authorization, intent=loaded,
+                                     binding=loaded_binding,
+                                     verifier=self._authorization_verifier,
+                                     at=moment) != attestation:
+                _fail()
+            # A conflicting insert/replay can wait after the first clock read.
+            # Validate again at the database clock immediately before commit so
+            # an attestation cannot cross expiry while this transaction waits.
+            if _decode_authorization(stored_authorization, intent=loaded,
+                                     binding=loaded_binding,
+                                     verifier=self._authorization_verifier,
+                                     at=_database_now(cursor)) != attestation:
+                _fail()
             self._commit(connection)
             return loaded
         except PostgresPublicationIntentError:
@@ -367,7 +454,16 @@ class PostgresPublicationIntents:
                 "serialization_id, binding_digest FROM anonflow_publication_payload_bindings "
                 "WHERE tenant_ref=%s AND publication_ref=%s",
                 (tenant_ref, publication_ref))
-            _decode_binding(_binding_row(cursor), intent=result, plan_digest=stored[1])
+            binding = _decode_binding(_binding_row(cursor), intent=result, plan_digest=stored[1])
+            cursor.execute(
+                "SELECT attestation_digest, expires_at, "
+                "CASE WHEN octet_length(document::text) <= %s THEN document ELSE NULL END "
+                "FROM anonflow_publication_authorizations "
+                "WHERE tenant_ref=%s AND publication_ref=%s",
+                (_MAX_ROW_BYTES, tenant_ref, publication_ref))
+            _decode_authorization(_row(cursor), intent=result, binding=binding,
+                                  verifier=self._authorization_verifier,
+                                  at=_database_now(cursor))
             self._commit(connection)
             return result
         except PostgresPublicationIntentError:
@@ -410,6 +506,15 @@ class PostgresPublicationIntents:
                 "WHERE tenant_ref=%s AND publication_ref=%s",
                 (tenant_ref, publication_ref))
             binding = _decode_binding(_binding_row(cursor), intent=intent, plan_digest=stored[1])
+            cursor.execute(
+                "SELECT attestation_digest, expires_at, "
+                "CASE WHEN octet_length(document::text) <= %s THEN document ELSE NULL END "
+                "FROM anonflow_publication_authorizations "
+                "WHERE tenant_ref=%s AND publication_ref=%s",
+                (_MAX_ROW_BYTES, tenant_ref, publication_ref))
+            _decode_authorization(_row(cursor), intent=intent, binding=binding,
+                                  verifier=self._authorization_verifier,
+                                  at=_database_now(cursor))
             self._commit(connection)
             return binding
         except PostgresPublicationIntentError:
@@ -423,3 +528,39 @@ class PostgresPublicationIntents:
         finally:
             if connection is not None:
                 self._close(connection)
+
+    def read_authorization(self, tenant_ref: str, publication_ref: str) -> object | None:
+        """Read only a live, cryptographically verified authorization envelope."""
+        _text(tenant_ref, _TENANT); _text(publication_ref, _PUBLICATION)
+        connection = None
+        try:
+            connection = self._connection(); cursor = connection.cursor(); cursor.execute("BEGIN READ ONLY")
+            cursor.execute("SELECT transaction_id, plan_digest, CASE WHEN octet_length(document::text) <= %s "
+                           "THEN document ELSE NULL END FROM anonflow_publication_intents "
+                           "WHERE tenant_ref=%s AND publication_ref=%s",
+                           (_MAX_ROW_BYTES, tenant_ref, publication_ref))
+            stored = _row(cursor)
+            if stored is None:
+                self._commit(connection); return None
+            if len(stored) != 3: _fail()
+            intent = _decode(stored[2], tenant_ref=tenant_ref, publication_ref=publication_ref,
+                             transaction_id=stored[0], plan_digest=stored[1])
+            cursor.execute("SELECT object_ref, key_ref, plan_digest, payload_digest, payload_size_bytes, "
+                           "serialization_id, binding_digest FROM anonflow_publication_payload_bindings "
+                           "WHERE tenant_ref=%s AND publication_ref=%s", (tenant_ref, publication_ref))
+            binding = _decode_binding(_binding_row(cursor), intent=intent, plan_digest=stored[1])
+            cursor.execute("SELECT attestation_digest, expires_at, CASE WHEN octet_length(document::text) <= %s "
+                           "THEN document ELSE NULL END FROM anonflow_publication_authorizations "
+                           "WHERE tenant_ref=%s AND publication_ref=%s", (_MAX_ROW_BYTES, tenant_ref, publication_ref))
+            result = _decode_authorization(_row(cursor), intent=intent, binding=binding,
+                                           verifier=self._authorization_verifier,
+                                           at=_database_now(cursor))
+            self._commit(connection); return result
+        except PostgresPublicationIntentError:
+            if connection is not None: self._rollback(connection)
+            raise
+        except Exception:
+            if connection is not None: self._rollback(connection)
+            raise PostgresPublicationIntentError() from None
+        finally:
+            if connection is not None: self._close(connection)
