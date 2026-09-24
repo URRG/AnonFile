@@ -43,6 +43,7 @@ done
 "${root_bao[@]}" token lookup >/dev/null
 "${root_bao[@]}" secrets enable transit >/dev/null
 "${root_bao[@]}" write transit/keys/m29-integration-ed25519 type=ed25519 exportable=false allow_plaintext_backup=false >/dev/null
+"${root_bao[@]}" write transit/keys/m30-integration-envelope type=aes256-gcm96 derived=false exportable=false allow_plaintext_backup=false >/dev/null
 
 cat <<'POLICY' | "${root_bao[@]}" policy write m29-transit-integration - >/dev/null
 path "transit/keys/m29-integration-ed25519" {
@@ -63,14 +64,39 @@ path "transit/sign/m29-integration-ed25519" {
   capabilities = ["update"]
 }
 POLICY
+cat <<'POLICY' | "${root_bao[@]}" policy write m30-datakey-integration - >/dev/null
+path "transit/keys/m30-integration-envelope" {
+  capabilities = ["read"]
+}
+path "transit/datakey/plaintext/m30-integration-envelope" {
+  capabilities = ["update"]
+}
+path "transit/decrypt/m30-integration-envelope" {
+  capabilities = ["update"]
+}
+POLICY
+cat <<'POLICY' | "${root_bao[@]}" policy write m30-datakey-no-decrypt - >/dev/null
+path "transit/keys/m30-integration-envelope" {
+  capabilities = ["read"]
+}
+path "transit/datakey/plaintext/m30-integration-envelope" {
+  capabilities = ["update"]
+}
+POLICY
 
 primary_json="$("${root_bao[@]}" token create -format=json -no-default-policy -policy=m29-transit-integration -ttl=5m)"
 sign_only_json="$("${root_bao[@]}" token create -format=json -no-default-policy -policy=m29-transit-sign-only -ttl=5m)"
+datakey_json="$("${root_bao[@]}" token create -format=json -no-default-policy -policy=m30-datakey-integration -ttl=5m)"
+datakey_no_decrypt_json="$("${root_bao[@]}" token create -format=json -no-default-policy -policy=m30-datakey-no-decrypt -ttl=5m)"
 metadata_json="$("${root_bao[@]}" read -format=json transit/keys/m29-integration-ed25519)"
+datakey_metadata_json="$("${root_bao[@]}" read -format=json transit/keys/m30-integration-envelope)"
 primary_token="$(python -c 'import json,sys; print(json.loads(sys.stdin.read())["auth"]["client_token"])' <<<"$primary_json")"
 sign_only_token="$(python -c 'import json,sys; print(json.loads(sys.stdin.read())["auth"]["client_token"])' <<<"$sign_only_json")"
+datakey_token="$(python -c 'import json,sys; print(json.loads(sys.stdin.read())["auth"]["client_token"])' <<<"$datakey_json")"
+datakey_no_decrypt_token="$(python -c 'import json,sys; print(json.loads(sys.stdin.read())["auth"]["client_token"])' <<<"$datakey_no_decrypt_json")"
 read -r public_key key_version < <(python -c 'import json,sys; data=json.loads(sys.stdin.read())["data"]; version=str(data["latest_version"]); print(data["keys"][version]["public_key"], version)' <<<"$metadata_json")
-printf '::add-mask::%s\n::add-mask::%s\n' "$primary_token" "$sign_only_token"
+datakey_version="$(python -c 'import json,sys; print(json.loads(sys.stdin.read())["data"]["latest_version"])' <<<"$datakey_metadata_json")"
+printf '::add-mask::%s\n::add-mask::%s\n::add-mask::%s\n::add-mask::%s\n' "$primary_token" "$sign_only_token" "$datakey_token" "$datakey_no_decrypt_token"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$repo_root/services/api"
@@ -80,5 +106,8 @@ OPENBAO_INTEGRATION_TOKEN="$primary_token" \
 OPENBAO_INTEGRATION_SIGN_ONLY_TOKEN="$sign_only_token" \
 OPENBAO_INTEGRATION_PUBLIC_KEY="$public_key" \
 OPENBAO_INTEGRATION_KEY_VERSION="$key_version" \
+OPENBAO_INTEGRATION_DATAKEY_TOKEN="$datakey_token" \
+OPENBAO_INTEGRATION_DATAKEY_NO_DECRYPT_TOKEN="$datakey_no_decrypt_token" \
+OPENBAO_INTEGRATION_DATAKEY_VERSION="$datakey_version" \
 SSL_CERT_FILE="$ca_cert" \
 python -m pytest -q tests/test_openbao_transit_integration.py
