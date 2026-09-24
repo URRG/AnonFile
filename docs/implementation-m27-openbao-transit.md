@@ -15,7 +15,9 @@ and a timeout no longer than ten seconds. The adapter
 does not accept an endpoint, key, or version from a work request. It sends the
 configured `key_version` to sign and accepts only `vault:v<that-version>:`
 Ed25519 signatures (64-byte payload); verification accepts only that bound
-signature object. Before either operation it requires key metadata to report
+signature object. A sign response must also echo the pinned numeric key version;
+an optional returned public key must equal the operator pin. Before either
+operation it requires key metadata to report
 `type=ed25519`, `exportable=false`, and `allow_plaintext_backup=false`; after
 signing it verifies the exact message/signature locally using the pinned public
 key and independently calls Transit verify before returning. Transit envelopes

@@ -56,7 +56,7 @@ def test_standard_openbao_null_envelope_fields_are_accepted_without_accepting_wr
 
 def test_sign_and_verify_use_only_pinned_transit_endpoints_and_bind_version():
     real_signature = signature_for(b"record")
-    transport = FakeTransport([metadata(), Response(body=json.dumps({"data": {"signature": real_signature}}).encode()), Response(body=b'{"data":{"valid":true}}')])
+    transport = FakeTransport([metadata(), Response(body=json.dumps({"data": {"signature": real_signature, "key_version": 7}}).encode()), Response(body=b'{"data":{"valid":true}}')])
     signer = client(transport)
     signature = signer.sign(message=b"record", token="short-lived-token")
     assert signature == TransitEd25519Signature(real_signature, 7)
@@ -104,7 +104,7 @@ def test_rejects_key_not_ed25519_or_exportable_and_sign_response_unverified():
         with pytest.raises(OpenBaoTransitError, match="^signing unavailable$"):
             client(FakeTransport(Response(body=json.dumps({"data":bad}).encode()))).sign(message=b"x", token="token")
     with pytest.raises(OpenBaoTransitError, match="^signing unavailable$"):
-        client(FakeTransport([metadata(), Response(body=json.dumps({"data":{"signature":SIGNATURE}}).encode()), Response(body=b'{"data":{"valid":false}}')])).sign(message=b"x", token="token")
+        client(FakeTransport([metadata(), Response(body=json.dumps({"data":{"signature":signature_for(b"x"),"key_version":7}}).encode()), Response(body=b'{"data":{"valid":false}}')])).sign(message=b"x", token="token")
 
 
 def test_config_and_call_bounds_reject_bad_service_and_secrets():
@@ -123,7 +123,15 @@ def test_config_and_call_bounds_reject_bad_service_and_secrets():
 
 def test_sign_rejects_a_well_formed_signature_not_matching_pinned_public_key():
     with pytest.raises(OpenBaoTransitError, match="^signing unavailable$"):
-        client(FakeTransport([metadata(), Response(body=json.dumps({"data":{"signature":SIGNATURE}}).encode())])).sign(message=b"x", token="token")
+        client(FakeTransport([metadata(), Response(body=json.dumps({"data":{"signature":SIGNATURE,"key_version":7}}).encode())])).sign(message=b"x", token="token")
+
+
+def test_sign_rejects_mismatched_transit_version_or_public_key():
+    signature = signature_for(b"x")
+    for data in ({"signature": signature, "key_version": 8},
+                 {"signature": signature, "key_version": 7, "public_key": base64.b64encode(b"z" * 32).decode("ascii")}):
+        with pytest.raises(OpenBaoTransitError, match="^signing unavailable$"):
+            client(FakeTransport([metadata(), Response(body=json.dumps({"data": data}).encode())])).sign(message=b"x", token="token")
 
 
 def test_config_rejects_noncanonical_public_key_and_non_string_url():

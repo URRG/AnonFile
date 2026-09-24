@@ -127,7 +127,11 @@ class OpenBaoTransitEd25519:
         self._assert_key_metadata(token, "signing unavailable")
         payload = {"input": encoded_input, "key_version": self._config.key_version}
         data = self._request("sign", payload, token, "signing unavailable")
-        if type(data) is not dict or set(data) != {"signature"}:
+        if (type(data) is not dict or set(data) not in
+                ({"signature", "key_version"}, {"signature", "key_version", "public_key"})
+                or type(data["key_version"]) is not int
+                or data["key_version"] != self._config.key_version
+                or ("public_key" in data and data["public_key"] != self._config.public_key)):
             raise OpenBaoTransitError("signing unavailable")
         try:
             signature = TransitEd25519Signature(data["signature"], self._config.key_version)
