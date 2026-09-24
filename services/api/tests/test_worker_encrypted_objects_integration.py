@@ -15,7 +15,7 @@ import pytest
 from app.encrypted_object_store import EncryptedObjectStoreError
 from app.openbao_datakey import OpenBaoDataKeyConfig, OpenBaoDataKeyError, OpenBaoTransitDataKey
 from app.s3_ciphertext_transport import S3CiphertextTransport, S3CiphertextTransportConfig, opaque_object_key
-from app.worker_encrypted_objects import WorkerEncryptedObjects
+from app.worker_encrypted_objects import WorkerEncryptedObjects, WorkerEncryptedObjectsError
 
 
 pytestmark = pytest.mark.skipif(
@@ -70,6 +70,36 @@ def test_worker_object_path_against_live_openbao_and_s3():
                            plaintext=MARKER, openbao_token=values["M36_OPENBAO_TOKEN"])
     assert worker.get(tenant_ref=TENANT, reference=reference,
                       openbao_token=values["M36_OPENBAO_TOKEN"]) == MARKER
+
+    # A restarted worker can recover the exact object only through the same
+    # publication-bound S3 marker and M31/OpenBao authentication path.  This
+    # is deliberately real TLS OpenBao + MinIO coverage, not a transport fake.
+    restarted = WorkerEncryptedObjects(openbao=data_keys, ciphertexts=ciphertexts)
+    recovered_reference = restarted.recover(
+        tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION,
+        key_ref=KEY_REF, openbao_token=values["M36_OPENBAO_TOKEN"],
+    )
+    assert recovered_reference == reference
+    assert restarted.get(tenant_ref=TENANT, reference=recovered_reference,
+                         openbao_token=values["M36_OPENBAO_TOKEN"]) == MARKER
+    assert restarted.put_or_recover(
+        tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION,
+        key_ref=KEY_REF, plaintext=MARKER, openbao_token=values["M36_OPENBAO_TOKEN"],
+    ) == reference
+    with pytest.raises(WorkerEncryptedObjectsError, match="^Worker encrypted object operation failed$"):
+        restarted.put_or_recover(
+            tenant_ref=TENANT, object_ref=OBJECT, publication_ref=PUBLICATION,
+            key_ref=KEY_REF, plaintext=b"m41 altered retry plaintext",
+            openbao_token=values["M36_OPENBAO_TOKEN"],
+        )
+    wrong_publication = "publicationref:v1:" + "Q" * 43
+    with pytest.raises(EncryptedObjectStoreError, match="^Encrypted object operation failed$"):
+        restarted.recover(
+            tenant_ref=TENANT, object_ref=OBJECT, publication_ref=wrong_publication,
+            key_ref=KEY_REF, openbao_token=values["M36_OPENBAO_TOKEN"],
+        )
+    assert restarted.get(tenant_ref=TENANT, reference=reference,
+                         openbao_token=values["M36_OPENBAO_TOKEN"]) == MARKER
 
     # Read through privileged test infrastructure only.  The real S3 body is
     # a canonical encrypted envelope, never the marker supplied to the worker.
