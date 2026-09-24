@@ -31,7 +31,7 @@ docker run --detach --rm --name "$name" --publish 127.0.0.1::8200 \
   -dev-listen-address=0.0.0.0:8200 >/dev/null
 
 ca_cert="$tmp_dir/tls/vault-ca.pem"
-root_bao=(docker exec --env BAO_ADDR=https://127.0.0.1:8200 --env BAO_CACERT=/tls/vault-ca.pem --env "BAO_TOKEN=$root_token" "$name" bao)
+root_bao=(docker exec --interactive --env BAO_ADDR=https://127.0.0.1:8200 --env BAO_CACERT=/tls/vault-ca.pem --env "BAO_TOKEN=$root_token" "$name" bao)
 for _ in $(seq 1 30); do
   if [[ -s "$ca_cert" ]] && "${root_bao[@]}" token lookup >/dev/null 2>&1; then
     break
