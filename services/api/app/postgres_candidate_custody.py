@@ -81,6 +81,20 @@ def _read_committed(cursor: Any) -> None:
         _fail()
 
 
+def _require_active_transaction(cursor: Any) -> None:
+    """Require a psycopg-style transaction that can retain ``FOR UPDATE``.
+
+    An idle/autocommit cursor releases the row lock when its SELECT statement
+    finishes, which is not a safe future mutation seam. Unknown drivers are
+    rejected rather than assumed to retain the lock.
+    """
+    connection = getattr(cursor, "connection", None)
+    info = getattr(connection, "info", None)
+    status = getattr(info, "transaction_status", None)
+    if getattr(status, "name", None) != "INTRANS":
+        _fail()
+
+
 def _canonical(intent: "CandidateCustodyIntent") -> bytes:
     record = {
         "artifact_digest": intent.artifact_digest,
@@ -257,6 +271,7 @@ class PostgresCandidateCustodyAuthority:
         _generation(expected_generation)
         _text(expected_intent_digest, _DIGEST)
         try:
+            _require_active_transaction(cursor)
             _read_committed(cursor)
             intent = self._lock(cursor, tenant_ref=tenant_ref, custody_ref=custody_ref)
             latest = None if intent is None else self._latest(cursor, intent)

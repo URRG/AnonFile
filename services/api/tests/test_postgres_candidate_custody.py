@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 import os
 from pathlib import Path
 import secrets
+import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -38,15 +40,18 @@ class Connection:
         self.database = database
         self.intents, self.fences = copy.deepcopy(database.intents), copy.deepcopy(database.fences)
         self.autocommit, self.closed, self.rolled_back = True, False, False
+        self.info = SimpleNamespace(transaction_status=SimpleNamespace(name="IDLE"))
     def cursor(self):
         return Cursor(self)
 
     def commit(self):
         self.database.intents = self.intents
         self.database.fences = self.fences
+        self.info.transaction_status = SimpleNamespace(name="IDLE")
 
     def rollback(self):
         self.rolled_back = True
+        self.info.transaction_status = SimpleNamespace(name="IDLE")
 
     def close(self):
         self.closed = True
@@ -66,6 +71,8 @@ class Cursor:
         self._row = None
         self.rowcount = -1
         if query in {"BEGIN", "COMMIT", "ROLLBACK"}:
+            self.connection.info.transaction_status = SimpleNamespace(
+                name="INTRANS" if query == "BEGIN" else "IDLE")
             return
         if query == "SHOW transaction_isolation":
             self._row = ("read committed",)
@@ -159,6 +166,22 @@ def test_expiry_and_terminal_fence_are_fail_closed_and_idempotent():
                          state="REVOKED", event_ref=opaque("custodyfence:v1:"))
 
 
+def test_lock_pending_rejects_an_idle_cursor_before_trying_to_lock():
+    store = Database()
+    item = intent()
+    service = authority(store)
+    service.create(item)
+    idle_cursor = Connection(store).cursor()
+    with pytest.raises(PostgresCandidateCustodyError):
+        service.lock_pending(idle_cursor, tenant_ref=TENANT, custody_ref=item.custody_ref,
+                             expected_generation=0, expected_intent_digest=item.intent_digest)
+    active_connection = Connection(store)
+    active_cursor = active_connection.cursor()
+    active_cursor.execute("BEGIN")
+    assert service.lock_pending(active_cursor, tenant_ref=TENANT, custody_ref=item.custody_ref,
+                                expected_generation=0, expected_intent_digest=item.intent_digest).state == "PENDING_UPLOAD"
+
+
 @pytest.fixture
 def postgres_authority():
     dsn = os.environ.get("ANONFLOW_POSTGRES_TEST_DSN")
@@ -202,7 +225,7 @@ def test_postgres_replay_and_terminal_race_are_serialized(postgres_authority):
 
 
 def test_postgres_tenant_collision_replay_lock_and_expiry_are_fail_closed(postgres_authority):
-    _, _, service = postgres_authority
+    dsn, psycopg, service = postgres_authority
     item = intent(expires_at=datetime.now(UTC).replace(microsecond=0) + timedelta(minutes=5))
     service.create(item)
     with pytest.raises(PostgresCandidateCustodyError):
@@ -212,17 +235,34 @@ def test_postgres_tenant_collision_replay_lock_and_expiry_are_fail_closed(postgr
     with pytest.raises(PostgresCandidateCustodyError):
         service.fence(tenant_ref=OTHER, custody_ref=item.custody_ref,
                       expected_generation=0, expected_intent_digest=item.intent_digest)
+    with psycopg.connect(dsn, autocommit=True) as connection:
+        idle_cursor = connection.cursor()
+        with pytest.raises(PostgresCandidateCustodyError):
+            service.lock_pending(idle_cursor, tenant_ref=TENANT, custody_ref=item.custody_ref,
+                                 expected_generation=0, expected_intent_digest=item.intent_digest)
+        idle_cursor.execute("BEGIN")
+        assert service.lock_pending(idle_cursor, tenant_ref=TENANT, custody_ref=item.custody_ref,
+                                    expected_generation=0, expected_intent_digest=item.intent_digest).state == "PENDING_UPLOAD"
+        idle_cursor.execute("ROLLBACK")
 
     expired = intent(expires_at=datetime.now(UTC).replace(microsecond=0) - timedelta(seconds=1))
     with pytest.raises(PostgresCandidateCustodyError):
         service.create(expired)
 
-    # Expiry fencing is exercised by a row whose clock-valid creation is
-    # advanced past its deadline. Direct SQL is used only to avoid a test sleep.
-    expiring = intent(expires_at=datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=1))
+    # Give creation a multi-second cushion, then observe the PostgreSQL clock
+    # itself until it crosses the exact immutable expiry boundary.
+    expiring = intent(expires_at=datetime.now(UTC).replace(microsecond=0) + timedelta(seconds=3))
     service.create(expiring)
-    import time
-    time.sleep(1.1)
+    deadline = time.monotonic() + 8
+    while True:
+        with psycopg.connect(dsn, autocommit=True) as connection:
+            database_now = connection.execute(
+                "SELECT date_trunc('second', clock_timestamp())").fetchone()[0]
+        if database_now >= expiring.expires_at:
+            break
+        if time.monotonic() >= deadline:
+            pytest.fail("PostgreSQL clock did not cross the candidate expiry boundary")
+        time.sleep(0.05)
     with pytest.raises(PostgresCandidateCustodyError):
         service.fence(tenant_ref=TENANT, custody_ref=expiring.custody_ref,
                       expected_generation=0, expected_intent_digest=expiring.intent_digest)

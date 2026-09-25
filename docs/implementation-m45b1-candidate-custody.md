@@ -11,6 +11,8 @@ Generation zero is PENDING_UPLOAD only. An append-only terminal fence can be
 QUARANTINED, REVOKED, or (only at/after the PostgreSQL expiry clock) EXPIRED.
 `lock_pending` requires READ COMMITTED, locks the immutable intent row, then
 checks the newest fence and database clock. A future mutation must retain that
-lock and recheck the database clock before commit. This is custody metadata,
-not upload completion, object integrity, release eligibility, approval, or
-delivery authority.
+lock and recheck the database clock before commit. It rejects an idle or
+unknown driver transaction status: a `FOR UPDATE` lock acquired by an
+autocommit cursor ends with its statement and is not a safe mutation seam.
+This is custody metadata, not upload completion, object integrity, release
+eligibility, approval, or delivery authority.
