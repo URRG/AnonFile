@@ -111,10 +111,22 @@ def _score_reference_annotations(value: object, documents: list[dict[str, Any]])
     def counts(item: dict[str, Any]) -> dict[str, int]:
         return {"true_positives": item["true_positives"], "false_positives": item["false_positives"],
                 "false_negatives": item["false_negatives"]}
+    per_document = []
+    for document in gold:
+        expected = set(document.annotations)
+        actual = set(predictions[document.id])
+        matched = expected & actual
+        missed = sorted(expected - actual, key=lambda span: (span.start, span.end, span.entity_type))
+        per_document.append({"id": document.id,
+                             "exact": {"true_positives": len(matched), "false_positives": len(actual - expected),
+                                       "false_negatives": len(missed)},
+                             "missed": [{"start": span.start, "end": span.end, "entity_type": span.entity_type}
+                                        for span in missed]})
     return {"basis": value["basis"], "status": "OBSERVATIONAL_ONLY",
             "labelled_documents": len(documents), "gold_annotations": exact["corpus"]["gold_annotations"],
             "exact": counts(exact["corpus"]),
-            "per_type": {kind: counts(item) for kind, item in exact["per_entity"].items()}}
+            "per_type": {kind: counts(item) for kind, item in exact["per_entity"].items()},
+            "per_document": per_document}
 
 
 def _validate_structured(format_name: str, content: str) -> None:

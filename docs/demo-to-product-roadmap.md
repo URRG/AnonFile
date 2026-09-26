@@ -18,8 +18,10 @@ The newer batch workbench extends this to two or three synthetic files,
 including selectable-text PDFs as extracted text only. It shows consistent
 aliases, explicit mail-header and same-record role relationships, and a non-exportable side-by-side
 candidate. A complete synthetic reference-label manifest can now produce
-exact-span agreement counts; the built-in example has fixed labels. Those
-numbers describe only the labelled case and include manual corrections. They
+exact-span agreement counts; the built-in example has fixed labels. The
+scorecard now breaks counts down by file, lists unmatched reference spans,
+and links each file to its before/after comparison. Those numbers describe
+only the labelled case and include manual corrections. They
 are not an independent holdout, privacy qualification, or a general model
 quality claim. A reviewer can mark a supported noncritical signal as a false
 positive for this synthetic batch; the retained source remains visibly

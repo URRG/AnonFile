@@ -7,8 +7,8 @@ const source = readFileSync(new URL('../src/api.ts', import.meta.url), 'utf8')
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText
 const { readBatchFile, readBatchReferenceManifest, inspectSyntheticBatch } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
 const files = [
-  { id: 'f1', name: 'a.txt', size: 12, contentBase64: Buffer.from('Riya').toString('base64') },
-  { id: 'f2', name: 'b.txt', size: 12, contentBase64: Buffer.from('note').toString('base64') },
+  { id: 'f1', name: 'a.txt', size: 4, contentBase64: Buffer.from('Riya').toString('base64') },
+  { id: 'f2', name: 'b.txt', size: 4, contentBase64: Buffer.from('note').toString('base64') },
 ]
 const request = { apiBase: 'http://127.0.0.1:8000', token: 'synthetic-token', files, manualNames: [], aliasOverrides: {} }
 const valid = () => ({ posture: 'SYNTHETIC_DEMO_ONLY', release_authorized: false, export_available: false,
@@ -58,6 +58,8 @@ test('batch client rejects fabricated approval, mismatched content and counts', 
     value => { value.release_authorized = true },
     value => { value.export_available = true },
     value => { value.documents[0].candidate_text = 'Riya' },
+    value => { value.documents[0].name = 'different.txt' },
+    value => { value.documents[0].size_bytes = 5 },
     value => { value.entities[0].mentions = 2 },
     value => { value.summary.detected_mentions = 0 },
     value => { value.summary.suppressed_mentions = 1 },
@@ -120,10 +122,17 @@ test('batch client binds annotation-score counts to submitted labels and detecto
     labelled_documents: 2, gold_annotations: 2,
     exact: { true_positives: 1, false_positives: 0, false_negatives: 1 },
     per_type: { PERSON_NAME: { true_positives: 1, false_positives: 0, false_negatives: 0 },
-      OTHER_SENSITIVE: { true_positives: 0, false_positives: 0, false_negatives: 1 } } }
+      OTHER_SENSITIVE: { true_positives: 0, false_positives: 0, false_negatives: 1 } },
+    per_document: [
+      { id: 'f1', exact: { true_positives: 1, false_positives: 0, false_negatives: 0 }, missed: [] },
+      { id: 'f2', exact: { true_positives: 0, false_positives: 0, false_negatives: 1 },
+        missed: [{ start: 0, end: 4, entity_type: 'OTHER_SENSITIVE' }] },
+    ] }
   const mock = t.mock.method(globalThis, 'fetch', async () => Response.json(response))
   const result = await inspectSyntheticBatch({ ...request, referenceManifest })
   assert.equal(result.verification.annotationScore.exact.falseNegatives, 1)
+  assert.deepEqual(result.verification.annotationScore.perDocument[1].missed,
+    [{ start: 0, end: 4, entity_type: 'OTHER_SENSITIVE' }])
   const sent = JSON.parse(mock.mock.calls[0].arguments[1].body)
   assert.deepEqual(sent.reference_annotations.documents.map(item => item.id), ['f1', 'f2'])
   t.mock.restoreAll()
@@ -131,6 +140,9 @@ test('batch client binds annotation-score counts to submitted labels and detecto
     value => { value.verification.annotation_score.exact.false_negatives = 0 },
     value => { value.verification.annotation_score.status = 'QUALIFIED' },
     value => { value.verification.annotation_score.per_type.OTHER_SENSITIVE.false_negatives = 0 },
+    value => { value.verification.annotation_score.per_document[1].missed = [] },
+    value => { value.verification.annotation_score.per_document[1].missed[0].end = 3 },
+    value => { value.verification.annotation_score.per_document[0].exact.true_positives = 0 },
   ]) {
     const tampered = structuredClone(response); change(tampered)
     t.mock.method(globalThis, 'fetch', async () => Response.json(tampered))
