@@ -49,7 +49,7 @@ test('real HTTP intake, withholding, independent review and isolation', { timeou
     assert.ok(!demoInspection.transformedPreview.includes('alex@example.test'))
     assert.ok(demoInspection.findings.some(f => f.entityType === 'EMAIL'))
     const mailText = 'From: Riya <riya@example.test>\nTo: Sita <sita@example.test>\nHi Sita!'
-    const recordText = '{"full_name":"Riya","email":"riya@example.test"}'
+    const recordText = '{"account_owner":"Riya","client_name":"Sita","email":"riya@example.test"}'
     const batch = await inspectSyntheticBatch({ apiBase: base, token: processor, files: [
       { id: 'mail', name: 'mail.txt', size: Buffer.byteLength(mailText), contentBase64: Buffer.from(mailText).toString('base64') },
       { id: 'record', name: 'record.json', size: Buffer.byteLength(recordText), contentBase64: Buffer.from(recordText).toString('base64') },
@@ -60,7 +60,8 @@ test('real HTTP intake, withholding, independent review and isolation', { timeou
     assert.equal(batch.releaseAuthorized, false)
     assert.equal(batch.exportAvailable, false)
     assert.equal(batch.documents.length, 2)
-    assert.equal(batch.relationships.length, 1)
+    assert.equal(batch.relationships.length, 2)
+    assert.ok(batch.relationships.some(edge => edge.type === 'ACCOUNT_OWNER_OF' && edge.basis === 'same JSON record account_owner/client_name'))
     const person = batch.entities.find(entity => entity.source === 'Riya')
     assert.equal(person.alias.length, 4)
     assert.ok(batch.documents.every(document => document.candidateText.includes(person.alias)))

@@ -26,9 +26,9 @@ MAX_FILE_BYTES = 100_000
 MAX_TOTAL_BYTES = 300_000
 MAX_PDF_PAGES = 5
 SUPPORTED = {".txt": "text", ".csv": "csv", ".json": "json", ".jsonl": "jsonl", ".pdf": "pdf"}
-NAME_FIELDS = {"name", "full_name", "first_name", "last_name", "customer_name", "passenger_name", "client_name"}
+NAME_FIELDS = {"name", "full_name", "first_name", "last_name", "customer_name", "passenger_name", "client_name", "account_owner"}
 HEADER = re.compile(r"(?im)^(From|To|Cc):\s*([^<>\r\n]{2,80}?)\s*<([^<>\s]+@[^<>\s]+)>\s*$")
-JSON_NAME = re.compile(r'"(?:name|full_name|first_name|last_name|customer_name|passenger_name|client_name)"\s*:\s*"([^"\\]{2,80})"', re.I)
+JSON_NAME = re.compile(r'"(?:name|full_name|first_name|last_name|customer_name|passenger_name|client_name|account_owner)"\s*:\s*"([^"\\]{2,80})"', re.I)
 JSON_FIELD = re.compile(r'"(?P<key>(?:[^"\\]|\\.){1,80})"\s*:\s*(?P<value>"(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?|true|false|null)', re.I)
 TEXT_NAME = re.compile(r"(?im)^\s*(?:name|client|customer|passenger)\s*:\s*([A-Z][A-Za-z .'-]{1,78})\s*$")
 SAFE_NAME = re.compile(r"^[A-Za-z][A-Za-z .'-]{1,79}$")
@@ -301,6 +301,31 @@ def _names_and_headers(documents: list[dict[str, Any]]) -> tuple[set[str], list[
     return names, edges
 
 
+def _structured_role_edges(documents: list[dict[str, Any]]) -> list[tuple[str, str, str, str]]:
+    """Read only direct owner/client fields in one parsed record, never proximity."""
+    edges: list[tuple[str, str, str, str]] = []
+    for document in documents:
+        kind = document["kind"]
+        if kind == "json":
+            parsed = json.loads(document["text"])
+            records = parsed if isinstance(parsed, list) else [parsed]
+        elif kind == "jsonl":
+            records = [json.loads(line) for line in document["text"].splitlines() if line.strip()]
+        elif kind == "csv":
+            records = list(csv.DictReader(StringIO(document["text"])))
+        else:
+            continue
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            owner, client = record.get("account_owner"), record.get("client_name")
+            if (isinstance(owner, str) and isinstance(client, str)
+                    and SAFE_NAME.fullmatch(owner.strip()) and SAFE_NAME.fullmatch(client.strip())
+                    and owner.strip().casefold() != client.strip().casefold()):
+                edges.append((owner.strip(), client.strip(), document["id"], kind))
+    return edges
+
+
 def _choose_alias(name: str, used: set[str]) -> str:
     for candidate in NAME_POOL:
         if len(candidate) == len(name) and candidate.casefold() != name.casefold() and candidate.casefold() not in used:
@@ -346,6 +371,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
     for document in documents:
         document["_fields"] = _structured_fields(document)
     names, raw_edges = _names_and_headers(documents)
+    role_edges = _structured_role_edges(documents)
     names.update(phrases)
     for document in documents:
         for start, end, kind in document["_fields"]:
@@ -456,16 +482,26 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
 
     person_id = {value: id_by_key[("PERSON_NAME", value)] for value in names_by_key}
     relationships = []
-    seen_edges: set[tuple[str, str, str]] = set()
+    seen_edges: set[tuple[str, str, str, str]] = set()
     for sender, recipient, document_id in raw_edges:
         source_id, target_id = person_id.get(sender.casefold()), person_id.get(recipient.casefold())
         if not source_id or not target_id:
             continue
-        edge = (source_id, target_id, document_id)
+        edge = (source_id, target_id, document_id, "EMAILED")
         if edge not in seen_edges:
             seen_edges.add(edge)
             relationships.append({"source_id": source_id, "target_id": target_id, "type": "EMAILED",
                                   "document_id": document_id, "basis": "explicit From/To or Cc header"})
+    for owner, client, document_id, kind in role_edges:
+        source_id, target_id = person_id.get(owner.casefold()), person_id.get(client.casefold())
+        if not source_id or not target_id:
+            continue
+        edge = (source_id, target_id, document_id, "ACCOUNT_OWNER_OF")
+        if edge not in seen_edges:
+            seen_edges.add(edge)
+            relationships.append({"source_id": source_id, "target_id": target_id,
+                                  "type": "ACCOUNT_OWNER_OF", "document_id": document_id,
+                                  "basis": f"same {kind.upper()} record account_owner/client_name"})
     residual = sum(len(detect_text(doc["candidate_text"])) for doc in documents)
     if any(entity["excluded"] and not entity["mentions"] for entity in entities):
         raise PayloadError("A reviewer exclusion must refer to a detected mention.")
@@ -504,7 +540,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
             "Exact-name linking can merge different people who share a name; ambiguous identities need human resolution.",
             "PDFs are not rewritten; extracted text may lose page geometry, annotations, embedded images, and metadata.",
             "Images and scanned PDFs need OCR plus visual residual inspection and are rejected here.",
-            "Relationship edges are only explicit mail-header links, not inferred social or organizational ties.",
+            "Relationship edges require explicit mail headers or account_owner/client_name in the same parsed record; they do not infer social or organizational ties.",
             "Pseudonyms and retained relationships may remain linkable. No release, sale, or export is authorized.",
             "Reference-label agreement, when present, depends on the reviewer's completeness assertion and does not establish generalization or anonymity.",
         ],

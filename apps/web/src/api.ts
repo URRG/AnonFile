@@ -112,7 +112,7 @@ export type BatchDocument = { id: string; name: string; kind: 'text' | 'csv' | '
   text: string; candidateText: string; sizeBytes: number; previewFidelity: 'source_text' | 'extracted_text_only';
   structureCheck: 'pass' | 'fail' | 'not_applicable'; matches: BatchMatch[] }
 export type BatchEntity = { id: string; kind: string; source: string; alias: string; mentions: number; excluded: boolean }
-export type BatchRelationship = { sourceId: string; targetId: string; type: 'EMAILED'; documentId: string; basis: string }
+export type BatchRelationship = { sourceId: string; targetId: string; type: 'EMAILED' | 'ACCOUNT_OWNER_OF'; documentId: string; basis: string }
 export type BatchCheck = { name: string; status: 'PASS' | 'FAIL' | 'REVIEW' | 'NOT_TESTED' | 'NOT_APPLICABLE' | 'NOT_MEASURED'; detail: string }
 export type BatchReferenceSpan = { start: number; end: number; entity_type: string }
 export type BatchReferenceManifest = { basis: 'REVIEWER_ATTESTED_EXHAUSTIVE' | 'CURATED_SYNTHETIC_SAMPLE';
@@ -229,11 +229,17 @@ function batchInspection(value: unknown, expectedIds: string[], expectedReferenc
       previewFidelity: raw.preview_fidelity as BatchDocument['previewFidelity'], structureCheck: raw.structure_check as BatchDocument['structureCheck'], matches }
   })
   const relationships: BatchRelationship[] = value.relationships.map(raw => {
-    if (!object(raw) || !entityIds.has(String(raw.source_id)) || !entityIds.has(String(raw.target_id)) || raw.type !== 'EMAILED' ||
+    const documentKind = object(raw) ? documents.find(doc => doc.id === raw.document_id)?.kind : undefined
+    const roleBasis = documentKind === 'json' || documentKind === 'jsonl' || documentKind === 'csv'
+      ? `same ${documentKind.toUpperCase()} record account_owner/client_name` : null
+    if (!object(raw) || !entityIds.has(String(raw.source_id)) || !entityIds.has(String(raw.target_id)) ||
+        !['EMAILED', 'ACCOUNT_OWNER_OF'].includes(String(raw.type)) ||
         raw.source_id === raw.target_id || entitiesById.get(String(raw.source_id))?.kind !== 'PERSON_NAME' ||
         entitiesById.get(String(raw.target_id))?.kind !== 'PERSON_NAME' ||
-        !expectedIds.includes(String(raw.document_id)) || raw.basis !== 'explicit From/To or Cc header') batchInvalid()
-    return { sourceId: raw.source_id as string, targetId: raw.target_id as string, type: 'EMAILED', documentId: raw.document_id as string, basis: raw.basis as string }
+        !expectedIds.includes(String(raw.document_id)) ||
+        (raw.type === 'EMAILED' ? raw.basis !== 'explicit From/To or Cc header' : raw.basis !== roleBasis)) batchInvalid()
+    return { sourceId: raw.source_id as string, targetId: raw.target_id as string,
+      type: raw.type as BatchRelationship['type'], documentId: raw.document_id as string, basis: raw.basis as string }
   })
   const summary = value.summary
   if (summary.files !== documents.length || !safeCount(summary.detected_mentions) || !safeCount(summary.transformed_mentions) ||
