@@ -1,0 +1,52 @@
+SYNTHETIC TEST DATA ONLY - FICTIONAL PEOPLE, ORGANIZATIONS, ADDRESSES, PHONES, IDS, AND .test LINKS
+Calendar export: 01-07 October 2026 | Time zone: UTC
+Workspace: Harborline Systems / Bluebird Air P0 follow-up
+
+EXPLICIT ROLE EVIDENCE (labeled source data)
+Arjun Mehta works on Duplicate Dispatch Guard.
+Duplicate Dispatch Guard is assigned to Neha Kapoor.
+
+EVENT 1
+Date: 2026-10-01
+Time: 09:00-09:30 UTC
+Title: P0 checkout confirmation incident handoff
+Organizer: Maya Patel <maya.patel@harborline.test>
+Invitees: Isha Rao <isha.rao@bluebird-air.test>, Arjun Mehta <arjun.mehta@harborline.test>, Neha Kapoor <neha.kapoor@harborline.test>
+Location: Video meeting - synthetic room P0-7421
+Contact: Maya Patel | HS-EMP-1008 | +1 415 555 0161
+Office: Harborline Systems, 25 Sample Street, Example City, CA 90000
+Notes: Review the synthetic customer impact window, mitigation, and remaining verification steps for BB-TEST-6732. No production credentials or real customer records are included.
+
+EVENT 2
+Date: 2026-10-02
+Time: 14:00-14:25 UTC
+Title: 1:1 - Isha Rao and Maya Patel - client recovery check
+Organizer: Maya Patel <maya.patel@harborline.test>
+Invitees: Isha Rao <isha.rao@bluebird-air.test>, Maya Patel <maya.patel@harborline.test>
+Location: Video meeting - synthetic room CLIENT-1
+Client contact: Isha Rao | BA-EMP-2041 | +1 415 555 0148
+Mailing address: Bluebird Air, 100 Example Quay, Example City, CA 90000
+Notes: Confirm the client can see confirmation emails for synthetic bookings BB-TEST-6732 and BB-TEST-6733; agree on the written follow-up.
+
+EVENT 3
+Date: 2026-10-05
+Time: 11:00-11:30 UTC
+Title: Bug fix review - duplicate dispatch guard
+Organizer: Arjun Mehta <arjun.mehta@harborline.test>
+Invitees: Neha Kapoor <neha.kapoor@harborline.test>, Owen Blake <owen.blake@harborline.test>, Lina Chen <lina.chen@harborline.test>, Dev Shah <dev.shah@harborline.test>
+Location: Video meeting - synthetic room ENG-28
+Owner: Arjun Mehta | HS-EMP-1042 | +1 415 555 0184
+Review link: https://github.example.test/harborline/dispatch/pull/1842
+Runbook link: https://confluence.example.test/x/MAIL-28
+Notes: Inspect the idempotency test, queue retry trace, feature flag, and rollback checklist for fictional ticket P0-7421.
+
+EVENT 4
+Date: 2026-10-07
+Time: 16:00-16:20 UTC
+Title: 1:1 - Isha Rao and Kabir Sen - client resolution sign-off
+Organizer: Kabir Sen <kabir.sen@harborline.test>
+Invitees: Isha Rao <isha.rao@bluebird-air.test>, Kabir Sen <kabir.sen@harborline.test>, Maya Patel <maya.patel@harborline.test>
+Location: Video meeting - synthetic room CLIENT-2
+Contact: Kabir Sen | HS-EMP-1089 | +1 415 555 0173
+Reference: https://confluence.example.test/x/P0-7421
+Notes: Walk through final validation evidence and the fictional incident timeline. Resolution is for this synthetic scenario only.

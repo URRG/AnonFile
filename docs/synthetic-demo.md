@@ -19,19 +19,36 @@ UI on loopback, and prints the URL and token. Paste the token into the UI,
 choose **Use sample batch**, acknowledge that the data is fictional, and click
 **Analyze batch**. The sample has a fictional email thread, a CSV passenger
 list with names, email addresses, fictional passport numbers and birth dates,
-and a JSON support record. The next screen lists detected values and
-proposed replacements. You can add a missed exact person name, add a bounded
+and a JSON support record. The next screen groups detected values by people,
+contacts, identifiers and other signals; search and eight-row pagination keep
+larger batches reviewable without hiding the totals. It lists proposed
+replacements. You can add a missed exact person name, add a bounded
 non-name sensitive phrase, or change a person alias (the alias must have the
 same character length); then review the
-candidate. The final screen has document comparisons, explicit mail-header and
-same-record account-owner/client links, and a verification scorecard. It
-deliberately has no export. Structured role links require `account_owner` and
-`client_name` in the same parsed CSV, JSON, or JSONL record; the workbench does
-not infer roles from nearby prose or combine unrelated rows.
+candidate. The final screen has document comparisons, an evidence-backed
+entity map, and a verification scorecard. The map separates people,
+organizations and projects; it supports typed role edges from explicit
+structured fields, labelled signatures or complete role statements, and
+mail-header delivery edges behind a separate toggle. Selecting an evidence
+reference opens the source document comparison. It does not infer employment
+or client relationships from email domains, proximity or a mere conversation.
+See the [graph contract](entity-relationship-graph.md). The
+reproducible three-file [rich relationship batch](rich-relationship-demo-fixtures.md)
+exercises the map with a client email thread, developer conversation PDF, and
+calendar TXT export. The
+comparison has 50–200% zoom, fit width, synchronized side-by-side panning, and
+single-pane original/candidate views. A separately acknowledged **Download this
+demo candidate** action saves only the unverified synthetic review copy; it is
+not a release or production export. The old same-record account-owner/client
+edge is retained for API compatibility, but the map uses its own typed,
+source-free graph payload. Identity resolution remains batch-local and may
+merge homonyms; the map is not a verified social or corporate directory.
 If a name, email, phone, or IP address is a confirmed false positive in this
 synthetic batch, Detection review can exclude that signal across every file
 after a separate acknowledgment. Excluded values remain visible in the
 candidate, are counted separately, and keep the result review-required.
+The demo download is blocked for reviewer-excluded or still-detected source
+values, structured-output failure, or a same-engine visual residual finding.
 Credentials, payment secrets, government IDs, birth dates, and other
 unsupported categories cannot be excluded through this demo control.
 The built-in batch also carries a fixed set of demo-authored reference spans.
@@ -59,17 +76,23 @@ PNG, or JPEG files (100 KB per text file, 500 KB per PDF/image, 1.5 MB combined)
 two PDF pages per file and OCRs each raster page or image. The entire batch is
 limited to three million media pixels. Detected spans are applied to the OCR
 lines on a new pixel image, with side-by-side source and candidate page views.
-The PDF candidate is reconstructed as an image-only PDF in memory; its digest
-and page count, but **not a downloadable PDF**, are returned. Metadata and
-original PDF objects are not copied into that candidate. Unreadable, oversized,
-or ambiguous media are rejected.
+PDF pages are rendered at a bounded 1.7× raster scale. At 100% zoom the UI
+shows native preview pixels rather than squeezing the full page into a narrow
+pane; higher zoom magnifies pixels but cannot recover detail absent from the
+source raster. The PDF candidate is reconstructed as an image-only PDF in
+memory. Its bytes and digest are returned for a local, digest-checked demo
+download. Original PDF objects and metadata are not copied into that
+candidate. Image input downloads as candidate PNG; text formats download as
+candidate text files. Unreadable, oversized, or ambiguous media are rejected.
 
 This is a visual *review candidate*, not safe redaction certification. OCR can
 miss or misread visible sensitive content; no detection outside recognized
 lines is assured. The candidate is rechecked only by the same OCR engine, so
 zero retained *detected source values* is not independent assurance. Names
-are replaced with same-length pseudonyms. Emails linked by explicit mail
-headers or one unambiguous structured record use the person's pseudonym as
+are replaced with same-length, readable name pseudonyms. Unsupported name
+shapes fail closed instead of turning into `Axxxxx`-style tokens. Emails linked
+by explicit mail headers, one unambiguous structured record, or a Slack-style
+name/address roster row use the person's pseudonym as
 their local part, for example `Riya <riya@example.test>` becomes
 `Gita <gita@example.test>` consistently across the batch. Other source domains
 are mapped consistently to reserved `.test` domains rather than potentially
@@ -83,6 +106,10 @@ complete reference labels, precision and recall remain **not measured**. The
 bounded detector can miss prose names and other sensitive information. CSV
 review is limited to one-line cells, and ambiguous or unsupported structured
 values are rejected. Replacements are proposals for human review only.
+The current rules do not automatically classify every employee ID, internal
+URL, postal address, or phone broken across OCR lines. Use the manual
+exact-value review control where a supported correction is possible; do not
+interpret a clean selected-span count as complete coverage.
 
 The entity register also shows the replacement strategy. PAN-shaped values,
 explicitly identified US SSNs, and explicit `+1` North American phones get

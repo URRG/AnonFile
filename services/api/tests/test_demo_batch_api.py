@@ -1,10 +1,13 @@
 """The batch preview is synthetic-only, ephemeral and never a release."""
 import base64
 from io import BytesIO
+import json
 from pathlib import Path
 
 import pytest
 
+from app.contracts import PayloadError
+from app.demo_batch import _choose_alias
 from test_demo_inspect_api import demo_client
 from test_access import auth, client
 
@@ -49,6 +52,140 @@ def test_batch_links_consistent_surrogates_and_explicit_relationship(demo_client
     assert demo_client.app.state.store.releases == {}
 
 
+def test_entity_graph_uses_typed_explicit_evidence_and_never_source_labels(demo_client):
+    request = {"synthetic_only": True, "files": [
+        file("mail", "thread.txt", "From: Maya Patel <maya.patel@private.example>\n"
+             "To: Isha Rao <isha.rao@client.example>\n\n"
+             "Name: Lina Chen\nTitle: Assistant to Maya Patel\nCompany: Harborline Systems\n\n"
+             "Isha Rao is a client of Harborline Systems.\n"
+             "Lina Chen is assistant for Harborline Systems.\n"
+             "Arjun Mehta works on Duplicate Dispatch Guard.\n"
+             "Duplicate Dispatch Guard is assigned to Arjun Mehta."),
+        file("roles", "roles.json", '[{"person_name":"Maya Patel","works_at":"Harborline Systems"},'
+             '{"assistant":"Lina Chen","assistant_for":"Harborline Systems"}]'),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    graph = response.json()["entity_graph"]
+    assert {node["kind"] for node in graph["nodes"]} == {"person", "organization", "project"}
+    assert {edge["type"] for edge in graph["edges"]} == {
+        "sent_to", "assistant_to", "assistant_for", "works_at", "client_of", "works_on", "assigned_to"}
+    assert all(node["label"].startswith(("Organization ", "Project ")) or node["kind"] == "person"
+               for node in graph["nodes"])
+    assert all(set(edge) == {"id", "type", "source_id", "target_id", "evidence"} for edge in graph["edges"])
+    assert all(set(item) == {"document_id", "rule", "field"}
+               for edge in graph["edges"] for item in edge["evidence"])
+    public_graph = json.dumps(graph)
+    for source in ("Maya Patel", "Isha Rao", "Lina Chen", "Arjun Mehta", "Harborline Systems",
+                   "Duplicate Dispatch Guard", "private.example", "client.example"):
+        assert source not in public_graph
+
+
+def test_entity_graph_abstains_on_proximity_headers_and_cross_record_values(demo_client):
+    request = {"synthetic_only": True, "files": [
+        file("mail", "thread.txt", "From: Maya Patel <maya@harborline.example>\n"
+             "To: Isha Rao <isha@client.example>\n\n"
+             "Maya Patel works with Harborline Systems. Isha Rao is a client for Harborline Systems."),
+        file("records", "records.json", '[{"person_name":"Maya Patel"},'
+             '{"works_at":"Harborline Systems"},{"client_name":"Isha Rao"},'
+             '{"client_for":"Harborline Systems"},{"project_name":"Duplicate Dispatch Guard"},'
+             '{"assigned_to":"Maya Patel"}]'),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    graph = response.json()["entity_graph"]
+    assert [edge["type"] for edge in graph["edges"]] == ["sent_to"]
+    assert all(node["kind"] == "person" for node in graph["nodes"])
+
+
+def test_entity_graph_groups_cross_file_evidence_for_the_same_claim(demo_client):
+    request = {"synthetic_only": True, "files": [
+        file("first", "first.json", '[{"person_name":"Maya Patel","works_at":"Harborline Systems"}]'),
+        file("second", "second.csv", "person_name,works_at\nMaya Patel,Harborline Systems\n"),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    graph = response.json()["entity_graph"]
+    assert len(graph["edges"]) == 1
+    assert graph["edges"][0]["type"] == "works_at"
+    assert {item["document_id"] for item in graph["edges"][0]["evidence"]} == {"first", "second"}
+
+
+def test_entity_graph_does_not_turn_a_generic_assistant_title_into_assistant_for(demo_client):
+    request = {"synthetic_only": True, "files": [
+        file("signature", "signature.txt", "Name: Lina Chen\nTitle: Assistant\nCompany: Harborline Systems"),
+        file("record", "record.json", '[{"full_name":"Lina Chen"}]'),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    assert {edge["type"] for edge in response.json()["entity_graph"]["edges"]} == {"works_at"}
+
+
+def test_entity_graph_marks_an_excluded_person_as_source_retained(demo_client):
+    request = payload()
+    first = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert first.status_code == 200, first.text
+    riya_id = next(entity["id"] for entity in first.json()["entities"] if entity["source"] == "Riya")
+    request["review_exclusions"] = {riya_id: "FALSE_POSITIVE_CONFIRMED"}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    riya_node = next(node for node in response.json()["entity_graph"]["nodes"] if node["id"] == riya_id)
+    assert riya_node["label"] == "Source retained"
+
+
+def test_full_person_names_get_realistic_same_width_aliases_across_files(demo_client):
+    request = {"synthetic_only": True, "files": [
+        file("mail", "mail.txt", "From: Maya Patel <maya.patel@example.test>\n"
+             "To: Isha Rao <isha.rao@example.test>\n\nMaya Patel asked Isha Rao to review the case."),
+        file("calendar", "calendar.txt", "Organizer: Maya Patel <maya.patel@example.test>\n"
+             "Invitees: Isha Rao <isha.rao@example.test>\nTitle: 1:1 with Maya Patel"),
+        file("record", "people.csv", "full_name,email\nMaya Patel,maya.patel@example.test\n"
+             "Isha Rao,isha.rao@example.test\n"),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    by_source = {entity["source"]: entity for entity in body["entities"]}
+    maya_alias = by_source["Maya Patel"]["alias"]
+    isha_alias = by_source["Isha Rao"]["alias"]
+    assert [len(part) for part in maya_alias.split()] == [4, 5]
+    assert [len(part) for part in isha_alias.split()] == [4, 3]
+    assert isha_alias != "Isha Rao" and isha_alias != maya_alias
+    assert all(part.isalpha() for alias in (maya_alias, isha_alias) for part in alias.split())
+    assert by_source["maya.patel@example.test"]["alias"] == maya_alias.casefold().replace(" ", "") + "@example.test"
+    assert all(maya_alias in document["candidate_text"] for document in body["documents"])
+    assert all("Maya Patel" not in document["candidate_text"] for document in body["documents"])
+    assert body["verification"]["source_value_residuals"] == 0
+
+
+def test_name_alias_avoids_existing_source_names_even_with_matching_components(demo_client):
+    request = {"synthetic_only": True, "files": [
+        file("mail", "mail.txt", "From: Maya Patel <maya.patel@example.test>\n"
+             "To: John <john@example.test>\n"),
+        file("record", "people.csv", "full_name,email\nMaya Patel,maya.patel@example.test\n"
+             "John,john@example.test\n"),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    aliases = {entity["source"]: entity["alias"] for entity in response.json()["entities"]}
+    assert not aliases["Maya Patel"].startswith("John ")
+    assert aliases["Maya Patel"] != "Maya Patel"
+    assert response.json()["verification"]["source_value_residuals"] == 0
+
+
+def test_unsupported_name_shape_requires_reviewer_alias_instead_of_axxxx(demo_client):
+    request = {"synthetic_only": True, "files": [
+        file("record", "people.csv", "full_name\nAlexandrianus\n"),
+        file("note", "note.txt", "Alexandrianus joined the review."),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Unsupported payload"}
+    assert "Alexandrianus" not in response.text
+    with pytest.raises(PayloadError, match="same-length alias"):
+        _choose_alias("Alexandrianus", set(), set())
+
+
 def test_manual_name_and_alias_override_rerender_without_persistence(demo_client):
     request = payload()
     request["files"][1] = file("record", "note.txt", "Riya and Sita met Tara.")
@@ -75,6 +212,28 @@ def test_manual_sensitive_phrase_corrects_same_value_across_files_without_releas
                if match["entity_id"] == finding["id"])
     assert all("DEMO-4821" not in document["candidate_text"] for document in body["documents"])
     assert body["release_authorized"] is False and body["export_available"] is False
+
+
+def test_slack_roster_names_and_emails_are_linked_across_batch(demo_client):
+    request = {"synthetic_only": True, "files": [
+        file("thread", "slack.txt", "PARTICIPANTS\nArjun Mehta | arjun.mehta@harborline.test | ID HS-EMP-1042\n"
+             "Neha Kapoor | neha.kapoor@harborline.test | ID HS-EMP-1057\n"
+             "09:03\nArjun Mehta\nThe queue is stable. Neha Kapoor confirmed."),
+        file("mail", "mail.txt", "From: Isha Rao <isha.rao@bluebird-air.test>\n"
+             "To: Arjun Mehta <arjun.mehta@harborline.test>\n\nPlease confirm, Neha Kapoor."),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    entities = {entity["source"]: entity for entity in body["entities"]}
+    for name, address in (("Arjun Mehta", "arjun.mehta@harborline.test"),
+                          ("Neha Kapoor", "neha.kapoor@harborline.test")):
+        alias = entities[name]["alias"]
+        assert "x" * 3 not in alias.casefold()
+        assert entities[address]["alias"].split("@", 1)[0] == alias.casefold().replace(" ", "")
+        assert alias in body["documents"][0]["candidate_text"]
+        assert name not in body["documents"][0]["candidate_text"]
+    assert body["verification"]["source_value_residuals"] == 0
 
 
 @pytest.mark.parametrize("findings", [

@@ -2,7 +2,8 @@
 
 Text and raster candidates are review-only. PDF/image candidates are rebuilt
 from pixels, not original document objects. OCR can miss content; no input or
-candidate is persisted or qualified for release by this module.
+candidate is persisted or qualified for release by this module. A synthetic
+demo copy may be downloaded after explicit acknowledgement.
 """
 from __future__ import annotations
 
@@ -10,6 +11,7 @@ import base64
 import binascii
 import csv
 import hashlib
+from itertools import product
 from io import StringIO
 import json
 import re
@@ -32,13 +34,62 @@ SUPPORTED = {".txt": "text", ".csv": "csv", ".json": "json", ".jsonl": "jsonl", 
              ".png": "image", ".jpg": "image", ".jpeg": "image"}
 NAME_FIELDS = {"name", "full_name", "first_name", "last_name", "customer_name", "passenger_name", "client_name", "account_owner"}
 HEADER = re.compile(r"(?im)^(From|To|Cc):\s*([^<>\r\n]{2,80}?)\s*<([^<>\s]+@[^<>\s]+)>\s*$")
+# Bounded Slack-style roster rows. An email on the same line is direct
+# evidence for person/address linking; proximity in a conversation is not.
+ROSTER_ROW = re.compile(r"(?im)^\s*([A-Z][A-Za-z'-]+(?: [A-Z][A-Za-z'-]+){1,2})\s*\|\s*([^|<>\s]+@[^|<>\s]+)\s*(?:\||$)")
 JSON_NAME = re.compile(r'"(?:name|full_name|first_name|last_name|customer_name|passenger_name|client_name|account_owner)"\s*:\s*"([^"\\]{2,80})"', re.I)
 JSON_FIELD = re.compile(r'"(?P<key>(?:[^"\\]|\\.){1,80})"\s*:\s*(?P<value>"(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?|true|false|null)', re.I)
 TEXT_NAME = re.compile(r"(?im)^\s*(?:name|client|customer|passenger)\s*:\s*([A-Z][A-Za-z .'-]{1,78})\s*$")
 SAFE_NAME = re.compile(r"^[A-Za-z][A-Za-z .'-]{1,79}$")
 SAFE_ALIAS = re.compile(r"^[A-Za-z][A-Za-z '-]{1,79}$")
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,48}$")
-NAME_POOL = ("Gita", "Maya", "Mira", "Nina", "Arun", "Noah", "Asha", "Anika", "Kiran", "Leela", "Ava", "Ira", "Miriam", "Rohan", "Nora", "Elena")
+SAFE_GRAPH_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 &'().-]{1,100}$")
+# These patterns intentionally require labelled signature lines.  A person's
+# name near a company name (or a title in ordinary prose) is not evidence of
+# employment or reporting structure.
+SIGNATURE_BLOCK = re.compile(
+    r"(?im)^Name:\s*(?P<person>[A-Za-z][A-Za-z .'-]{1,79})\s*$\r?\n"
+    r"^Title:\s*(?P<title>[^\r\n]{2,100})\s*$\r?\n"
+    r"^Company:\s*(?P<organization>[A-Za-z0-9][A-Za-z0-9 &'().-]{1,100})\s*$"
+)
+ASSISTANT_TITLE = re.compile(r"^assistant\s+to\s+(?P<principal>[A-Za-z][A-Za-z .'-]{1,79})$", re.I)
+ASSISTANT_FOR_TITLE = re.compile(r"^assistant\s+for\s+(?P<organization>[A-Za-z0-9][A-Za-z0-9 &'().-]{1,100})$", re.I)
+INLINE_GRAPH_RECORD = re.compile(r"(?m)^\s*(?P<record>\{[^\r\n]{2,400}\})\s*$")
+EXPLICIT_CLIENT_OF = re.compile(r"(?im)^(?P<person>[A-Za-z][A-Za-z .'-]{1,79}) is a client of (?P<organization>[A-Za-z0-9][A-Za-z0-9 &'().-]{1,100})\.$")
+EXPLICIT_ASSISTANT_TO = re.compile(r"(?im)^(?P<assistant>[A-Za-z][A-Za-z .'-]{1,79}) is assistant to (?P<principal>[A-Za-z][A-Za-z .'-]{1,79})\.$")
+EXPLICIT_ASSISTANT_FOR = re.compile(r"(?im)^(?P<assistant>[A-Za-z][A-Za-z .'-]{1,79}) is assistant for (?P<organization>[A-Za-z0-9][A-Za-z0-9 &'().-]{1,100})\.$")
+EXPLICIT_WORKS_ON = re.compile(r"(?im)^(?P<person>[A-Za-z][A-Za-z .'-]{1,79}) works on (?P<project>[A-Za-z0-9][A-Za-z0-9 &'().-]{1,100})\.$")
+EXPLICIT_ASSIGNED_TO = re.compile(r"(?im)^(?P<project>[A-Za-z0-9][A-Za-z0-9 &'().-]{1,100}) is assigned to (?P<person>[A-Za-z][A-Za-z .'-]{1,79})\.$")
+MAX_GRAPH_NODES = 100
+MAX_GRAPH_EDGES = 200
+MAX_GRAPH_EVIDENCE_PER_EDGE = 20
+MAX_GRAPH_FACTS = 500
+# Curated fictional *name* substitutions, not arbitrary alphanumeric tokens.
+# The PDF renderer replaces OCR text in its original box, so each component
+# must have the same character width as the source component. These lists are
+# deliberately bounded: an unsupported name shape needs reviewer input rather
+# than a plausible-looking but silently unsafe or overflowing fallback.
+GIVEN_NAME_POOL = (
+    "Jo", "Al", "Ed", "Li", "Ava", "Ira", "Mia", "Leo", "Sam", "Ana", "Ian", "Eli", "Zoe", "Max", "Eva", "Uma",
+    "John", "Gita", "Nina", "Sara", "Noah", "Liam", "Omar", "Asha", "Mina", "Tara", "Amir", "Aria", "Nila", "Rina", "Alex", "Mira", "Kira", "Lena", "Jude", "Ruth", "Eric", "Finn", "Hana", "Jaya", "Kavi", "Luca", "Ravi", "Tina", "Vera",
+    "Leena", "David", "Maria", "Elena", "Priya", "Aaron", "Ethan", "Caleb", "Alice", "Anita", "Kiran", "Nadia", "Akira", "Emily", "Grace", "Henry", "James", "Julia", "Lucas", "Meera", "Oscar", "Peter", "Sarah", "Sofia",
+    "Ananya", "Sophia", "Olivia", "Daniel", "Miriam", "Aditya", "Aayush", "Keisha", "Aaliya", "Amelia", "Ariana", "Arthur", "Claire", "Hannah", "Jasmine", "Julian", "Marcus", "Rachel", "Samuel", "Simone",
+    "Michael", "Jessica", "William", "Natasha", "Aishani", "Sabrina", "Lakshmi", "Eleanor", "Abigail", "Anthony", "Cameron", "Crystal", "Dominic", "Natalie", "Rebecca",
+    "Benjamin", "Isabella", "Victoria", "Florence", "Carolina", "Gabriela", "Jonathan", "Michelle", "Nicholas", "Penelope", "Savannah",
+    "Katherine", "Elizabeth", "Alexander", "Gabriella", "Nathaniel", "Charlotte", "Catherine", "Sebastian",
+    "Alexandria", "Jacqueline", "Maximilian", "Christiana",
+    "Christopher",
+)
+FAMILY_NAME_POOL = (
+    "Li", "Wu", "Yu", "Ng", "Ho", "Hu", "Ma", "Rao", "Lee", "Kim", "Roy", "Das", "Ali", "Fox", "Sen", "Ray", "Cox",
+    "Singh", "Khan", "Shah", "Bose", "Park", "Chen", "Reed", "Hunt", "King", "Ross", "Gill", "Stone", "Blake", "Green", "Brown", "Adams", "Lewis", "Jones", "Mehta", "Patel",
+    "Turner", "Martin", "Thomas", "Wilson", "Morgan", "Walker", "Sharma", "Kapoor", "Murphy", "Parker", "Cooper", "Brooks", "Rivera", "Bailey",
+    "Bennett", "Jackson", "Stewart", "Collins", "Freeman", "Coleman", "Edwards", "Russell", "Griffin", "Mitchell",
+    "Williams", "Anderson", "Campbell", "Sullivan", "Franklin", "Phillips", "Martinez", "Robinson",
+    "Fernandez", "Rodriguez", "Henderson", "Patterson", "Robertson", "Hamilton", "Thompson", "Chaudhary",
+    "Richardson", "Montgomery", "Washington", "Schneider",
+)
+NAME_COMPONENTS = re.compile(r"[A-Za-z]+(?:[ '-][A-Za-z]+)*\Z")
 MAX_REFERENCE_LABELS_PER_FILE = 200
 REVIEW_EXCLUSION_REASON = "FALSE_POSITIVE_CONFIRMED"
 SUPPRESSIBLE_KINDS = frozenset({"PERSON_NAME", "EMAIL", "PHONE", "IP_ADDRESS"})
@@ -313,6 +364,9 @@ def _names_and_headers(documents: list[dict[str, Any]]) -> tuple[set[str], list[
                 elif sender:
                     recipients.append(name)
         flush_message()
+        for match in ROSTER_ROW.finditer(text):
+            if SAFE_NAME.fullmatch(match.group(1)):
+                names.add(match.group(1))
         for match in JSON_NAME.finditer(text):
             if SAFE_NAME.fullmatch(match.group(1)):
                 names.add(match.group(1))
@@ -362,6 +416,10 @@ def _email_owners(documents: list[dict[str, Any]]) -> dict[str, str]:
             name = match.group(2).strip()
             if SAFE_NAME.fullmatch(name):
                 bind(match.group(3), name)
+        for match in ROSTER_ROW.finditer(document["text"]):
+            name = match.group(1).strip()
+            if SAFE_NAME.fullmatch(name):
+                bind(match.group(2), name)
     for _, record in _structured_records(documents):
         names = {value.strip().casefold() for key, value in record.items()
                  if isinstance(key, str) and key.strip().casefold() in NAME_FIELDS
@@ -387,6 +445,189 @@ def _structured_role_edges(documents: list[dict[str, Any]]) -> list[tuple[str, s
                 and owner.strip().casefold() != client.strip().casefold()):
             edges.append((owner.strip(), client.strip(), document["id"], kind))
     return edges
+
+
+def _entity_graph_facts(documents: list[dict[str, Any]],
+                        header_edges: list[tuple[str, str, str]]) -> list[dict[str, str]]:
+    """Extract only relationship claims expressed by a bounded explicit form.
+
+    Graph facts deliberately retain their source values only until aliases and
+    pseudonymous graph labels are constructed.  Callers must never expose them.
+    In particular, this function does not infer relationships from entity
+    proximity, repeated domains, message threads, or arbitrary prose.
+    """
+    facts: list[dict[str, str]] = []
+
+    def person(value: object) -> str | None:
+        if isinstance(value, str) and SAFE_NAME.fullmatch(value.strip()):
+            return value.strip()
+        return None
+
+    def label(value: object) -> str | None:
+        if isinstance(value, str) and SAFE_GRAPH_LABEL.fullmatch(value.strip()):
+            return value.strip()
+        return None
+
+    def add(type_: str, source_kind: str, source: str, target_kind: str,
+            target: str, document_id: str, rule: str, field: str) -> None:
+        if source.casefold() != target.casefold():
+            if len(facts) >= MAX_GRAPH_FACTS:
+                raise PayloadError("The explicit entity graph exceeds the synthetic demo review limit.")
+            facts.append({"type": type_, "source_kind": source_kind, "source": source,
+                          "target_kind": target_kind, "target": target,
+                          "document_id": document_id, "rule": rule, "field": field})
+
+    for sender, recipient, document_id in header_edges:
+        add("sent_to", "person", sender, "person", recipient, document_id,
+            "explicit_mail_header", "From/To/Cc")
+    records = list(_structured_records(documents))
+    # OCR/text fixtures can contain an exact one-line JSON record.  This is a
+    # deliberate escape hatch for document evidence, not a JSON-like prose
+    # parser: malformed or multiline content is ignored rather than guessed.
+    for document in documents:
+        if document["kind"] in {"json", "jsonl", "csv"}:
+            continue
+        for match in INLINE_GRAPH_RECORD.finditer(document["text"]):
+            try:
+                record = json.loads(match.group("record"))
+            except (ValueError, TypeError):
+                continue
+            if isinstance(record, dict) and all(isinstance(key, str) for key in record):
+                records.append((document, record))
+    for document, record in records:
+        assistant, principal = person(record.get("assistant")), person(record.get("assistant_to"))
+        if assistant and principal:
+            add("assistant_to", "person", assistant, "person", principal, document["id"],
+                "explicit_structured_field_pair", "assistant,assistant_to")
+        assistant_for = label(record.get("assistant_for"))
+        if assistant and assistant_for:
+            add("assistant_for", "person", assistant, "organization", assistant_for, document["id"],
+                "explicit_structured_field_pair", "assistant,assistant_for")
+        worker_field = "person_name" if person(record.get("person_name")) else "employee_name"
+        worker = person(record.get(worker_field))
+        organization_field = next((key for key in ("works_at", "company", "employer") if label(record.get(key))), None)
+        organization = label(record.get(organization_field)) if organization_field else None
+        if worker and organization:
+            add("works_at", "person", worker, "organization", organization, document["id"],
+                "explicit_structured_field_pair",
+                f"{worker_field},works_at" if organization_field == "works_at" else organization_field)
+        client, client_for = person(record.get("client_name")), label(record.get("client_for"))
+        if client and client_for:
+            add("client_of", "person", client, "organization", client_for, document["id"],
+                "explicit_structured_field_pair", "client_name,client_for")
+        contributor_field = "person_name" if person(record.get("person_name")) else "employee_name"
+        contributor, project = person(record.get(contributor_field)), label(record.get("works_on"))
+        if contributor and project:
+            add("works_on", "person", contributor, "project", project, document["id"],
+                "explicit_structured_field_pair", f"{contributor_field},works_on")
+        assigned_project, assignee = label(record.get("project_name")), person(record.get("assigned_to"))
+        if assigned_project and assignee:
+            add("assigned_to", "project", assigned_project, "person", assignee, document["id"],
+                "explicit_structured_field_pair", "project_name,assigned_to")
+    for document in documents:
+        for match in SIGNATURE_BLOCK.finditer(document["text"]):
+            signer, organization = person(match.group("person")), label(match.group("organization"))
+            if not signer or not organization:
+                continue
+            add("works_at", "person", signer, "organization", organization, document["id"],
+                "explicit_signature_block", "Name,Title,Company")
+            assistant_match = ASSISTANT_TITLE.fullmatch(match.group("title").strip())
+            if assistant_match:
+                principal = person(assistant_match.group("principal"))
+                if principal:
+                    add("assistant_to", "person", signer, "person", principal, document["id"],
+                        "explicit_signature_title", "Title")
+            assistant_for_match = ASSISTANT_FOR_TITLE.fullmatch(match.group("title").strip())
+            if assistant_for_match:
+                assisted_organization = label(assistant_for_match.group("organization"))
+                if assisted_organization:
+                    add("assistant_for", "person", signer, "organization", assisted_organization, document["id"],
+                        "explicit_signature_title", "Title")
+        # These are complete, line-bounded declarative claims.  Similar words
+        # elsewhere in an email cannot create an affiliation edge.
+        for match in EXPLICIT_CLIENT_OF.finditer(document["text"]):
+            client, organization = person(match.group("person")), label(match.group("organization"))
+            if client and organization:
+                add("client_of", "person", client, "organization", organization, document["id"],
+                    "explicit_role_statement", "client_of_statement")
+        for match in EXPLICIT_ASSISTANT_TO.finditer(document["text"]):
+            assistant, principal = person(match.group("assistant")), person(match.group("principal"))
+            if assistant and principal:
+                add("assistant_to", "person", assistant, "person", principal, document["id"],
+                    "explicit_role_statement", "assistant_to_statement")
+        for match in EXPLICIT_ASSISTANT_FOR.finditer(document["text"]):
+            assistant, organization = person(match.group("assistant")), label(match.group("organization"))
+            if assistant and organization:
+                add("assistant_for", "person", assistant, "organization", organization, document["id"],
+                    "explicit_role_statement", "assistant_for_statement")
+        for match in EXPLICIT_WORKS_ON.finditer(document["text"]):
+            contributor, project = person(match.group("person")), label(match.group("project"))
+            if contributor and project:
+                add("works_on", "person", contributor, "project", project, document["id"],
+                    "explicit_role_statement", "works_on_statement")
+        for match in EXPLICIT_ASSIGNED_TO.finditer(document["text"]):
+            project, assignee = label(match.group("project")), person(match.group("person"))
+            if project and assignee:
+                add("assigned_to", "project", project, "person", assignee, document["id"],
+                    "explicit_role_statement", "assigned_to_statement")
+    return facts
+
+
+def _public_entity_graph(facts: list[dict[str, str]], person_ids: dict[str, str],
+                         person_labels: dict[str, str]) -> dict[str, list[dict[str, Any]]]:
+    """Render source-free graph nodes and evidence from explicit facts only."""
+    def unique_casefold(values: list[str]) -> list[str]:
+        by_key: dict[str, str] = {}
+        for value in sorted(values, key=lambda item: (item.casefold(), item)):
+            by_key.setdefault(value.casefold(), value)
+        return list(by_key.values())
+
+    organization_values = unique_casefold([fact[side] for fact in facts for side in ("source", "target")
+                                            if fact[f"{side}_kind"] == "organization"])
+    project_values = unique_casefold([fact[side] for fact in facts for side in ("source", "target")
+                                       if fact[f"{side}_kind"] == "project"])
+    opaque_ids = {
+        "organization": {value.casefold(): f"organization_{index}" for index, value in enumerate(organization_values, 1)},
+        "project": {value.casefold(): f"project_{index}" for index, value in enumerate(project_values, 1)},
+    }
+
+    def node_id(kind: str, value: str) -> str | None:
+        if kind == "person":
+            return person_ids.get(value.casefold())
+        return opaque_ids[kind].get(value.casefold())
+
+    evidence_by_node: dict[str, set[str]] = {}
+    grouped: dict[tuple[str, str, str], list[dict[str, str]]] = {}
+    for fact in facts:
+        source_id, target_id = node_id(fact["source_kind"], fact["source"]), node_id(fact["target_kind"], fact["target"])
+        if not source_id or not target_id:
+            continue
+        evidence_by_node.setdefault(source_id, set()).add(fact["document_id"])
+        evidence_by_node.setdefault(target_id, set()).add(fact["document_id"])
+        grouped.setdefault((fact["type"], source_id, target_id), []).append(fact)
+    if len(evidence_by_node) > MAX_GRAPH_NODES or len(grouped) > MAX_GRAPH_EDGES:
+        raise PayloadError("The explicit entity graph exceeds the synthetic demo review limit.")
+    nodes: list[dict[str, Any]] = []
+    for value, entity_id in sorted(person_ids.items()):
+        if entity_id in evidence_by_node:
+            nodes.append({"id": entity_id, "kind": "person", "label": person_labels[value],
+                          "document_ids": sorted(evidence_by_node[entity_id])})
+    for kind, prefix in (("organization", "Organization"), ("project", "Project")):
+        for index, value in enumerate((organization_values if kind == "organization" else project_values), 1):
+            identifier = opaque_ids[kind][value.casefold()]
+            nodes.append({"id": identifier, "kind": kind, "label": f"{prefix} {index}",
+                          "document_ids": sorted(evidence_by_node.get(identifier, set()))})
+    edges = []
+    for index, ((type_, source_id, target_id), grouped_facts) in enumerate(sorted(grouped.items()), 1):
+        evidence = sorted({(fact["document_id"], fact["rule"], fact["field"])
+                           for fact in grouped_facts})
+        if len(evidence) > MAX_GRAPH_EVIDENCE_PER_EDGE:
+            raise PayloadError("An entity graph relationship has too much evidence for this demo.")
+        edges.append({"id": f"relationship_{index}", "type": type_, "source_id": source_id,
+                      "target_id": target_id, "evidence": [
+                          {"document_id": doc_id, "rule": rule, "field": field}
+                          for doc_id, rule, field in evidence]})
+    return {"nodes": nodes, "edges": edges}
 
 
 def _email_aliases(keys: list[tuple[str, str]], names_by_key: dict[str, str],
@@ -419,22 +660,40 @@ def _email_aliases(keys: list[tuple[str, str]], names_by_key: dict[str, str],
     return aliases
 
 
-def _choose_alias(name: str, used: set[str]) -> str:
-    for candidate in NAME_POOL:
-        if len(candidate) == len(name) and candidate.casefold() != name.casefold() and candidate.casefold() not in used:
+def _choose_alias(name: str, used: set[str], protected_tokens: set[str]) -> str:
+    """Choose a readable, same-shape alias; never invent an ``Axxxx`` token.
+
+    Keeping the word boundaries and component lengths makes the result usable
+    in a narrow OCR/PDF text box. It is not a guarantee of identical font
+    metrics, so the raster renderer remains subject to visual review.
+    """
+    if not NAME_COMPONENTS.fullmatch(name):
+        raise PayloadError("A person name needs a same-length alias chosen by a reviewer.")
+    pieces = re.split(r"([ '-])", name)
+    word_indexes = [index for index in range(0, len(pieces), 2)]
+    # A batch of people should not collapse into a roster of identical given
+    # names. Reuse remains possible when the finite same-width pool is small,
+    # but choose the least-used eligible components first.
+    component_use = Counter(component.casefold() for alias in used
+                            for component in re.findall(r"[A-Za-z]+", alias)
+                            if component.casefold() not in protected_tokens)
+    choices = []
+    for ordinal, index in enumerate(word_indexes):
+        source = pieces[index].casefold()
+        pool = FAMILY_NAME_POOL if len(word_indexes) > 1 and ordinal == len(word_indexes) - 1 else GIVEN_NAME_POOL
+        eligible = [candidate for candidate in pool if len(candidate) == len(pieces[index])
+                    and candidate.casefold() != source and candidate.casefold() not in protected_tokens
+                    and candidate.casefold() not in used]
+        choices.append(sorted(eligible, key=lambda candidate: component_use[candidate.casefold()]))
+    for names in product(*choices):
+        candidate_pieces = pieces.copy()
+        for index, replacement in zip(word_indexes, names):
+            candidate_pieces[index] = replacement
+        candidate = "".join(candidate_pieces)
+        if candidate.casefold() not in used:
             used.add(candidate.casefold())
             return candidate
-    # A deterministic length-preserving fallback, explicitly a pseudonym rather
-    # than a realistic name. Never silently overflow a short PDF text run.
-    seed = "A" + "x" * (len(name) - 1)
-    candidate = seed
-    counter = 0
-    while candidate.casefold() in used or candidate.casefold() == name.casefold():
-        counter += 1
-        suffix = str(counter)
-        candidate = seed[:max(1, len(name) - len(suffix))] + suffix
-    used.add(candidate.casefold())
-    return candidate
+    raise PayloadError("A person name needs a same-length alias chosen by a reviewer.")
 
 
 def _exact_phrase_matches(text: str, value: str) -> list[re.Match[str]]:
@@ -495,6 +754,12 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
     names, raw_edges = _names_and_headers(documents)
     email_owners = _email_owners(documents)
     role_edges = _structured_role_edges(documents)
+    graph_facts = _entity_graph_facts(documents, raw_edges)
+    for fact in graph_facts:
+        if fact["source_kind"] == "person":
+            names.add(fact["source"])
+        if fact["target_kind"] == "person":
+            names.add(fact["target"])
     for document in documents:
         for start, end, kind in document["_fields"]:
             value = document["text"][start:end]
@@ -533,8 +798,17 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
     if len(reserved_aliases) != len(overrides) or reserved_aliases.intersection(names_by_key):
         raise PayloadError("Person aliases must be unique and must not be another source name.")
     used_aliases: set[str] = set(names_by_key)
-    default_aliases = {normalized: _choose_alias(names_by_key[normalized], used_aliases)
-                       for kind, normalized in keys if kind == "PERSON_NAME"}
+    protected_tokens = {part.casefold() for name in names_by_key.values()
+                        for part in re.findall(r"[A-Za-z]+", name)}
+    default_aliases: dict[str, str] = {}
+    for kind, normalized in keys:
+        if kind != "PERSON_NAME":
+            continue
+        try:
+            default_aliases[normalized] = _choose_alias(names_by_key[normalized], used_aliases, protected_tokens)
+        except PayloadError:
+            if id_by_key[(kind, normalized)] not in overrides:
+                raise
     for (kind, normalized), entity_id in id_by_key.items():
         if kind != "PERSON_NAME" or entity_id not in overrides:
             continue
@@ -544,8 +818,9 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
         if any(alias.casefold() == other.casefold() for other_name, other in default_aliases.items()
                if other_name != normalized and id_by_key[("PERSON_NAME", other_name)] not in overrides):
             raise PayloadError("An alias conflicts with another person's proposed replacement.")
-    name_aliases = {normalized: overrides.get(id_by_key[("PERSON_NAME", normalized)], default_aliases[normalized])
-                    for normalized in names_by_key}
+    name_aliases = {normalized: (overrides[entity_id] if entity_id in overrides else default_aliases[normalized])
+                    for normalized in names_by_key
+                    for entity_id in (id_by_key[("PERSON_NAME", normalized)],)}
     email_aliases = _email_aliases(keys, names_by_key, name_aliases, email_owners, exclusions, id_by_key)
     source_values = {source.casefold() for source in names_by_key.values()} | {source.casefold() for source in source_by_key.values()}
     used_typed_aliases: set[str] = set()
@@ -647,6 +922,9 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
         doc.pop("_labelled_ssns")
 
     person_id = {value: id_by_key[("PERSON_NAME", value)] for value in names_by_key}
+    graph_person_labels = {value: ("Source retained" if person_id[value] in exclusions else name_aliases[value])
+                           for value in person_id}
+    entity_graph = _public_entity_graph(graph_facts, person_id, graph_person_labels)
     relationships = []
     seen_edges: set[tuple[str, str, str, str]] = set()
     for sender, recipient, document_id in raw_edges:
@@ -687,6 +965,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "posture": "SYNTHETIC_DEMO_ONLY", "release_authorized": False, "export_available": False,
         "documents": documents, "entities": entities, "relationships": relationships,
+        "entity_graph": entity_graph,
         "summary": {"files": len(documents), "detected_mentions": total_mentions,
                     "transformed_mentions": transformed_mentions, "suppressed_mentions": total_mentions - transformed_mentions,
                     "linked_entities": sum(e["mentions"] > 0 for e in entities),
@@ -722,10 +1001,11 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
             "Exact-name linking can merge different people who share a name; ambiguous identities need human resolution.",
             "Email-shaped pseudonyms use reserved .test domains and preserve only explicitly evidenced person/email and source-domain equivalence within this batch; they are not deliverable contact addresses.",
             "PAN and explicitly identified US SSN examples are deliberately invalid; explicit +1 NANP phones use a reserved fictional range. Other identifiers remain opaque. Syntax preservation is not validity or release qualification.",
-            "PDF candidates are rebuilt as image-only PDFs in memory, but only raster page previews and a digest are returned; no PDF download or delivery is authorized.",
+            "PDF candidates are rebuilt as image-only PDFs in memory. A digest-checked local demo copy may be downloaded; this is not an authorized release or delivery.",
             "Image and scanned-PDF OCR may miss or misread content. The same-engine raster recheck is not independent validation, and source content outside recognized OCR lines may remain visible.",
-            "Relationship edges require explicit mail headers or account_owner/client_name in the same parsed record; they do not infer social or organizational ties.",
-            "Pseudonyms and retained relationships may remain linkable. No release, sale, or export is authorized.",
+            "Entity-graph edges require explicit mail headers, labelled signature blocks, or named field pairs in one parsed record; they do not infer social, employment, client, or organizational ties from proximity, prose, or email domains.",
+            "Graph evidence identifies only the source document and bounded extraction rule/field. Graph organization and project labels are batch-local pseudonyms, and the graph is capped for review rather than treated as a complete organization model.",
+            "Pseudonyms and retained relationships may remain linkable. No release, sale, or production export is authorized; demo downloads are unverified synthetic review copies only.",
             "Reference-label agreement, when present, depends on the reviewer's completeness assertion and does not establish generalization or anonymity.",
         ],
     }

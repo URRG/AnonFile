@@ -104,16 +104,18 @@ export async function inspectSyntheticDemo(request: { apiBase: string; token: st
   }
 }
 
-// A separate, opt-in batch preview. It does not use the release/control-plane
-// endpoints and cannot return an exportable artifact or anonymity verdict.
+// A separate, opt-in synthetic batch preview. It does not use release/control-
+// plane endpoints or return a qualified artifact or anonymity verdict. A local
+// demo copy can be downloaded, but never as an authorized buyer release.
 export type BatchUpload = { id: string; name: string; contentBase64: string; size: number }
 export type BatchManualFinding = { value: string; kind: 'OTHER_SENSITIVE' | 'BUSINESS_CONFIDENTIAL' | 'QUASI_IDENTIFIER' | 'GOVERNMENT_ID' | 'DATE_OF_BIRTH' }
 export type BatchMatch = { start: number; end: number; source: string; entityId: string; kind: string; replacement: string; applied: boolean;
   origin: 'AUTOMATIC' | 'MANUAL' }
 export type BatchMediaPage = { number: number; width: number; height: number; sourcePngBase64: string;
-  candidatePngBase64: string; ocrLines: number }
+  candidatePngBase64: string; candidatePngSha256: string; ocrLines: number }
 export type BatchMediaPreview = { pages: BatchMediaPage[]; fallbackLines: number; selfOcrResidualSources: number;
-  pdfRasterEvidence: { sha256: string; bytes: number; pages: number; sourceObjectsCopied: false } | null }
+  pdfRasterEvidence: { sha256: string; bytes: number; pages: number; sourceObjectsCopied: false } | null;
+  candidatePdfBase64: string | null }
 export type BatchDocument = { id: string; name: string; kind: 'text' | 'csv' | 'json' | 'jsonl' | 'pdf' | 'image';
   text: string; candidateText: string; sizeBytes: number; previewFidelity: 'source_text' | 'raster_ocr_review';
   structureCheck: 'pass' | 'fail' | 'not_applicable'; matches: BatchMatch[]; mediaPreview: BatchMediaPreview | null }
@@ -122,6 +124,11 @@ export type BatchAliasStrategy = 'NAME_LENGTH_MATCH' | 'EMAIL_TEST_ADDRESS' | 'P
 export type BatchEntity = { id: string; kind: string; source: string; alias: string; strategy: BatchAliasStrategy;
   mentions: number; excluded: boolean }
 export type BatchRelationship = { sourceId: string; targetId: string; type: 'EMAILED' | 'ACCOUNT_OWNER_OF'; documentId: string; basis: string }
+export type EntityGraphNode = { id: string; kind: 'person' | 'organization' | 'project'; label: string; documentIds: string[] }
+export type EntityGraphEdgeType = 'assistant_to' | 'assistant_for' | 'works_at' | 'client_of' | 'works_on' | 'assigned_to' | 'sent_to'
+export type EntityGraphEvidence = { documentId: string; rule: string; field?: string }
+export type EntityGraphEdge = { id: string; type: EntityGraphEdgeType; sourceId: string; targetId: string; evidence: EntityGraphEvidence[] }
+export type EntityGraph = { nodes: EntityGraphNode[]; edges: EntityGraphEdge[] }
 export type BatchCheck = { name: string; status: 'PASS' | 'FAIL' | 'REVIEW' | 'NOT_TESTED' | 'NOT_APPLICABLE' | 'NOT_MEASURED'; detail: string }
 export type BatchReferenceSpan = { start: number; end: number; entity_type: string }
 export type BatchReferenceManifest = { basis: 'REVIEWER_ATTESTED_EXHAUSTIVE' | 'CURATED_SYNTHETIC_SAMPLE';
@@ -133,7 +140,7 @@ export type BatchAnnotationScore = { basis: BatchReferenceManifest['basis']; sta
   perType: Record<string, BatchAnnotationCounts>;
   perDocument: BatchFileScore[] }
 export type BatchInspection = { posture: 'SYNTHETIC_DEMO_ONLY'; releaseAuthorized: false; exportAvailable: false;
-  documents: BatchDocument[]; entities: BatchEntity[]; relationships: BatchRelationship[];
+  documents: BatchDocument[]; entities: BatchEntity[]; relationships: BatchRelationship[]; entityGraph: EntityGraph;
   summary: { files: number; detectedMentions: number; transformedMentions: number; suppressedMentions: number;
     linkedEntities: number; explicitRelationships: number };
   verification: { status: 'REVIEW_REQUIRED'; knownRuleResidualMatches: number; sourceValueResiduals: number; structureFailures: number;
@@ -162,6 +169,15 @@ function pngHeaderMatches(value: string, width: number, height: number): boolean
     const dimension = (start: number) => ((header.charCodeAt(start) * 2 ** 24) +
       (header.charCodeAt(start + 1) << 16) + (header.charCodeAt(start + 2) << 8) + header.charCodeAt(start + 3))
     return dimension(16) === width && dimension(20) === height
+  } catch { return false }
+}
+function pdfEnvelopeMatches(value: unknown, byteCount: number): value is string {
+  if (typeof value !== 'string' || value.length > 13_333_336 || value.length % 4 !== 0 ||
+      !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) return false
+  const padding = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0
+  if (value.length / 4 * 3 - padding !== byteCount) return false
+  try {
+    return atob(value.slice(0, 12)).startsWith('%PDF-') && atob(value.slice(-128)).includes('%%EOF')
   } catch { return false }
 }
 
@@ -207,6 +223,48 @@ export async function readBatchReferenceManifest(file: File, uploads: BatchUploa
 }
 
 function batchInvalid(): never { throw new DemoInspectionFailure('The batch service returned an invalid review result. Nothing was approved or exported.') }
+
+function entityGraph(raw: unknown, documentIds: Set<string>, entities: BatchEntity[]): EntityGraph {
+  // This graph is deliberately aliases and rule names only: no source spans, filenames, or mail addresses.
+  if (!object(raw) || !Array.isArray(raw.nodes) || !Array.isArray(raw.edges)) batchInvalid()
+  if (raw.nodes.length > 100 || raw.edges.length > 200) batchInvalid()
+  const aliases = new Map(entities.filter(entity => entity.kind === 'PERSON_NAME').map(entity => [entity.id, entity.excluded ? 'Source retained' : entity.alias]))
+  const nodes: EntityGraphNode[] = raw.nodes.map(node => {
+    if (!object(node) || !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(String(node.id)) ||
+        !['person', 'organization', 'project'].includes(String(node.kind)) || !safeText(node.label, 80) ||
+        !node.label.trim() || !Array.isArray(node.document_ids) || node.document_ids.length > 3 ||
+        !node.document_ids.every(id => typeof id === 'string' && documentIds.has(id))) batchInvalid()
+    if ((node.kind === 'person' && aliases.get(node.id as string) !== node.label) ||
+        (node.kind === 'organization' && !/^Organization [1-9][0-9]{0,2}$/.test(node.label)) ||
+        (node.kind === 'project' && !/^Project [1-9][0-9]{0,2}$/.test(node.label))) batchInvalid()
+    return { id: node.id as string, kind: node.kind as EntityGraphNode['kind'], label: node.label as string,
+      documentIds: [...new Set(node.document_ids as string[])] }
+  })
+  const nodeIds = new Set(nodes.map(node => node.id))
+  if (nodeIds.size !== nodes.length) batchInvalid()
+  const allowedTypes = new Set<EntityGraphEdgeType>(['assistant_to', 'assistant_for', 'works_at', 'client_of', 'works_on', 'assigned_to', 'sent_to'])
+  const rules = new Set(['explicit_mail_header', 'explicit_structured_field_pair', 'explicit_signature_block', 'explicit_signature_title', 'explicit_role_statement'])
+  const fields = new Set(['From/To/Cc', 'assistant,assistant_to', 'assistant,assistant_for', 'person_name,works_at', 'employee_name,works_at', 'company', 'employer', 'client_name,client_for', 'person_name,works_on', 'employee_name,works_on', 'project_name,assigned_to', 'Name,Title,Company', 'Title', 'client_of_statement', 'assistant_to_statement', 'assistant_for_statement', 'works_on_statement', 'assigned_to_statement'])
+  const validKinds: Record<EntityGraphEdgeType, [EntityGraphNode['kind'], EntityGraphNode['kind']]> = {
+    assistant_to: ['person', 'person'], assistant_for: ['person', 'organization'], sent_to: ['person', 'person'], works_at: ['person', 'organization'], client_of: ['person', 'organization'], works_on: ['person', 'project'], assigned_to: ['project', 'person'],
+  }
+  const kindsById = new Map(nodes.map(node => [node.id, node.kind]))
+  const edges: EntityGraphEdge[] = raw.edges.map(edge => {
+    if (!object(edge) || !/^relationship_[1-9][0-9]{0,3}$/.test(String(edge.id)) || !allowedTypes.has(edge.type as EntityGraphEdgeType) ||
+        !nodeIds.has(String(edge.source_id)) || !nodeIds.has(String(edge.target_id)) || edge.source_id === edge.target_id || !Array.isArray(edge.evidence) || !edge.evidence.length || edge.evidence.length > 20) batchInvalid()
+    const expectedKinds = validKinds[edge.type as EntityGraphEdgeType]
+    if (kindsById.get(String(edge.source_id)) !== expectedKinds[0] || kindsById.get(String(edge.target_id)) !== expectedKinds[1]) batchInvalid()
+    const evidence = edge.evidence.map(item => {
+      if (!object(item) || typeof item.document_id !== 'string' || !documentIds.has(item.document_id) ||
+          typeof item.rule !== 'string' || !rules.has(item.rule) || typeof item.field !== 'string' || !fields.has(item.field)) batchInvalid()
+      return { documentId: item.document_id, rule: item.rule, field: item.field } as EntityGraphEvidence
+    })
+    return { id: edge.id as string, type: edge.type as EntityGraphEdgeType, sourceId: edge.source_id as string,
+      targetId: edge.target_id as string, evidence }
+  })
+  if (new Set(edges.map(edge => edge.id)).size !== edges.length) batchInvalid()
+  return { nodes, edges }
+}
 
 function batchInspection(value: unknown, expectedUploads: BatchUpload[], reference: BatchReferenceManifest | null,
   expectedExclusions: Record<string, 'FALSE_POSITIVE_CONFIRMED'>): BatchInspection {
@@ -276,25 +334,29 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
             (page.width as number) < 16 || (page.height as number) < 16 ||
             (page.width as number) * (page.height as number) > 2_000_000 || !safeCount(page.ocr_lines) ||
             (page.ocr_lines as number) > 200 || typeof page.source_png_base64 !== 'string' ||
-            typeof page.candidate_png_base64 !== 'string' ||
+            typeof page.candidate_png_base64 !== 'string' || typeof page.candidate_png_sha256 !== 'string' ||
+            !/^[0-9a-f]{64}$/.test(page.candidate_png_sha256) ||
             ![page.source_png_base64, page.candidate_png_base64].every(value => value.length < 3_400_000 &&
               /^[A-Za-z0-9+/]+={0,2}$/.test(value) && pngHeaderMatches(value, page.width as number, page.height as number))) batchInvalid()
         return { number: page.number as number, width: page.width as number, height: page.height as number,
           sourcePngBase64: page.source_png_base64 as string, candidatePngBase64: page.candidate_png_base64 as string,
-          ocrLines: page.ocr_lines as number }
+          candidatePngSha256: page.candidate_png_sha256 as string, ocrLines: page.ocr_lines as number }
       })
       if (pages.reduce((sum, page) => sum + page.width * page.height, 0) > 3_000_000) batchInvalid()
       let pdfRasterEvidence: BatchMediaPreview['pdfRasterEvidence'] = null
+      let candidatePdfBase64: string | null = null
       if (raw.kind === 'pdf') {
         const evidence = media.pdf_raster_evidence
         if (!object(evidence) || typeof evidence.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(evidence.sha256) ||
-            !safeCount(evidence.bytes) || evidence.bytes < 100 || evidence.bytes > 20_000_000 ||
-            evidence.pages !== pages.length || evidence.source_objects_copied !== false) batchInvalid()
+            !safeCount(evidence.bytes) || evidence.bytes < 100 || evidence.bytes > 10_000_000 ||
+            evidence.pages !== pages.length || evidence.source_objects_copied !== false ||
+            !pdfEnvelopeMatches(media.candidate_pdf_base64, evidence.bytes as number)) batchInvalid()
         pdfRasterEvidence = { sha256: evidence.sha256, bytes: evidence.bytes as number,
           pages: pages.length, sourceObjectsCopied: false }
-      } else if (media.pdf_raster_evidence !== null) batchInvalid()
+        candidatePdfBase64 = media.candidate_pdf_base64 as string
+      } else if (media.pdf_raster_evidence !== null || media.candidate_pdf_base64 !== null) batchInvalid()
       mediaPreview = { pages, fallbackLines: media.fallback_lines as number,
-        selfOcrResidualSources: media.self_ocr_residual_sources as number, pdfRasterEvidence }
+        selfOcrResidualSources: media.self_ocr_residual_sources as number, pdfRasterEvidence, candidatePdfBase64 }
     } else if (raw.media_preview !== undefined || raw.preview_fidelity !== 'source_text') batchInvalid()
     return { id: raw.id as string, name: raw.name as string, kind: raw.kind as BatchDocument['kind'], text: raw.text as string,
       candidateText: raw.candidate_text as string, sizeBytes: raw.size_bytes as number,
@@ -314,6 +376,7 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
     return { sourceId: raw.source_id as string, targetId: raw.target_id as string,
       type: raw.type as BatchRelationship['type'], documentId: raw.document_id as string, basis: raw.basis as string }
   })
+  const graph = entityGraph(value.entity_graph, new Set(documents.map(document => document.id)), entities)
   const summary = value.summary
   if (summary.files !== documents.length || !safeCount(summary.detected_mentions) || !safeCount(summary.transformed_mentions) ||
       !safeCount(summary.suppressed_mentions) ||
@@ -403,7 +466,7 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
     return { name: raw.name, status: raw.status as BatchCheck['status'], detail: raw.detail }
   })
   if (!value.limitations.every(item => safeText(item, 600))) batchInvalid()
-  return { posture: 'SYNTHETIC_DEMO_ONLY', releaseAuthorized: false, exportAvailable: false, documents, entities, relationships,
+  return { posture: 'SYNTHETIC_DEMO_ONLY', releaseAuthorized: false, exportAvailable: false, documents, entities, relationships, entityGraph: graph,
     summary: { files: summary.files as number, detectedMentions: summary.detected_mentions as number,
       transformedMentions: summary.transformed_mentions as number, suppressedMentions: summary.suppressed_mentions as number,
       linkedEntities: summary.linked_entities as number, explicitRelationships: summary.explicit_relationships as number },

@@ -14,6 +14,44 @@ without inventing a live contact point or an issuable identity number.
 | Explicit `+1` 11-digit NANP phone | `+1 202 555 0100`, preserving separators; unique through `0199` | [NANPA reserves 555-0100–0199 as fictitious non-working numbers](https://nanpa.com/numbering/555-line-numbers) | Other countries, ambiguous local numbers, and capacity overflow remain opaque |
 | Passport, driving licence, Aadhaar, payment identifier, credential, or unidentified number | Typed opaque marker | No safe global fictitious range is established for these fields | A future country/jurisdiction adapter needs authoritative test ranges and independent validation |
 
+`DEMO123456` → `ABCD38743X` is **not** a safe universal passport strategy.
+The second string looks like an identifier but cannot be certified never
+issued: [ICAO says the document number is assigned by the issuing
+state](https://www.icao.int/publications/Documents/9303_p4_cons_en.pdf), and
+[driver-license rules vary by jurisdiction](https://www.aamva.org/topics/driver-license-and-identification-standards).
+Changing the character classes of the source is not even exact shape
+preservation. A synthetic-only review copy may use a conspicuous value such
+as `TEST-PASSPORT-01`, visibly marked as *format-degraded and unverified*, but
+that is a different utility tier from a validator-compatible surrogate.
+
+## Product policy: authenticity has several meanings
+
+| Tier | What it preserves | Safety claim | Example/condition |
+| --- | --- | --- | --- |
+| Reserved or issuer-invalid | Character count, separators and relevant field semantics | Documented non-working/non-issuable under a named issuer's published rules | US SSN area `000`; invalid PAN holder-status letter; NANPA `555-0100–0199` |
+| Synthetic-test convention | Human-readable category and approximate layout | **No collision-free claim**; for expressly synthetic fixtures only | `TEST-PASSPORT-01`, `EMP-TEST-0001` |
+| Opaque | Sensitive value removed without preserving business format | No claim of downstream format compatibility | `[GOVERNMENT_ID_E5]` for unsupported passport or licence |
+| Governed compatible token | A validator-compatible shape, possibly a real-looking value | Requires issuer-specific reserved namespace or separately controlled reversible token vault, collision checks and release review | Future adapter, not available in this demo |
+
+Every entity should eventually expose `surrogate_safety`, `format_preserving`,
+`issuer`, `jurisdiction`, and `validation_basis` in the review UI. A user must
+be able to choose between visibly invalid review data and a compatibility
+requirement; the system must abstain when a safe compatibility profile is
+unavailable. A checksum-invalid value is *not* necessarily non-issuable unless
+the issuer's assignment and validation rules establish that conclusion.
+
+Other categories need the same discipline: [RFC 2606 reserves `.test` and
+`.invalid`](https://datatracker.ietf.org/doc/rfc2606/) for non-live email and
+web domains; a realistic `gita@company.com` might deliver to a real party.
+Internal-link surrogates must change the host, organization, path IDs and
+queries together, while retaining useful link *structure*. Employee IDs are
+issuer-local, so `EMP-TEST-0001` is only safe as a fixture convention unless
+the organization reserves it. A plausible postal address may still be
+deliverable; [USPS Publication 28](https://pe.usps.com/text/pub28/) defines
+formatting, not a fictional-address range. Dates may need consistent shifting
+or generalization depending on purpose and re-identification risk, rather
+than an opaque marker in every context.
+
 These are **syntactic surrogates, not real format-valid substitutes**. In
 particular, an intentionally invalid PAN or SSN may fail downstream business
 validation. Minting a plausible live identifier would solve that utility
