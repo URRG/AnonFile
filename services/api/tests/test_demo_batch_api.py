@@ -1,6 +1,7 @@
 """The batch preview is synthetic-only, ephemeral and never a release."""
 import base64
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 
@@ -32,6 +33,12 @@ def test_batch_links_consistent_surrogates_and_explicit_relationship(demo_client
     assert len(riya["alias"]) == 4 and riya["alias"] != "Riya"
     assert riya["alias"] in body["documents"][0]["candidate_text"]
     assert riya["alias"] in body["documents"][1]["candidate_text"]
+    riya_email = next(e for e in body["entities"] if e["source"] == "riya@example.test")
+    assert riya_email["alias"] == f"{riya['alias'].lower()}@example.test"
+    assert riya_email["alias"] in body["documents"][0]["candidate_text"]
+    assert riya_email["alias"] in body["documents"][1]["candidate_text"]
+    assert "[EMAIL_" not in body["documents"][0]["candidate_text"]
+    assert body["verification"]["source_value_residuals"] == 0
     assert body["relationships"] == [{"source_id": riya["id"], "target_id": sita["id"],
                                       "type": "EMAILED", "document_id": "email",
                                       "basis": "explicit From/To or Cc header"}]
@@ -94,6 +101,9 @@ def test_one_alias_edit_does_not_change_another_persons_alias(demo_client):
     second = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
     assert second.status_code == 200, second.text
     assert next(e for e in second.json()["entities"] if e["source"] == "Sita")["alias"] == sita["alias"]
+    assert next(e for e in second.json()["entities"] if e["source"] == "riya@example.test")["alias"] == "nina@example.test"
+    assert next(e for e in second.json()["entities"] if e["source"] == "sita@example.test")["alias"] == \
+        next(e for e in first["entities"] if e["source"] == "sita@example.test")["alias"]
 
 
 def test_reviewer_can_exclude_a_noncritical_false_positive_without_hiding_the_decision(demo_client):
@@ -109,9 +119,53 @@ def test_reviewer_can_exclude_a_noncritical_false_positive_without_hiding_the_de
     assert body["summary"]["detected_mentions"] == body["summary"]["transformed_mentions"] + riya["mentions"]
     assert all(not match["applied"] for doc in body["documents"] for match in doc["matches"] if match["entity_id"] == riya["id"])
     assert "Riya" in body["documents"][0]["candidate_text"]
+    assert body["verification"]["source_value_residuals"] > 0
+    assert next(check for check in body["verification"]["checks"] if check["name"] == "Source-value persistence")["status"] == "REVIEW"
     assert next(check for check in body["verification"]["checks"] if check["name"] == "Reviewer exclusions")["status"] == "REVIEW"
     assert next(check for check in body["verification"]["checks"] if check["name"] == "Residual known-rule scan")["status"] == "REVIEW"
     assert body["release_authorized"] is False and body["export_available"] is False
+
+
+def test_email_surrogates_preserve_batch_domain_equivalence_without_live_domains(demo_client):
+    request = {"synthetic_only": True, "files": [
+        file("mail", "thread.txt", "From: Riya <riya@airline.com>\nTo: Sita <sita@client.org>\n\nHi Sita."),
+        file("rows", "contacts.csv", "full_name,email\nRiya,riya@airline.com\nSita,sita@client.org\n"),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    entities = {entity["source"]: entity for entity in body["entities"]}
+    riya_alias = entities["riya@airline.com"]["alias"]
+    sita_alias = entities["sita@client.org"]["alias"]
+    assert riya_alias == f"{entities['Riya']['alias'].lower()}@org1.test"
+    assert sita_alias == f"{entities['Sita']['alias'].lower()}@org2.test"
+    assert riya_alias in body["documents"][0]["candidate_text"] and riya_alias in body["documents"][1]["candidate_text"]
+    assert "airline.com" not in body["documents"][0]["candidate_text"]
+    assert "client.org" not in body["documents"][1]["candidate_text"]
+    assert body["verification"]["source_value_residuals"] == 0
+
+
+def test_email_without_explicit_owner_uses_generic_surrogate(demo_client):
+    request = {"synthetic_only": True, "files": [
+        file("mail", "thread.txt", "Contact help@airline.com about the case."),
+        file("rows", "contacts.json", '{"emailAddress":"help@airline.com","note":"Call the desk"}'),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    alias = next(entity["alias"] for entity in body["entities"] if entity["source"] == "help@airline.com")
+    assert alias == "contact1@org1.test"
+    assert all(alias in doc["candidate_text"] for doc in body["documents"])
+
+
+def test_conflicting_email_owner_evidence_is_rejected(demo_client):
+    request = {"synthetic_only": True, "files": [
+        file("mail", "thread.txt", "From: Riya <shared@example.test>\nTo: Sita <sita@example.test>"),
+        file("rows", "contacts.csv", "full_name,email\nGita,shared@example.test\n"),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 422
+    assert "shared@example.test" not in response.text
 
 
 def test_reviewer_exclusion_rejects_unknown_critical_or_conflicting_entities(demo_client):
@@ -221,6 +275,8 @@ def test_batch_pdf_is_rasterized_into_new_image_only_candidate_preview(demo_clie
     assert document["kind"] == "pdf"
     assert document["preview_fidelity"] == "raster_ocr_review"
     assert "Riya" not in document["candidate_text"]
+    assert "gita@example.test" in document["candidate_text"]
+    assert "[EMAIL_" not in document["candidate_text"]
     media = document["media_preview"]
     assert len(media["pages"]) == 1
     assert media["pages"][0]["source_png_base64"] != media["pages"][0]["candidate_png_base64"]
@@ -229,6 +285,29 @@ def test_batch_pdf_is_rasterized_into_new_image_only_candidate_preview(demo_clie
     assert media["pdf_raster_evidence"]["source_objects_copied"] is False
     assert media["self_ocr_residual_sources"] == 0
     assert response.json()["export_available"] is False
+
+
+def test_curated_mixed_media_demo_fixture_is_reviewable_as_one_batch(demo_client):
+    root = Path(__file__).resolve().parents[3]
+    media = root / "apps" / "web" / "public" / "demo-media"
+    request = {"synthetic_only": True, "files": [
+        file("mail", "01-email-thread.pdf", (media / "01-email-thread.pdf").read_bytes()),
+        file("note", "02-service-note.png", (media / "02-service-note.png").read_bytes()),
+        file("record", "03-support-record.json",
+             '{"client_name":"Sita","account_owner":"Riya","note":"Riya emailed Sita about DEMO-4822."}'),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["summary"]["files"] == 3
+    assert {doc["kind"] for doc in body["documents"]} == {"pdf", "image", "json"}
+    assert all(doc["media_preview"]["pages"] for doc in body["documents"][:2])
+    assert body["summary"]["explicit_relationships"] == 2
+    assert "Riya" not in body["documents"][0]["candidate_text"]
+    assert "gita@example.test" in body["documents"][0]["candidate_text"]
+    assert "Sita" not in body["documents"][1]["candidate_text"]
+    assert body["verification"]["status"] == "REVIEW_REQUIRED"
+    assert body["export_available"] is False
 
 
 def test_image_ocr_preview_reencodes_pixels_without_source_metadata(demo_client):

@@ -133,11 +133,13 @@ export type BatchInspection = { posture: 'SYNTHETIC_DEMO_ONLY'; releaseAuthorize
   documents: BatchDocument[]; entities: BatchEntity[]; relationships: BatchRelationship[];
   summary: { files: number; detectedMentions: number; transformedMentions: number; suppressedMentions: number;
     linkedEntities: number; explicitRelationships: number };
-  verification: { status: 'REVIEW_REQUIRED'; knownRuleResidualMatches: number; structureFailures: number;
+  verification: { status: 'REVIEW_REQUIRED'; knownRuleResidualMatches: number; sourceValueResiduals: number; structureFailures: number;
     annotationScore: BatchAnnotationScore | null; checks: BatchCheck[] };
   limitations: string[] }
 
 const BATCH_EXTENSIONS = new Set(['txt', 'csv', 'json', 'jsonl', 'pdf', 'png', 'jpg', 'jpeg'])
+export const BATCH_MAX_MEDIA_BYTES = 500_000
+export const BATCH_MAX_TOTAL_BYTES = 1_500_000
 const BATCH_KIND = new Set(['text', 'csv', 'json', 'jsonl', 'pdf', 'image'])
 const BATCH_KIND_BY_EXTENSION: Record<string, BatchDocument['kind']> = {
   txt: 'text', csv: 'csv', json: 'json', jsonl: 'jsonl', pdf: 'pdf', png: 'image', jpg: 'image', jpeg: 'image',
@@ -164,7 +166,8 @@ export async function readBatchFile(file: File, id: string): Promise<BatchUpload
   const extension = file.name.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1]
   if (!extension || !BATCH_EXTENSIONS.has(extension)) throw new DemoInspectionFailure('Choose TXT, CSV, JSON, JSONL, PDF, PNG, or JPEG for this synthetic demo.')
   if (!/^[A-Za-z0-9_-]{1,48}$/.test(id) || !file.name || file.name.length > 160 || /[/\\]/.test(file.name)) throw new DemoInspectionFailure('Invalid demo filename.')
-  if (file.size < 1 || file.size > DEMO_MAX_BYTES) throw new DemoInspectionFailure('Each synthetic file must be between 1 byte and 100 KB.')
+  const maximum = ['pdf', 'png', 'jpg', 'jpeg'].includes(extension) ? BATCH_MAX_MEDIA_BYTES : DEMO_MAX_BYTES
+  if (file.size < 1 || file.size > maximum) throw new DemoInspectionFailure(`Each synthetic ${maximum === BATCH_MAX_MEDIA_BYTES ? 'PDF/image' : 'text'} file must be between 1 byte and ${maximum === BATCH_MAX_MEDIA_BYTES ? '500' : '100'} KB.`)
   const bytes = new Uint8Array(await file.arrayBuffer())
   let binary = ''
   for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192))
@@ -210,6 +213,8 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
       !Array.isArray(value.relationships) || !object(value.summary) || !object(value.verification) || !Array.isArray(value.limitations)) batchInvalid()
   const entities: BatchEntity[] = value.entities.map(raw => {
     if (!object(raw) || typeof raw.id !== 'string' || !/^E\d{1,4}$/.test(raw.id) || !safeText(raw.kind, 64) || !safeText(raw.source, 120) || !safeText(raw.alias, 120) || !safeCount(raw.mentions) || typeof raw.excluded !== 'boolean') batchInvalid()
+    if (raw.kind === 'EMAIL' && (!/^[a-z0-9][a-z0-9._+-]*@[a-z0-9-]+(?:\.[a-z0-9-]+)*\.test$/.test(raw.alias as string) ||
+        (raw.alias as string).toLowerCase() === (raw.source as string).toLowerCase())) batchInvalid()
     return { id: raw.id, kind: raw.kind, source: raw.source, alias: raw.alias, mentions: raw.mentions as number, excluded: raw.excluded }
   })
   const entityIds = new Set(entities.map(item => item.id))
@@ -309,7 +314,8 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
       summary.linked_entities !== entities.filter(item => item.mentions > 0).length ||
       entities.some(entity => entity.mentions !== documents.reduce((total, doc) => total + doc.matches.filter(match => match.entityId === entity.id).length, 0))) batchInvalid()
   const verification = value.verification
-  if (verification.status !== 'REVIEW_REQUIRED' || !safeCount(verification.known_rule_residual_matches) || !safeCount(verification.structure_failures) ||
+  if (verification.status !== 'REVIEW_REQUIRED' || !safeCount(verification.known_rule_residual_matches) ||
+      !safeCount(verification.source_value_residuals) || !safeCount(verification.structure_failures) ||
       !Array.isArray(verification.checks) || verification.checks.length < 3 || verification.checks.length > 10) batchInvalid()
   const rawScore = verification.annotation_score
   if (reference === null && rawScore != null) batchInvalid()
@@ -391,6 +397,7 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
       transformedMentions: summary.transformed_mentions as number, suppressedMentions: summary.suppressed_mentions as number,
       linkedEntities: summary.linked_entities as number, explicitRelationships: summary.explicit_relationships as number },
     verification: { status: 'REVIEW_REQUIRED', knownRuleResidualMatches: verification.known_rule_residual_matches as number,
+      sourceValueResiduals: verification.source_value_residuals as number,
       structureFailures: verification.structure_failures as number, annotationScore, checks }, limitations: value.limitations as string[] }
 }
 
@@ -399,7 +406,8 @@ export async function inspectSyntheticBatch(request: { apiBase: string; token: s
   aliasOverrides: Record<string, string>; reviewExclusions?: Record<string, 'FALSE_POSITIVE_CONFIRMED'>;
   referenceManifest?: BatchReferenceManifest | null; signal?: AbortSignal }): Promise<BatchInspection> {
   if (!request.token.trim() || request.files.length < 2 || request.files.length > 3 ||
-      request.files.some(file => file.size < 1 || file.size > DEMO_MAX_BYTES) || request.files.reduce((sum, file) => sum + file.size, 0) > 300_000) {
+      request.files.some(file => file.size < 1 || file.size > (/\.(pdf|png|jpe?g)$/i.test(file.name) ? BATCH_MAX_MEDIA_BYTES : DEMO_MAX_BYTES)) ||
+      request.files.reduce((sum, file) => sum + file.size, 0) > BATCH_MAX_TOTAL_BYTES) {
     throw new DemoInspectionFailure('A processor token and two or three bounded synthetic files are required.')
   }
   if (request.reviewExclusions && (Object.keys(request.reviewExclusions).length > 100 ||

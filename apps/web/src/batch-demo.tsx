@@ -3,7 +3,8 @@ import { ArrowDown, ArrowLeft, ArrowRight, Check, ChevronRight, CircleAlert, Fil
   Files, Fingerprint, FlaskConical, ImageIcon, Link2, LockKeyhole, Plus, RefreshCw, Search, ShieldCheck,
   Sparkles, UploadCloud, X } from 'lucide-react'
 import { inspectSyntheticBatch, readBatchFile, readBatchReferenceManifest, type BatchDocument, type BatchInspection,
-  type BatchManualFinding, type BatchReferenceManifest, type BatchReferenceSpan, type BatchUpload, DemoInspectionFailure } from './api'
+  type BatchManualFinding, type BatchReferenceManifest, type BatchReferenceSpan, type BatchUpload,
+  BATCH_MAX_TOTAL_BYTES, DemoInspectionFailure } from './api'
 import './batch.css'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
@@ -108,6 +109,7 @@ export default function BatchDemo() {
   const [inspection, setInspection] = useState<BatchInspection | null>(null)
   const [referenceManifest, setReferenceManifest] = useState<BatchReferenceManifest | null>(null)
   const [referenceAttested, setReferenceAttested] = useState(false)
+  const [sampleMode, setSampleMode] = useState<'text' | 'media' | null>(null)
   const [manualNames, setManualNames] = useState<string[]>([])
   const [manualInput, setManualInput] = useState('')
   const [manualFindings, setManualFindings] = useState<BatchManualFinding[]>([])
@@ -123,7 +125,7 @@ export default function BatchDemo() {
 
   useEffect(() => () => { request.current?.abort(); intakeEpoch.current += 1 }, [])
 
-  function resetReview() { setInspection(null); setReferenceManifest(null); setReferenceAttested(false); setManualNames([]); setManualFindings([]); setAliasOverrides({}); setExcludedIds([]); setExclusionAcknowledged(false); setStep('upload'); setError('') }
+  function resetReview() { setInspection(null); setReferenceManifest(null); setReferenceAttested(false); setSampleMode(null); setManualNames([]); setManualFindings([]); setAliasOverrides({}); setExcludedIds([]); setExclusionAcknowledged(false); setStep('upload'); setError('') }
 
   async function addFiles(selected: File[], replace = false) {
     if (!selected.length) return false
@@ -136,11 +138,12 @@ export default function BatchDemo() {
       const added = await Promise.all(selected.map(file => readBatchFile(file, `file_${++sequence.current}`)))
       if (epoch !== intakeEpoch.current) return false
       if (new Set([...existing, ...added].map(item => item.name.toLowerCase())).size !== existing.length + added.length) throw new DemoInspectionFailure('Each file in the batch needs a distinct filename.')
-      if ([...existing, ...added].reduce((sum, item) => sum + item.size, 0) > 300_000) throw new DemoInspectionFailure('The entire synthetic batch must be 300 KB or less.')
+      if ([...existing, ...added].reduce((sum, item) => sum + item.size, 0) > BATCH_MAX_TOTAL_BYTES) throw new DemoInspectionFailure('The entire synthetic batch must be 1.5 MB or less.')
       setFiles(current => [...(replace ? [] : current), ...added])
       setInspection(null)
       setReferenceManifest(null)
       setReferenceAttested(false)
+      setSampleMode(null)
       setManualNames([])
       setManualFindings([])
       setAliasOverrides({})
@@ -155,7 +158,28 @@ export default function BatchDemo() {
     ++intakeEpoch.current
     setFiles([])
     resetReview()
-    if (await addFiles(SAMPLES, true)) setReferenceManifest(SAMPLE_REFERENCE)
+    if (await addFiles(SAMPLES, true)) { setReferenceManifest(SAMPLE_REFERENCE); setSampleMode('text') }
+  }
+
+  async function loadMediaSample() {
+    const epoch = ++intakeEpoch.current
+    setReading(true)
+    setError('')
+    try {
+      const specs = [
+        { name: '01-email-thread.pdf', type: 'application/pdf' },
+        { name: '02-service-note.png', type: 'image/png' },
+      ]
+      const media = await Promise.all(specs.map(async spec => {
+        const response = await fetch(`${import.meta.env.BASE_URL}demo-media/${spec.name}`, { cache: 'no-store' })
+        if (!response.ok) throw new Error('The fictional media sample could not be loaded.')
+        return new File([await response.arrayBuffer()], spec.name, { type: spec.type })
+      }))
+      if (epoch !== intakeEpoch.current) return
+      if (await addFiles([...media, new File([SAMPLE_DOCUMENTS[2].text], SAMPLE_DOCUMENTS[2].name,
+        { type: SAMPLE_DOCUMENTS[2].type })], true)) setSampleMode('media')
+    } catch { if (epoch === intakeEpoch.current) setError('The fictional media sample could not be loaded. Try again or choose your own synthetic files.') }
+    finally { if (epoch === intakeEpoch.current) setReading(false) }
   }
 
   async function loadReference(file: File) {
@@ -266,11 +290,11 @@ export default function BatchDemo() {
         {step === 'upload' && <>
           <div className="page-heading"><div><p className="overline">01 / INTAKE</p><h1>Start with your dataset.</h1><p>Bring two or three synthetic documents together. We’ll trace sensitive mentions across files, then give you a reviewable candidate—not an anonymity claim.</p></div><div className="heading-icon"><UploadCloud size={29} /></div></div>
           <div className="flow-strip"><div className="current"><span>1</span><strong>Upload</strong><small>Choose a batch</small></div><div className="flow-line" /><div><span>2</span><strong>Detect</strong><small>Review matches</small></div><div className="flow-line" /><div><span>3</span><strong>Verify</strong><small>Compare & assess</small></div></div>
-          <section className="batch-card intake-card" aria-labelledby="intake-heading"><div className="card-header"><div><p className="overline">BATCH INPUT</p><h2 id="intake-heading">Your documents <span className="count-pill">{files.length}/3</span></h2></div><span className="quiet-tag">Up to 300 KB total</span></div>
+          <section className="batch-card intake-card" aria-labelledby="intake-heading"><div className="card-header"><div><p className="overline">BATCH INPUT</p><h2 id="intake-heading">Your documents <span className="count-pill">{files.length}/3</span></h2></div><span className="quiet-tag">Up to 1.5 MB total</span></div>
             <div className={`drop-zone ${dragging ? 'dragging' : ''}`} onDragEnter={event => { event.preventDefault(); setDragging(true) }} onDragOver={event => event.preventDefault()} onDragLeave={event => { event.preventDefault(); setDragging(false) }} onDrop={event => { event.preventDefault(); setDragging(false); void addFiles(Array.from(event.dataTransfer.files)) }}>
-              <div className="drop-icon"><UploadCloud size={25} /></div><strong>Drop your synthetic files here</strong><span>or select documents from your computer</span><label className="file-button">Browse files<input type="file" multiple accept=".txt,.csv,.json,.jsonl,.pdf,.png,.jpg,.jpeg" onChange={event => { void addFiles(Array.from(event.target.files || [])); event.target.value = '' }} /></label><small>TXT, CSV, JSON, JSONL, PDF, PNG, JPEG · 100 KB each · two PDF pages · 3 million media pixels per batch</small>
+              <div className="drop-icon"><UploadCloud size={25} /></div><strong>Drop your synthetic files here</strong><span>or select documents from your computer</span><label className="file-button">Browse files<input type="file" multiple accept=".txt,.csv,.json,.jsonl,.pdf,.png,.jpg,.jpeg" onChange={event => { void addFiles(Array.from(event.target.files || [])); event.target.value = '' }} /></label><small>Text up to 100 KB · PDF/image up to 500 KB · two PDF pages · 3 million media pixels per batch</small>
             </div>
-            <div className="sample-bar"><div><Sparkles size={18} /><span>Want to see the workflow first? Load a fictional three-file case.</span></div><button type="button" className="text-button" onClick={() => void loadSample()} disabled={busy || reading}>Use sample batch <ArrowRight size={16} /></button></div>
+            <div className="sample-bar"><div><Sparkles size={18} /><span>Explore a fictional three-file case, or try PDF and image redaction.</span></div><div className="sample-actions"><button type="button" className="text-button" onClick={() => void loadSample()} disabled={busy || reading}>Use sample batch <ArrowRight size={16} /></button><button type="button" className="text-button" onClick={() => void loadMediaSample()} disabled={busy || reading}>Use PDF + image sample <ArrowRight size={16} /></button></div></div>
             {files.length > 0 && <div className="staged-files" aria-label="Staged documents">{files.map((file, index) => <div className="staged-file" key={file.id}><span className="file-type-icon">{fileIcon(file.name)}</span><div><strong>{file.name}</strong><span>{Math.max(1, Math.ceil(file.size / 1024))} KB · Document {index + 1}</span></div><span className="ready-pill"><Check size={13} /> Ready</span><button type="button" className="icon-button" aria-label={`Remove ${file.name}`} onClick={() => { ++intakeEpoch.current; setFiles(current => current.filter(item => item.id !== file.id)); resetReview() }}><X size={17} /></button></div>)}</div>}
           </section>
           <section className="batch-card access-card" aria-labelledby="access-heading"><div><p className="overline">DEMO ACCESS</p><h2 id="access-heading">Before you continue</h2><p>This local development service receives submitted content in memory for inspection. It cannot verify that a file is synthetic.</p></div><div className="access-form"><label htmlFor="processor-token">Processor access token</label><input id="processor-token" type="password" autoComplete="off" spellCheck={false} value={token} onChange={event => setToken(event.target.value)} placeholder="Paste the token from the demo launcher" /><label className="check-label"><input type="checkbox" checked={acknowledged} onChange={event => setAcknowledged(event.target.checked)} /><span>I confirm all files are fictional demo data. I understand the detector may miss sensitive content.</span></label></div></section>
@@ -279,6 +303,7 @@ export default function BatchDemo() {
 
         {step === 'detect' && inspection && <>
           <div className="page-heading"><div><p className="overline">02 / DETECTION REVIEW</p><h1>Know what was found.</h1><p>Inspect the rule matches and consistent aliases across the batch. Add a missed name before opening the candidate comparison.</p></div><div className="heading-icon"><Search size={29} /></div></div>
+          {sampleMode === 'media' && <div className="media-guidance"><CircleAlert size={18} /><span>Guided media case: the fictional booking code <code>DEMO-4822</code> is deliberately left for review. Add it as <strong>Other sensitive</strong>, rescan, then compare both raster pages. No independent media accuracy score is available.</span></div>}
           <div className="metrics-grid"><div className="metric-card"><span>Documents inspected</span><strong>{inspection.summary.files}</strong><small>One connected batch</small></div><div className="metric-card"><span>Selected mentions</span><strong>{inspection.summary.detectedMentions}</strong><small>Rules + reviewer corrections</small></div><div className="metric-card"><span>Unique signals</span><strong>{visibleEntities.length}</strong><small>Across all documents</small></div><div className="metric-card"><span>Explicit links</span><strong>{inspection.summary.explicitRelationships}</strong><small>Headers & record fields</small></div></div>
           <div className="review-grid"><section className="batch-card entity-review"><div className="card-header"><div><p className="overline">ENTITY REGISTER</p><h2>Detected identities & signals</h2></div><span className="quiet-tag">{visibleEntities.length} entities</span></div><div className="table-scroll"><table><thead><tr><th>Source value</th><th>Type</th><th>Mentions</th><th>Proposed replacement</th><th>Review decision</th></tr></thead><tbody>{visibleEntities.map(entity => { const excluded = excludedIds.includes(entity.id); const suppressible = SUPPRESSIBLE_KINDS.has(entity.kind); return <tr key={entity.id} className={excluded ? 'entity-excluded' : ''}><td className="source-cell">{entity.source}</td><td><span className="type-pill">{shortType(entity.kind)}</span></td><td>{entity.mentions}</td><td>{entity.kind === 'PERSON_NAME' ? <input className="alias-input" aria-label={`Replacement for ${entity.source}`} value={aliasOverrides[entity.id] ?? entity.alias} maxLength={entity.source.length} disabled={excluded} onChange={event => setAliasOverrides(current => ({ ...current, [entity.id]: event.target.value }))} /> : <code>{entity.alias}</code>}</td><td><button type="button" className={`decision-button ${excluded ? 'excluded' : ''}`} disabled={!suppressible || busy} title={suppressible ? 'Review this signal across every file' : 'Critical or unsupported categories cannot be excluded in this demo'} aria-label={`${excluded ? 'Restore' : 'Exclude'} ${entity.source}`} onClick={() => toggleExclusion(entity.id)}>{excluded ? 'Restore' : 'Exclude'}</button></td></tr> })}</tbody></table></div>{visibleEntities.length === 0 && <p className="empty-note">No rule matches were found. That does not establish that the files contain no sensitive information.</p>}<div className="card-footnote"><CircleAlert size={16} /> Excluding a signal keeps every matched source value in the candidate. Critical and unsupported categories cannot be excluded. Names in arbitrary prose may still be missed.</div></section>
             <aside className="batch-card review-side"><p className="overline">HUMAN-IN-THE-LOOP</p><h2>Found a miss?</h2><p>Add an exact person name or sensitive value. We’ll rescan all documents; manual corrections are tracked separately from automatic detector quality.</p><div className="inline-form"><label htmlFor="manual-name">Person name</label><input id="manual-name" value={manualInput} onChange={event => setManualInput(event.target.value)} placeholder="e.g. Tara" onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); void addManualName() } }} /><button type="button" className="secondary-button" onClick={() => void addManualName()} disabled={busy || !manualInput.trim()}><Plus size={16} /> Add name & rescan</button></div>{manualNames.length > 0 && <div className="manual-list">Names added: {manualNames.join(', ')}</div>}
@@ -297,7 +322,7 @@ export default function BatchDemo() {
         {step === 'results' && inspection && <>
           <div className="page-heading"><div><p className="overline">03 / RESULTS & VERIFICATION</p><h1>Review the proposed output.</h1><p>Trace every replacement, inspect explicit relationships, and understand what this run did—and did not—prove.</p></div><div className="heading-icon"><ShieldCheck size={29} /></div></div>
           <div className="result-alert"><CircleAlert size={21} /><div><strong>Review required · not anonymous or export-ready</strong><span>This is a synthetic review preview. OCR coverage, residual visual content, privacy risk, layout fidelity, and release eligibility are not certified.</span></div></div>
-          <div className="metrics-grid"><div className="metric-card"><span>Files processed</span><strong>{inspection.summary.files}</strong><small>In this batch</small></div><div className="metric-card"><span>Mentions transformed</span><strong>{inspection.summary.transformedMentions}</strong><small>Selected spans only</small></div><div className="metric-card"><span>Unique signals</span><strong>{visibleEntities.length}</strong><small>Tracked across files</small></div><div className="metric-card"><span>Residual rule matches</span><strong>{inspection.verification.knownRuleResidualMatches}</strong><small>Requires human review</small></div></div>
+          <div className="metrics-grid"><div className="metric-card"><span>Files processed</span><strong>{inspection.summary.files}</strong><small>In this batch</small></div><div className="metric-card"><span>Mentions transformed</span><strong>{inspection.summary.transformedMentions}</strong><small>Selected spans only</small></div><div className="metric-card"><span>Unique signals</span><strong>{visibleEntities.length}</strong><small>Tracked across files</small></div><div className="metric-card"><span>Source values retained</span><strong>{inspection.verification.sourceValueResiduals}</strong><small>Detected exact values only</small></div></div>
           {inspection.summary.suppressedMentions > 0 && <div className="result-alert exclusion-result"><CircleAlert size={19} /><div><strong>{inspection.summary.suppressedMentions} detected {inspection.summary.suppressedMentions === 1 ? 'mention was' : 'mentions were'} retained after reviewer exclusion</strong><span>Those original values remain in the proposed text. This preview cannot be exported or treated as anonymized.</span></div></div>}
           <div className="result-tabs" role="tablist" aria-label="Batch result views">{([['documents', 'Documents', Files], ['relationships', 'Entities & relationships', Link2], ['verification', 'Verification scorecard', ShieldCheck]] as const).map(([key, label, Icon]) => <button key={key} type="button" role="tab" aria-selected={resultTab === key} className={resultTab === key ? 'selected' : ''} onClick={() => setResultTab(key)}><Icon size={17} /> {label}</button>)}</div>
           {resultTab === 'documents' && selected && <section className="batch-card result-panel">
@@ -316,7 +341,7 @@ export default function BatchDemo() {
               <div className="table-scroll"><table><thead><tr><th>Reference category</th><th>Matched</th><th>False positives</th><th>Missed</th></tr></thead><tbody>{Object.entries(score.perType).sort(([a], [b]) => a.localeCompare(b)).map(([kind, counts]) => <tr key={kind}><td>{shortType(kind)}</td><td>{counts.truePositives}</td><td>{counts.falsePositives}</td><td>{counts.falseNegatives}</td></tr>)}{Object.keys(score.perType).length === 0 && <tr><td colSpan={4}>No labelled or predicted spans. Precision and recall are undefined.</td></tr>}</tbody></table></div>
               <FileScorecard score={score} documents={inspection.documents} onInspect={id => { setSelectedDoc(id); setResultTab('documents') }} onCorrect={finding => { void addManualFinding(finding) }} />
               <p className="annotation-caveat">Counts include manual corrections made before this review. They depend on the supplied labels being complete and are not an independent holdout test, a residual-disclosure test, or release approval.</p>
-            </div> })() : <div className="unmeasured-panel"><strong>Precision and recall not measured</strong><span>No complete reference-label set was attached. Return to Detection review to add one; zero residual rule matches cannot substitute for labelled ground truth.</span></div>}
+            </div> })() : <div className="unmeasured-panel"><strong>Precision and recall not measured</strong><span>No complete reference-label set was attached. Return to Detection review to add one; zero retained detected values cannot substitute for labelled ground truth.</span></div>}
             <div className="scorecard-list">{inspection.verification.checks.map((check, index) => <div key={`${check.name}-${index}`}><span className={`check-status status-${check.status.toLowerCase()}`}>{check.status === 'PASS' ? <Check size={15} /> : <CircleAlert size={15} />}{check.status.replaceAll('_', ' ')}</span><div><strong>{check.name}</strong><p>{check.detail}</p></div></div>)}</div><div className="limitations-panel"><h3>What remains unproven</h3><ul>{inspection.limitations.map((item, index) => <li key={index}>{item}</li>)}</ul></div></section>}
           <div className="page-actions"><button type="button" className="back-button" onClick={() => { setStep('detect'); setResultTab('documents') }}><ArrowLeft size={17} /> Back to detection</button><span className="no-export"><LockKeyhole size={16} /> Export disabled for this development preview</span></div>
         </>}
