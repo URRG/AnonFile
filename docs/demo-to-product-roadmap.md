@@ -15,7 +15,7 @@ exit gate; a rendered-browser walkthrough is desirable when a browser is
 available.
 
 The newer batch workbench extends this to two or three synthetic files,
-including selectable-text PDFs as extracted text only. It shows consistent
+including bounded raster OCR for PDFs and PNG/JPEG images. It shows consistent
 aliases, explicit mail-header and same-record role relationships, and a non-exportable side-by-side
 candidate. A complete synthetic reference-label manifest can now produce
 exact-span agreement counts; the built-in example has fixed labels. The
@@ -30,6 +30,13 @@ quality claim. A reviewer can mark a supported noncritical signal as a false
 positive for this synthetic batch; the retained source remains visibly
 review-required and cannot be exported. That narrow correction path does not
 replace a production annotation workflow or two-person review.
+
+PDF and image candidates now have visual source/candidate page comparisons.
+The candidate PDF is rebuilt from new raster pages in memory, without copying
+source PDF objects. This demonstrates actual pixel rewriting, but not safe
+redaction: content missed by OCR can remain visible, the same OCR recheck is
+not independent, and untrusted media parsing is not isolated in a hardened
+production worker. No candidate download or release path is enabled.
 
 ## Gaps after the synthetic demo
 

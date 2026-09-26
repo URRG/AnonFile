@@ -1,0 +1,6 @@
+# Synthetic demo raster/OCR preview only. Not a production parser sandbox.
+Pillow>=12.0,<13.0
+pypdfium2==5.13.0
+rapidocr==3.9.2
+onnxruntime==1.30.0
+reportlab>=4.0,<5.0

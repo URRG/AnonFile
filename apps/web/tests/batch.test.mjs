@@ -22,11 +22,13 @@ const valid = () => ({ posture: 'SYNTHETIC_DEMO_ONLY', release_authorized: false
     checks: [{ name: 'Application', status: 'PASS', detail: 'One match applied.' }, { name: 'Residual', status: 'REVIEW', detail: 'Review.' },
       { name: 'Benchmark', status: 'NOT_MEASURED', detail: 'No ground truth.' }] }, limitations: ['Synthetic only.'] })
 
-test('batch upload rejects image and oversized files before reading', async () => {
-  await assert.rejects(readBatchFile({ name: 'image.png', size: 50, arrayBuffer: () => { throw new Error('must not read') } }, 'f1'), /OCR/)
+test('batch upload accepts bounded raster media and rejects unsupported types before reading', async () => {
+  await assert.rejects(readBatchFile({ name: 'image.gif', size: 50, arrayBuffer: () => { throw new Error('must not read') } }, 'f1'), /Choose/)
   await assert.rejects(readBatchFile({ name: 'a.txt', size: 100_001, arrayBuffer: () => { throw new Error('must not read') } }, 'f1'), /100 KB/)
   const accepted = await readBatchFile({ name: 'a.pdf', size: 4, arrayBuffer: async () => Uint8Array.from([37, 80, 68, 70]).buffer }, 'f1')
   assert.equal(accepted.contentBase64, 'JVBERg==')
+  const image = await readBatchFile({ name: 'photo.png', size: 4, arrayBuffer: async () => Uint8Array.from([1, 2, 3, 4]).buffer }, 'f2')
+  assert.equal(image.contentBase64, 'AQIDBA==')
 })
 
 test('batch client sends one synthetic-only request and validates candidate', async t => {
@@ -48,6 +50,33 @@ test('batch client sends bounded reviewer corrections and rejects invalid values
   await assert.rejects(inspectSyntheticBatch({ ...request, manualFindings: [{ value: 'a\nb', kind: 'OTHER_SENSITIVE' }] }), /Invalid manually reviewed/)
   await assert.rejects(inspectSyntheticBatch({ ...request, manualFindings: [{ value: 'DEMO-4821', kind: 'EMAIL' }] }), /Invalid manually reviewed/)
   assert.equal(mock.mock.calls.length, 1)
+})
+
+test('batch client binds raster image previews to staged media and PNG dimensions', async t => {
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAI0lEQVR4nGP8//8/AymAiSTVDKMaiANMRKqDg1ENxACSQwkAVW0DHeN02ZEAAAAASUVORK5CYII='
+  const response = valid()
+  response.documents[1].name = 'b.png'
+  response.documents[1].kind = 'image'
+  response.documents[1].preview_fidelity = 'raster_ocr_review'
+  response.documents[1].media_preview = { pages: [{ number: 1, width: 16, height: 16,
+    source_png_base64: png, candidate_png_base64: png, ocr_lines: 1 }], fallback_lines: 0,
+    self_ocr_residual_sources: 0, pdf_raster_evidence: null }
+  const mediaRequest = { ...request, files: [files[0], { ...files[1], name: 'b.png' }] }
+  t.mock.method(globalThis, 'fetch', async () => Response.json(response))
+  const result = await inspectSyntheticBatch(mediaRequest)
+  assert.equal(result.documents[1].mediaPreview.pages[0].width, 16)
+  t.mock.restoreAll()
+  for (const change of [
+    value => { value.documents[1].media_preview.pages[0].width = 17 },
+    value => { value.documents[1].media_preview.pages[0].candidate_png_base64 = 'not-a-png' },
+    value => { value.documents[1].media_preview.pdf_raster_evidence = { sha256: '0'.repeat(64), bytes: 500, pages: 1, source_objects_copied: false } },
+    value => { value.documents[1].kind = 'pdf' },
+  ]) {
+    const tampered = structuredClone(response); change(tampered)
+    t.mock.method(globalThis, 'fetch', async () => Response.json(tampered))
+    await assert.rejects(inspectSyntheticBatch(mediaRequest), /invalid review result/)
+    t.mock.restoreAll()
+  }
 })
 
 test('Python code-point spans render correctly after an astral Unicode character', async t => {

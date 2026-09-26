@@ -110,9 +110,13 @@ export type BatchUpload = { id: string; name: string; contentBase64: string; siz
 export type BatchManualFinding = { value: string; kind: 'OTHER_SENSITIVE' | 'BUSINESS_CONFIDENTIAL' | 'QUASI_IDENTIFIER' | 'GOVERNMENT_ID' | 'DATE_OF_BIRTH' }
 export type BatchMatch = { start: number; end: number; source: string; entityId: string; kind: string; replacement: string; applied: boolean;
   origin: 'AUTOMATIC' | 'MANUAL' }
-export type BatchDocument = { id: string; name: string; kind: 'text' | 'csv' | 'json' | 'jsonl' | 'pdf';
-  text: string; candidateText: string; sizeBytes: number; previewFidelity: 'source_text' | 'extracted_text_only';
-  structureCheck: 'pass' | 'fail' | 'not_applicable'; matches: BatchMatch[] }
+export type BatchMediaPage = { number: number; width: number; height: number; sourcePngBase64: string;
+  candidatePngBase64: string; ocrLines: number }
+export type BatchMediaPreview = { pages: BatchMediaPage[]; fallbackLines: number; selfOcrResidualSources: number;
+  pdfRasterEvidence: { sha256: string; bytes: number; pages: number; sourceObjectsCopied: false } | null }
+export type BatchDocument = { id: string; name: string; kind: 'text' | 'csv' | 'json' | 'jsonl' | 'pdf' | 'image';
+  text: string; candidateText: string; sizeBytes: number; previewFidelity: 'source_text' | 'raster_ocr_review';
+  structureCheck: 'pass' | 'fail' | 'not_applicable'; matches: BatchMatch[]; mediaPreview: BatchMediaPreview | null }
 export type BatchEntity = { id: string; kind: string; source: string; alias: string; mentions: number; excluded: boolean }
 export type BatchRelationship = { sourceId: string; targetId: string; type: 'EMAILED' | 'ACCOUNT_OWNER_OF'; documentId: string; basis: string }
 export type BatchCheck = { name: string; status: 'PASS' | 'FAIL' | 'REVIEW' | 'NOT_TESTED' | 'NOT_APPLICABLE' | 'NOT_MEASURED'; detail: string }
@@ -133,8 +137,11 @@ export type BatchInspection = { posture: 'SYNTHETIC_DEMO_ONLY'; releaseAuthorize
     annotationScore: BatchAnnotationScore | null; checks: BatchCheck[] };
   limitations: string[] }
 
-const BATCH_EXTENSIONS = new Set(['txt', 'csv', 'json', 'jsonl', 'pdf'])
-const BATCH_KIND = new Set(['text', 'csv', 'json', 'jsonl', 'pdf'])
+const BATCH_EXTENSIONS = new Set(['txt', 'csv', 'json', 'jsonl', 'pdf', 'png', 'jpg', 'jpeg'])
+const BATCH_KIND = new Set(['text', 'csv', 'json', 'jsonl', 'pdf', 'image'])
+const BATCH_KIND_BY_EXTENSION: Record<string, BatchDocument['kind']> = {
+  txt: 'text', csv: 'csv', json: 'json', jsonl: 'jsonl', pdf: 'pdf', png: 'image', jpg: 'image', jpeg: 'image',
+}
 const BATCH_CHECK = new Set(['PASS', 'FAIL', 'REVIEW', 'NOT_TESTED', 'NOT_APPLICABLE', 'NOT_MEASURED'])
 const MANUAL_FINDING_KINDS = new Set(['OTHER_SENSITIVE', 'BUSINESS_CONFIDENTIAL', 'QUASI_IDENTIFIER', 'GOVERNMENT_ID', 'DATE_OF_BIRTH'])
 const REFERENCE_TYPES = new Set(['CREDENTIAL', 'EMAIL', 'PHONE', 'AADHAAR', 'PAN', 'CARD', 'IP', 'PERSON', 'ADDRESS',
@@ -143,10 +150,19 @@ const REFERENCE_TYPES = new Set(['CREDENTIAL', 'EMAIL', 'PHONE', 'AADHAAR', 'PAN
   'HEALTH_SENSITIVE', 'BUSINESS_CONFIDENTIAL', 'QUASI_IDENTIFIER'])
 const safeCount = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0
 const safeText = (value: unknown, max = 120_000): value is string => typeof value === 'string' && value.length <= max
+function pngHeaderMatches(value: string, width: number, height: number): boolean {
+  try {
+    const header = atob(value.slice(0, 32))
+    if (header.length !== 24 || !header.startsWith('\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR')) return false
+    const dimension = (start: number) => ((header.charCodeAt(start) * 2 ** 24) +
+      (header.charCodeAt(start + 1) << 16) + (header.charCodeAt(start + 2) << 8) + header.charCodeAt(start + 3))
+    return dimension(16) === width && dimension(20) === height
+  } catch { return false }
+}
 
 export async function readBatchFile(file: File, id: string): Promise<BatchUpload> {
   const extension = file.name.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1]
-  if (!extension || !BATCH_EXTENSIONS.has(extension)) throw new DemoInspectionFailure('Choose TXT, CSV, JSON, JSONL, or a text-based PDF. Images and scanned PDFs need OCR, which this demo does not yet provide.')
+  if (!extension || !BATCH_EXTENSIONS.has(extension)) throw new DemoInspectionFailure('Choose TXT, CSV, JSON, JSONL, PDF, PNG, or JPEG for this synthetic demo.')
   if (!/^[A-Za-z0-9_-]{1,48}$/.test(id) || !file.name || file.name.length > 160 || /[/\\]/.test(file.name)) throw new DemoInspectionFailure('Invalid demo filename.')
   if (file.size < 1 || file.size > DEMO_MAX_BYTES) throw new DemoInspectionFailure('Each synthetic file must be between 1 byte and 100 KB.')
   const bytes = new Uint8Array(await file.arrayBuffer())
@@ -201,9 +217,11 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
   if (entityIds.size !== entities.length || Object.keys(expectedExclusions).some(id => !entityIds.has(id)) ||
       entities.some(entity => entity.excluded !== Object.hasOwn(expectedExclusions, entity.id))) batchInvalid()
   const documents: BatchDocument[] = value.documents.map((raw, index) => {
-    if (!object(raw) || raw.id !== expectedIds[index] || raw.name !== expectedUploads[index].name || !BATCH_KIND.has(String(raw.kind)) ||
+    const extension = expectedUploads[index].name.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] || ''
+    if (!object(raw) || raw.id !== expectedIds[index] || raw.name !== expectedUploads[index].name ||
+        !BATCH_KIND.has(String(raw.kind)) || raw.kind !== BATCH_KIND_BY_EXTENSION[extension] ||
         !safeText(raw.text) || !safeText(raw.candidate_text) || raw.size_bytes !== expectedUploads[index].size ||
-        !['source_text', 'extracted_text_only'].includes(String(raw.preview_fidelity)) ||
+        !['source_text', 'raster_ocr_review'].includes(String(raw.preview_fidelity)) ||
         !['pass', 'fail', 'not_applicable'].includes(String(raw.structure_check)) || !Array.isArray(raw.matches)) batchInvalid()
     // The Python API reports Unicode code-point offsets. Browser string.slice
     // uses UTF-16 code units, so map offsets before rendering emoji-containing
@@ -231,9 +249,41 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
     }
     rebuilt.push((raw.text as string).slice(offset))
     if (rebuilt.join('') !== raw.candidate_text) batchInvalid()
+    let mediaPreview: BatchMediaPreview | null = null
+    if (raw.kind === 'pdf' || raw.kind === 'image') {
+      const media = raw.media_preview
+      if (raw.preview_fidelity !== 'raster_ocr_review' || !object(media) || !Array.isArray(media.pages) ||
+          media.pages.length < 1 || media.pages.length > 2 || !safeCount(media.fallback_lines) ||
+          !safeCount(media.self_ocr_residual_sources)) batchInvalid()
+      const pages: BatchMediaPage[] = media.pages.map((page, pageIndex) => {
+        if (!object(page) || page.number !== pageIndex + 1 || !safeCount(page.width) || !safeCount(page.height) ||
+            (page.width as number) < 16 || (page.height as number) < 16 ||
+            (page.width as number) * (page.height as number) > 2_000_000 || !safeCount(page.ocr_lines) ||
+            (page.ocr_lines as number) > 200 || typeof page.source_png_base64 !== 'string' ||
+            typeof page.candidate_png_base64 !== 'string' ||
+            ![page.source_png_base64, page.candidate_png_base64].every(value => value.length < 3_400_000 &&
+              /^[A-Za-z0-9+/]+={0,2}$/.test(value) && pngHeaderMatches(value, page.width as number, page.height as number))) batchInvalid()
+        return { number: page.number as number, width: page.width as number, height: page.height as number,
+          sourcePngBase64: page.source_png_base64 as string, candidatePngBase64: page.candidate_png_base64 as string,
+          ocrLines: page.ocr_lines as number }
+      })
+      if (pages.reduce((sum, page) => sum + page.width * page.height, 0) > 3_000_000) batchInvalid()
+      let pdfRasterEvidence: BatchMediaPreview['pdfRasterEvidence'] = null
+      if (raw.kind === 'pdf') {
+        const evidence = media.pdf_raster_evidence
+        if (!object(evidence) || typeof evidence.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(evidence.sha256) ||
+            !safeCount(evidence.bytes) || evidence.bytes < 100 || evidence.bytes > 20_000_000 ||
+            evidence.pages !== pages.length || evidence.source_objects_copied !== false) batchInvalid()
+        pdfRasterEvidence = { sha256: evidence.sha256, bytes: evidence.bytes as number,
+          pages: pages.length, sourceObjectsCopied: false }
+      } else if (media.pdf_raster_evidence !== null) batchInvalid()
+      mediaPreview = { pages, fallbackLines: media.fallback_lines as number,
+        selfOcrResidualSources: media.self_ocr_residual_sources as number, pdfRasterEvidence }
+    } else if (raw.media_preview !== undefined || raw.preview_fidelity !== 'source_text') batchInvalid()
     return { id: raw.id as string, name: raw.name as string, kind: raw.kind as BatchDocument['kind'], text: raw.text as string,
       candidateText: raw.candidate_text as string, sizeBytes: raw.size_bytes as number,
-      previewFidelity: raw.preview_fidelity as BatchDocument['previewFidelity'], structureCheck: raw.structure_check as BatchDocument['structureCheck'], matches }
+      previewFidelity: raw.preview_fidelity as BatchDocument['previewFidelity'], structureCheck: raw.structure_check as BatchDocument['structureCheck'], matches,
+      mediaPreview }
   })
   const relationships: BatchRelationship[] = value.relationships.map(raw => {
     const documentKind = object(raw) ? documents.find(doc => doc.id === raw.document_id)?.kind : undefined
@@ -390,7 +440,7 @@ export async function inspectSyntheticBatch(request: { apiBase: string; token: s
       } catch { throw new DemoInspectionFailure('Cannot reach the synthetic batch service. No result was produced.') }
       if (!response.ok) {
         const messages: Record<number, string> = { 401: 'Authentication required.', 403: 'Synthetic batch mode is not enabled or permitted.',
-          413: 'The batch exceeds the service limit.', 422: 'A file or correction is invalid. Check formats, PDF text extraction, and alias length.', 503: 'Synthetic batch mode is unavailable.' }
+          413: 'The batch exceeds the service limit.', 422: 'A file or correction is invalid. Check media size, OCR readability, format, and alias length.', 503: 'Synthetic batch mode is unavailable.' }
         throw new DemoInspectionFailure(messages[response.status] || 'The synthetic batch request failed.')
       }
       try { return batchInspection(await response.json(), request.files, reference || null,

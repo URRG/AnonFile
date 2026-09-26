@@ -1,8 +1,8 @@
 """Ephemeral, explicitly synthetic batch review; never a release pipeline.
 
-This deliberately produces *text previews*, including for digitally born PDFs.
-It does not rewrite PDFs, OCR images, or claim that its bounded recognizers find
-all sensitive information. No input or candidate is persisted by this module.
+Text and raster candidates are review-only. PDF/image candidates are rebuilt
+from pixels, not original document objects. OCR can miss content; no input or
+candidate is persisted or qualified for release by this module.
 """
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import base64
 import binascii
 import csv
 import hashlib
-from io import BytesIO, StringIO
+from io import StringIO
 import json
 import re
 from collections import Counter
@@ -19,13 +19,15 @@ from typing import Any
 
 from app.contracts import PayloadError
 from app.evaluation import EvaluationError, evaluate, parse_gold, parse_predictions
+from app.media_preview import extract_media, render_candidate
 from app.processing import _field_type, detect_text
 
 MAX_FILES = 3
 MAX_FILE_BYTES = 100_000
 MAX_TOTAL_BYTES = 300_000
-MAX_PDF_PAGES = 5
-SUPPORTED = {".txt": "text", ".csv": "csv", ".json": "json", ".jsonl": "jsonl", ".pdf": "pdf"}
+MAX_BATCH_MEDIA_PIXELS = 3_000_000
+SUPPORTED = {".txt": "text", ".csv": "csv", ".json": "json", ".jsonl": "jsonl", ".pdf": "pdf",
+             ".png": "image", ".jpg": "image", ".jpeg": "image"}
 NAME_FIELDS = {"name", "full_name", "first_name", "last_name", "customer_name", "passenger_name", "client_name", "account_owner"}
 HEADER = re.compile(r"(?im)^(From|To|Cc):\s*([^<>\r\n]{2,80}?)\s*<([^<>\s]+@[^<>\s]+)>\s*$")
 JSON_NAME = re.compile(r'"(?:name|full_name|first_name|last_name|customer_name|passenger_name|client_name|account_owner)"\s*:\s*"([^"\\]{2,80})"', re.I)
@@ -161,7 +163,7 @@ def _read_file(item: dict[str, Any]) -> dict[str, Any]:
         raise PayloadError("Invalid demo filename.")
     extension = PurePath(name.lower()).suffix
     if extension not in SUPPORTED:
-        raise PayloadError("Supported demo files are TXT, CSV, JSON, JSONL, and text-based PDF. Images require OCR and are not supported yet.")
+        raise PayloadError("Supported demo files are TXT, CSV, JSON, JSONL, PDF, PNG, and JPEG.")
     if not isinstance(encoded, str) or len(encoded) > 140_000:
         raise PayloadError("Demo file exceeds the size limit.")
     try:
@@ -171,22 +173,11 @@ def _read_file(item: dict[str, Any]) -> dict[str, Any]:
     if not raw or len(raw) > MAX_FILE_BYTES:
         raise PayloadError("Each demo file must be between 1 byte and 100 KB.")
     kind = SUPPORTED[extension]
-    if kind == "pdf":
-        if not raw.startswith(b"%PDF-"):
+    media_pages = None
+    if kind in {"pdf", "image"}:
+        if kind == "pdf" and not raw.startswith(b"%PDF-"):
             raise PayloadError("The selected PDF is invalid.")
-        try:
-            from pypdf import PdfReader
-
-            reader = PdfReader(BytesIO(raw), strict=True)
-            if reader.is_encrypted or not 1 <= len(reader.pages) <= MAX_PDF_PAGES:
-                raise ValueError
-            content = "\n\n".join(page.extract_text() or "" for page in reader.pages)
-        except Exception:
-            raise PayloadError("This PDF cannot be extracted. Use an unencrypted, text-based PDF of up to five pages.") from None
-        if not content.strip():
-            raise PayloadError("No selectable text was found in this PDF. Scanned pages require OCR, which this demo does not provide.")
-        if len(content.encode("utf-8")) > MAX_FILE_BYTES:
-            raise PayloadError("Extracted PDF text exceeds 100 KB.")
+        content, media_pages = extract_media(raw, extension)
     else:
         try:
             content = raw.decode("utf-8-sig", errors="strict")
@@ -195,8 +186,11 @@ def _read_file(item: dict[str, Any]) -> dict[str, Any]:
         if not content.strip():
             raise PayloadError("Demo files cannot be blank.")
         _validate_structured(kind, content)
-    return {"id": identifier, "name": name, "kind": kind, "text": content, "size_bytes": len(raw),
-            "preview_fidelity": "extracted_text_only" if kind == "pdf" else "source_text"}
+    result = {"id": identifier, "name": name, "kind": kind, "text": content, "size_bytes": len(raw),
+              "preview_fidelity": "raster_ocr_review" if media_pages is not None else "source_text"}
+    if media_pages is not None:
+        result["_media_pages"] = media_pages
+    return result
 
 
 def _csv_cells(line: str, base: int) -> list[tuple[int, int]]:
@@ -374,7 +368,16 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
     items = payload.get("files")
     if not isinstance(items, list) or not 2 <= len(items) <= MAX_FILES or any(not isinstance(item, dict) for item in items):
         raise PayloadError("Provide two or three synthetic demo files.")
-    documents = [_read_file(item) for item in items]
+    documents = []
+    media_pixels = 0
+    for item in items:
+        document = _read_file(item)
+        if "_media_pages" in document:
+            media_pixels += sum(page["image"].width * page["image"].height
+                                for page in document["_media_pages"])
+            if media_pixels > MAX_BATCH_MEDIA_PIXELS:
+                raise PayloadError("The synthetic batch exceeds the three-million-pixel media review limit.")
+        documents.append(document)
     if len({doc["id"] for doc in documents}) != len(documents) or sum(doc["size_bytes"] for doc in documents) > MAX_TOTAL_BYTES:
         raise PayloadError("Duplicate file identities or batch size over 300 KB.")
     phrases = payload.get("manual_names", [])
@@ -522,6 +525,8 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
             except PayloadError:
                 structure = "fail"
         doc.update(candidate_text=candidate, matches=matches, structure_check=structure)
+        if "_media_pages" in doc:
+            doc["media_preview"] = render_candidate(doc.pop("_media_pages"), matches, doc["kind"])
         doc.pop("_fields")
 
     person_id = {value: id_by_key[("PERSON_NAME", value)] for value in names_by_key}
@@ -547,6 +552,9 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
                                   "type": "ACCOUNT_OWNER_OF", "document_id": document_id,
                                   "basis": f"same {kind.upper()} record account_owner/client_name"})
     residual = sum(len(detect_text(doc["candidate_text"])) for doc in documents)
+    media_documents = [doc for doc in documents if "media_preview" in doc]
+    visual_residuals = sum(doc["media_preview"]["self_ocr_residual_sources"] for doc in media_documents)
+    visual_fallbacks = sum(doc["media_preview"]["fallback_lines"] for doc in media_documents)
     if any(entity["excluded"] and not entity["mentions"] for entity in entities):
         raise PayloadError("A reviewer exclusion must refer to a detected mention.")
     if any(not entities_by_id[id_by_key[(item["kind"], item["value"].casefold())]]["mentions"]
@@ -573,8 +581,9 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
                  "detail": "CSV/JSON/JSONL candidates were reparsed where applicable."},
                 {"name": "Residual known-rule scan", "status": "REVIEW" if residual or exclusions else "PASS",
                  "detail": f"{residual} bounded-rule matches remain in candidate text. Reviewer-excluded names may not be covered by this scan; zero matches do not prove anonymity."},
-                {"name": "PDF layout and image OCR", "status": "NOT_TESTED",
-                 "detail": "PDFs are extracted-text previews only. No PDF output or image OCR is produced."},
+                {"name": "Raster media and OCR review", "status": "REVIEW" if media_documents else "NOT_TESTED",
+                 "detail": f"{len(media_documents)} media files were rasterized and OCR-reviewed; {visual_residuals} source values remain under the same OCR engine and {visual_fallbacks} lines needed solid-redaction fallback. This is not independent visual validation or release approval."
+                 if media_documents else "No PDF/image was processed in this batch."},
                 {"name": "Reference-label agreement", "status": "REVIEW" if annotation_score else "NOT_MEASURED",
                  "detail": "Exact-span counts compare the reviewed candidate with supplied synthetic labels; they are not an independent model benchmark."
                  if annotation_score else "No complete reference labels were supplied for this batch."},
@@ -586,8 +595,8 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
             "Manually added sensitive phrases are exact bounded corrections, not automatic recognition of similar unseen values.",
             "Structured field recognition is bounded to supported JSON key/value syntax and one-line CSV cells; unsupported forms are rejected rather than silently passed through.",
             "Exact-name linking can merge different people who share a name; ambiguous identities need human resolution.",
-            "PDFs are not rewritten; extracted text may lose page geometry, annotations, embedded images, and metadata.",
-            "Images and scanned PDFs need OCR plus visual residual inspection and are rejected here.",
+            "PDF candidates are rebuilt as image-only PDFs in memory, but only raster page previews and a digest are returned; no PDF download or delivery is authorized.",
+            "Image and scanned-PDF OCR may miss or misread content. The same-engine raster recheck is not independent validation, and source content outside recognized OCR lines may remain visible.",
             "Relationship edges require explicit mail headers or account_owner/client_name in the same parsed record; they do not infer social or organizational ties.",
             "Pseudonyms and retained relationships may remain linkable. No release, sale, or export is authorized.",
             "Reference-label agreement, when present, depends on the reviewer's completeness assertion and does not establish generalization or anonymity.",
