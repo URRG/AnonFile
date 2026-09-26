@@ -48,3 +48,7 @@ is produced. The external gold annotations are the reference, not the detector's
 own output. Gold quality, source coverage and independent adjudication remain
 the user's responsibility. Baseline execution imports processing without the
 API, authentication, model downloads, or external network services.
+
+For an externally curated corpus, the optional checksum-pinned holdout
+selection mode is documented in [the holdout protocol](../../../../../docs/holdout-evaluation.md).
+The tiny fixtures in this directory are not an independent holdout.

@@ -54,6 +54,8 @@ production worker. No candidate download or release path is enabled.
    task utility, and set source-specific thresholds and abstention rules.
    Evaluate every processor/model revision against a frozen holdout. A clean
    residual scan alone is not an anonymity proof.
+   The offline evaluator now offers [checksum-pinned holdout selection](holdout-evaluation.md),
+   but there is no independent corpus or annotation attestation yet.
 3. **Supplier rights and governance.** Verify supplier organization and signer
    authority, preserve revocable and exact-scope rights evidence, settle when
    the supplier signs relative to processing and transfer, and bind rights,
