@@ -1,10 +1,15 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
+  DEMO_MAX_BYTES,
+  decodeDemoUpload,
+  inspectSyntheticDemo,
   runControlPlane,
+  DemoInspectionFailure,
   type ControlPlaneFailure,
   type ControlPlaneRequest,
   type ControlPlaneView,
+  type DemoInspection,
   type Mode,
   type SourceFormat,
 } from './api'
@@ -13,7 +18,7 @@ import './styles.css'
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 const MODE: Mode = 'external_anonymized'
 
-function failureMessage(failure: ControlPlaneFailure): string {
+function failureMessage(failure: unknown): string {
   const value = failure as unknown
   if (value instanceof Error && value.message) return value.message
   if (typeof value === 'object' && value !== null && 'message' in value && typeof value.message === 'string') return value.message
@@ -34,15 +39,71 @@ function App() {
   const [result, setResult] = useState<ControlPlaneView | null>(null)
   const [failure, setFailure] = useState<ControlPlaneFailure | null>(null)
   const activeRequest = useRef<AbortController | null>(null)
+  const [demoToken, setDemoToken] = useState('')
+  const [demoContent, setDemoContent] = useState('[{"full_name":"Priya Demo","email":"priya.demo@example.test","phone":"+1 415 555 0134","passport_number":"DEMO123456","date_of_birth":"1990-01-01","booking_reference":"DEMO-BOOKING-001"}]')
+  const [demoFormat, setDemoFormat] = useState<SourceFormat>('json')
+  const [syntheticAcknowledged, setSyntheticAcknowledged] = useState(false)
+  const [demoBusy, setDemoBusy] = useState(false)
+  const [readingFile, setReadingFile] = useState(false)
+  const [demoResult, setDemoResult] = useState<DemoInspection | null>(null)
+  const [demoFailure, setDemoFailure] = useState<DemoInspectionFailure | null>(null)
+  const activeDemoRequest = useRef<AbortController | null>(null)
+  const fileSelection = useRef(0)
 
   useEffect(() => () => {
     activeRequest.current?.abort()
     activeRequest.current = null
+    activeDemoRequest.current?.abort()
+    activeDemoRequest.current = null
+    fileSelection.current += 1
   }, [])
 
   const clearResult = () => {
     setResult(null)
     setFailure(null)
+  }
+  const clearDemoResult = () => { setDemoResult(null); setDemoFailure(null) }
+  const invalidateDemoFileSelection = () => { fileSelection.current += 1; setReadingFile(false) }
+
+  async function selectDemoFile(file: File | undefined) {
+    if (!file) return
+    clearDemoResult()
+    // A later selection (including one rejected before reading) must prevent
+    // an earlier File.arrayBuffer() from overwriting the current form values.
+    const selection = ++fileSelection.current
+    if (file.size === 0 || file.size > DEMO_MAX_BYTES) {
+      setReadingFile(false)
+      setDemoFailure(new DemoInspectionFailure('Demo files must be between 1 byte and 100 KB.'))
+      return
+    }
+    setReadingFile(true)
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer())
+      if (selection !== fileSelection.current) return
+      const upload = decodeDemoUpload(file.name, bytes)
+      setDemoFormat(upload.format)
+      setDemoContent(upload.content)
+    } catch (cause) {
+      if (selection === fileSelection.current) setDemoFailure(cause as DemoInspectionFailure)
+    } finally {
+      if (selection === fileSelection.current) setReadingFile(false)
+    }
+  }
+
+  async function inspectDemo() {
+    if (activeDemoRequest.current || readingFile || !syntheticAcknowledged) return
+    const controller = new AbortController()
+    activeDemoRequest.current = controller
+    clearDemoResult()
+    setDemoBusy(true)
+    try {
+      const view = await inspectSyntheticDemo({ apiBase: API_BASE, token: demoToken, content: demoContent, format: demoFormat, signal: controller.signal })
+      if (activeDemoRequest.current === controller && !controller.signal.aborted) setDemoResult(view)
+    } catch (cause) {
+      if (activeDemoRequest.current === controller && !controller.signal.aborted) setDemoFailure(cause as DemoInspectionFailure)
+    } finally {
+      if (activeDemoRequest.current === controller) { activeDemoRequest.current = null; setDemoBusy(false) }
+    }
   }
 
   async function run() {
@@ -79,17 +140,61 @@ function App() {
 
   return <main className="workbench">
     <header className="masthead">
-      <p className="eyebrow">Development control plane</p>
+      <p className="eyebrow">Synthetic demo + development control plane</p>
       <h1>AnonFlow workbench</h1>
-      <p className="lede">Create an auditable processing run and inspect only its control metadata. Source and transformed content are never previewed or downloaded here.</p>
+      <p className="lede">Inspect explicitly synthetic samples with bounded rules, then optionally create an auditable control-plane run. The advanced workflow never previews source or candidate content.</p>
     </header>
 
     <aside className="notice" role="note">
       <strong>Synthetic data only.</strong> This development service receives and temporarily stores submitted content. It cannot verify that it is synthetic. Do not submit customer, employee, passenger, health, payment, credential, or confidential business data.
     </aside>
 
+    <section className="demo-panel" aria-labelledby="demo-heading">
+      <div className="section-heading"><div><p className="eyebrow">Demo inspector</p><h2 id="demo-heading">Upload and inspect synthetic data</h2></div><span className="demo-badge">Synthetic demo only</span></div>
+      <p className="lede compact">This isolated preview shows what the bounded <code>rules-v1</code> detector transforms. It is not a certification that all PII was found, and it never authorizes a release or export.</p>
+      <form onSubmit={event => { event.preventDefault(); void inspectDemo() }}>
+        <fieldset disabled={demoBusy}>
+          <label>
+            Processor access token
+            <input type="password" value={demoToken} autoComplete="off" spellCheck={false} required onChange={event => { clearDemoResult(); setDemoToken(event.target.value) }} />
+          </label>
+          <label>
+            Upload a synthetic file (optional)
+            <input type="file" accept=".txt,.csv,.json,.jsonl,text/plain,text/csv,application/json" onChange={event => { void selectDemoFile(event.target.files?.[0]) }} />
+          </label>
+          <p className="field-help">Accepted: UTF-8 <code>.txt</code>, <code>.csv</code>, <code>.json</code>, or <code>.jsonl</code>, up to 100 KB. Selecting a file fills the text area; it is not uploaded until inspection starts.</p>
+          <label>
+            Demo source format
+            <select value={demoFormat} onChange={event => { invalidateDemoFileSelection(); clearDemoResult(); setDemoFormat(event.target.value as SourceFormat) }}>
+              <option value="text">Plain text</option><option value="json">JSON array of objects</option><option value="jsonl">JSON Lines (objects)</option><option value="csv">CSV with headers</option>
+            </select>
+          </label>
+          <label>
+            Synthetic demo content
+            <textarea value={demoContent} required rows={8} onChange={event => { invalidateDemoFileSelection(); clearDemoResult(); setDemoContent(event.target.value) }} />
+          </label>
+          <label className="acknowledgment">
+            <input type="checkbox" checked={syntheticAcknowledged} onChange={event => setSyntheticAcknowledged(event.target.checked)} />
+            <span>I confirm this is synthetic demo data only. I understand the preview can miss or leave sensitive information unredacted.</span>
+          </label>
+          <button type="submit" disabled={!syntheticAcknowledged || readingFile}>{readingFile ? 'Reading selected file…' : 'Inspect synthetic sample'}</button>
+        </fieldset>
+      </form>
+      {demoBusy && <div className="run-actions" aria-live="polite"><span>Inspecting synthetic demo sample…</span><button type="button" className="secondary" onClick={() => activeDemoRequest.current?.abort()}>Cancel inspection</button></div>}
+      {demoFailure && <section className="failure" role="alert"><h3>Demo inspection was not completed</h3><p>{failureMessage(demoFailure)}</p></section>}
+      {demoResult && <section className="demo-result" aria-live="polite" aria-label="Synthetic demo inspection result">
+        <div className="warning-preview"><strong>Not certified — review this preview carefully.</strong> Rules can miss PII, so transformed content may still contain sensitive information. Do not share, export, or treat it as anonymous.</div>
+        <div className="demo-grid">
+          <article><h3>Detected categories</h3>{demoResult.findings.length ? <ul>{demoResult.findings.map(item => <li key={`${item.entityType}-${item.severity}`}><code>{item.entityType}</code> · {item.count} ({item.severity})</li>)}</ul> : <p>No rules matched. This does not establish that the sample contains no PII.</p>}</article>
+          <article><h3>Applied operations</h3>{demoResult.operations.length ? <ul>{demoResult.operations.map(item => <li key={`${item.entityType}-${item.action}`}><code>{item.entityType}</code> · {item.count} {item.action}</li>)}</ul> : <p>No transformation operations were recorded.</p>}</article>
+        </div>
+        <article className="preview"><h3>Transformed synthetic preview</h3>{(demoResult.format === 'csv' || demoResult.format === 'jsonl') && <p className="field-help">Structured input is displayed as normalized JSON; the original file layout is not preserved.</p>}<pre>{demoResult.transformedPreview}</pre></article>
+        <article className="limitations"><h3>Detector limitations</h3><ul>{demoResult.limitations.map((item, index) => <li key={index}>{item}</li>)}<li>Identifiers represented by unrecognized fields, such as <code>booking_reference</code>, may remain visible.</li><li>This preview is synthetic-demo-only and cannot approve a release, export, anonymity claim, or sale.</li></ul></article>
+      </section>}
+    </section>
+
     <section className="controls-summary" aria-labelledby="controls-heading">
-      <h2 id="controls-heading">What this run does</h2>
+      <h2 id="controls-heading">Advanced control-plane workflow</h2>
       <dl>
         <div><dt>Workflow</dt><dd>Ingest, bind local rights and policy controls, register a run, then execute it.</dd></div>
         <div><dt>Processing method</dt><dd><code>rules-v1</code> with a fixed external-candidate policy profile.</dd></div>

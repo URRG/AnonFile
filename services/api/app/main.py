@@ -77,6 +77,7 @@ from app.policies import TAXONOMY_CATEGORIES
 
 MAX_BODY_BYTES = 2_100_000
 MAX_PAYLOAD_BYTES = 2_000_000
+DEMO_MAX_BYTES = 100_000
 
 class StrictJSONRequest(Request):
     """Parse once, rejecting ambiguous objects instead of silently losing values."""
@@ -177,6 +178,32 @@ class DatasetMetadata(StrictModel):
 class IngestionCreate(DatasetMetadata):
     format: Literal["text", "json", "jsonl", "csv"]
     content: str = Field(min_length=1, max_length=MAX_PAYLOAD_BYTES)
+
+class DemoInspectCreate(StrictModel):
+    """One explicitly attested, bounded synthetic-data inspection request."""
+    format: Literal["text", "json", "jsonl", "csv"]
+    content: str = Field(min_length=1, max_length=DEMO_MAX_BYTES)
+    synthetic_only: Literal[True]
+
+class DemoFinding(BaseModel):
+    entity_type: str
+    severity: str
+    count: int
+
+class DemoOperation(BaseModel):
+    entity_type: str
+    action: str
+    count: int
+
+class DemoInspectView(BaseModel):
+    """A rules-based preview only; this contract never creates an artifact."""
+    posture: Literal["SYNTHETIC_DEMO_ONLY"]
+    format: Literal["text", "json", "jsonl", "csv"]
+    findings: list[DemoFinding]
+    operations: list[DemoOperation]
+    transformed_preview: str
+    limitations: list[str]
+    release_authorized: Literal[False]
 
 class DatasetCreate(DatasetMetadata):
     content: str | None = Field(default=None, min_length=1, max_length=MAX_PAYLOAD_BYTES)
@@ -1039,6 +1066,49 @@ def create_app() -> FastAPI:
     def identity(principal: Principal = Depends(require_roles("processor", "reviewer", "buyer", "evaluator"))):
         """Return only the server-bound authenticated identity."""
         return {"subject": principal.subject, "tenant": principal.tenant, "roles": sorted(principal.roles)}
+
+    # This is deliberately not a release, processing-run, or candidate API.
+    # Register it only when a local operator opts in to a synthetic-data demo;
+    # production never has this route, even with otherwise valid JWT identity.
+    if (app.state.auth_environment == "development"
+            and os.getenv("ANONFLOW_DEMO_MODE") == "enabled"):
+        @app.post("/demo/inspect", response_model=DemoInspectView)
+        def inspect_synthetic_demo(request: DemoInspectCreate,
+                                   principal: Principal = Depends(require_roles("processor"))):
+            try:
+                if len(request.content.encode("utf-8")) > DEMO_MAX_BYTES:
+                    raise PayloadError("Payload exceeds the byte limit.")
+            except UnicodeError:
+                raise PayloadError("Payload contains invalid Unicode.") from None
+            parsed = parse_source(content=request.content, format=request.format)
+            result = process_payload(content=parsed.content, records=parsed.records,
+                                     mode="external_anonymized")
+            if type(result.output) is str:
+                preview = result.output
+            else:
+                try:
+                    preview = json.dumps(result.output, ensure_ascii=False, allow_nan=False,
+                                         sort_keys=True, separators=(",", ":"))
+                except (TypeError, ValueError, UnicodeError, OverflowError, RecursionError):
+                    raise PayloadError("Unsupported payload") from None
+            try:
+                if len(preview.encode("utf-8")) > DEMO_MAX_BYTES:
+                    raise PayloadError("Payload exceeds the byte limit.")
+            except UnicodeError:
+                raise PayloadError("Payload contains invalid Unicode.") from None
+            return DemoInspectView(
+                posture="SYNTHETIC_DEMO_ONLY", format=request.format,
+                findings=[DemoFinding(entity_type=item.entity_type, severity=item.severity, count=item.count)
+                          for item in result.findings],
+                operations=[DemoOperation(entity_type=item.entity_type, action=item.action.value, count=item.count)
+                            for item in result.actual_operations],
+                transformed_preview=preview,
+                limitations=list(dict.fromkeys((*result.limitations,
+                    "Synthetic demonstration only. Use fictional data; no source is stored by this endpoint.",
+                    "Rules-based findings and transformed preview are not a completeness, anonymization, or privacy certification.",
+                    "No release, export, buyer delivery, or production authorization is supported."))),
+                release_authorized=False,
+            )
 
     @app.post("/datasets", response_model=DatasetSummary, status_code=201)
     def create_dataset(request: DatasetCreate, principal: Principal = Depends(require_roles("processor"))):

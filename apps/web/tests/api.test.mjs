@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import ts from 'typescript'
 const source = readFileSync(new URL('../src/api.ts', import.meta.url), 'utf8')
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText
-const { requestRelease, validateRelease, runControlPlane, ControlPlaneFailure, DEFAULT_POLICY_NOTICE, REQUEST_TIMEOUT_MS } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
+const { requestRelease, validateRelease, runControlPlane, ControlPlaneFailure, DEFAULT_POLICY_NOTICE, REQUEST_TIMEOUT_MS, decodeDemoUpload, inspectSyntheticDemo, DemoInspectionFailure, DEMO_MAX_BYTES } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
 const request = { apiBase: 'http://localhost:8000', token: 'test-token', content: 'synthetic', recipient: 'buyer-test', mode: 'external_anonymized' }
 const safe = () => ({ id: 'release-1', dataset_id: 'dataset-1', status: 'evaluation_incomplete', eligibility: 'REVIEW_REQUIRED', output: null, card: { release_id: 'release-1', dataset_id: 'dataset-1', eligibility: 'REVIEW_REQUIRED', policy_version: 'external-release-v1', release_mode: 'external_anonymized', evidence_status: 'INSUFFICIENT_EVIDENCE', scores: null, findings: [], gates: ['EXPORT_DISABLED', 'QUALIFICATION_REQUIRED'], limitations: ['rules-only'] } })
 for (const status of [401, 403, 409, 413, 422, 429, 500, 503]) {
@@ -70,14 +70,24 @@ test('malformed JSON produces fixed error', async t => {
   t.mock.method(globalThis, 'fetch', async () => new Response('raw-secret', { status: 200 }))
   await assert.rejects(requestRelease(request), error => !error.message.includes('raw-secret') && error.message.includes('unsafe response'))
 })
-test('UI has no credential persistence, clipboard export, preview or demo fallback', () => {
+test('UI keeps the advanced control plane metadata-only and has no credential persistence or export', () => {
   const ui = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8')
-  assert.doesNotMatch(ui, /localStorage|sessionStorage|clipboard|demoRelease/)
+  assert.doesNotMatch(ui, /localStorage|sessionStorage|clipboard|demoRelease|download=/)
   assert.match(ui, /Synthetic data only/)
   assert.match(ui, /Do not submit customer, employee, passenger/)
   assert.match(ui, /receives and temporarily stores submitted content/)
-  assert.match(ui, /never previewed or downloaded here/)
+  assert.match(ui, /output preview is available from this workbench/)
   assert.match(ui, /token is held only in this page’s memory/)
+  assert.match(ui, /Advanced control-plane workflow/)
+  assert.match(ui, /private candidate record exists\. Its body is intentionally not available/)
+  assert.match(ui, /Upload and inspect synthetic data/)
+  assert.match(ui, /can miss or leave sensitive information unredacted/)
+  assert.match(ui, /const selection = \+\+fileSelection\.current\s*\n\s*if \(file\.size === 0 \|\| file\.size > DEMO_MAX_BYTES\)/)
+  assert.match(ui, /const \[readingFile, setReadingFile\] = useState\(false\)/)
+  assert.match(ui, /const invalidateDemoFileSelection = \(\) => \{ fileSelection\.current \+= 1; setReadingFile\(false\) \}/)
+  assert.match(ui, /onChange=\{event => \{ invalidateDemoFileSelection\(\); clearDemoResult\(\); setDemoFormat/)
+  assert.match(ui, /onChange=\{event => \{ invalidateDemoFileSelection\(\); clearDemoResult\(\); setDemoContent/)
+  assert.match(ui, /disabled=\{!syntheticAcknowledged \|\| readingFile\}/)
 })
 
 function shortenDeadline(t) {
@@ -268,4 +278,91 @@ test('M6 cancellation stops client progression before rights or policy requests'
   controller.abort('raw-secret-reason')
   await assert.rejects(result, error => error instanceof ControlPlaneFailure && error.message.startsWith('Request cancelled.') && !error.message.includes('raw-secret'))
   assert.equal(mock.mock.calls.length, 1)
+})
+
+const demoResponse = (overrides = {}) => ({
+  posture: 'SYNTHETIC_DEMO_ONLY', format: 'text', release_authorized: false,
+  findings: [{ entity_type: 'EMAIL', severity: 'high', count: 1 }],
+  operations: [{ entity_type: 'EMAIL', action: 'REDACT', count: 1 }],
+  transformed_preview: 'contact [REDACTED_EMAIL]',
+  limitations: ['Rules-only coverage is incomplete.'], ...overrides,
+})
+
+test('synthetic demo inspector posts the explicit acknowledgment and returns only its strict contract', async t => {
+  const mock = t.mock.method(globalThis, 'fetch', async (_url, options) => {
+    assert.equal(options.headers.Authorization, 'Bearer demo-token')
+    assert.deepEqual(JSON.parse(options.body), { format: 'text', content: 'synthetic@example.test', synthetic_only: true })
+    return Response.json(demoResponse())
+  })
+  const result = await inspectSyntheticDemo({ apiBase: 'http://localhost:8000/', token: ' demo-token ', format: 'text', content: 'synthetic@example.test' })
+  assert.equal(mock.mock.calls[0].arguments[0], 'http://localhost:8000/demo/inspect')
+  assert.equal(result.releaseAuthorized, false)
+  assert.equal(result.transformedPreview, 'contact [REDACTED_EMAIL]')
+  assert.equal(result.findings[0].entityType, 'EMAIL')
+})
+
+test('synthetic demo inspector rejects unsafe and mismatched API responses', async t => {
+  for (const response of [
+    demoResponse({ release_authorized: true }), demoResponse({ format: 'csv' }), demoResponse({ findings: [{ entity_type: 'raw@example.test', severity: 'high', count: 1 }] }),
+    demoResponse({ transformed_preview: 'x'.repeat(DEMO_MAX_BYTES + 1) }), demoResponse({ unexpected: true }),
+  ]) {
+    t.mock.method(globalThis, 'fetch', async () => Response.json(response))
+    await assert.rejects(inspectSyntheticDemo({ apiBase: 'http://localhost:8000', token: 'demo-token', format: 'text', content: 'synthetic' }), error => error instanceof DemoInspectionFailure && /invalid inspection/.test(error.message))
+    t.mock.reset()
+  }
+})
+
+test('synthetic demo upload decoding enforces extension, size, UTF-8 and nonblank input locally', () => {
+  assert.deepEqual(decodeDemoUpload('sample.CSV', new TextEncoder().encode('email\nsynthetic@example.test')), { format: 'csv', content: 'email\nsynthetic@example.test' })
+  for (const [name, bytes] of [
+    ['sample.pdf', new Uint8Array([1])], ['empty.txt', new Uint8Array()], ['large.txt', new Uint8Array(DEMO_MAX_BYTES + 1)], ['broken.txt', new Uint8Array([0xc3, 0x28])], ['blank.txt', new TextEncoder().encode(' \n')],
+  ]) assert.throws(() => decodeDemoUpload(name, bytes), DemoInspectionFailure)
+})
+
+test('synthetic demo invalid input and HTTP errors do not create a result', async t => {
+  const mock = t.mock.method(globalThis, 'fetch', async () => { throw new Error('must not run') })
+  await assert.rejects(inspectSyntheticDemo({ apiBase: 'http://localhost:8000', token: '', format: 'text', content: 'synthetic' }), /required/)
+  await assert.rejects(inspectSyntheticDemo({ apiBase: 'http://localhost:8000', token: 'token', format: 'text', content: 'x'.repeat(DEMO_MAX_BYTES + 1) }), /100 KB/)
+  assert.equal(mock.mock.calls.length, 0)
+  t.mock.reset()
+  t.mock.method(globalThis, 'fetch', async () => new Response('raw-secret', { status: 503 }))
+  await assert.rejects(inspectSyntheticDemo({ apiBase: 'http://localhost:8000', token: 'token', format: 'text', content: 'synthetic' }), error => error instanceof DemoInspectionFailure && !error.message.includes('raw-secret') && /unavailable/.test(error.message))
+})
+
+test('synthetic demo rejects an unsupported runtime format before sending source', async t => {
+  const mock = t.mock.method(globalThis, 'fetch', async () => { throw new Error('must not run') })
+  await assert.rejects(inspectSyntheticDemo({ apiBase: 'http://localhost:8000', token: 'token', format: 'xml', content: 'synthetic' }), /Unsupported demo source format/)
+  assert.equal(mock.mock.calls.length, 0)
+})
+
+for (const phase of ['headers', 'body']) {
+  test(`synthetic demo deadline aborts stalled ${phase}`, { timeout: 2000 }, async t => {
+    const originalSetTimeout = globalThis.setTimeout
+    const delays = []
+    t.mock.method(globalThis, 'setTimeout', (callback, delay, ...args) => {
+      delays.push(delay)
+      return originalSetTimeout(callback, 20, ...args)
+    })
+    let signal
+    t.mock.method(globalThis, 'fetch', async (_url, options) => {
+      signal = options.signal
+      if (phase === 'headers') return new Promise(() => {})
+      return new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('{')) } }))
+    })
+    await assert.rejects(inspectSyntheticDemo({ apiBase: 'http://localhost:8000', token: 'token', format: 'text', content: 'synthetic' }), error => error instanceof DemoInspectionFailure && /timed out after 30 seconds/.test(error.message))
+    assert.deepEqual(delays, [REQUEST_TIMEOUT_MS])
+    assert.equal(signal.aborted, true)
+  })
+}
+
+test('synthetic demo caller cancellation aborts its transport without echoing an abort reason', async t => {
+  const caller = new AbortController()
+  let start, signal
+  const started = new Promise(resolve => { start = resolve })
+  t.mock.method(globalThis, 'fetch', async (_url, options) => { signal = options.signal; start(); return new Promise(() => {}) })
+  const pending = inspectSyntheticDemo({ apiBase: 'http://localhost:8000', token: 'token', format: 'text', content: 'synthetic', signal: caller.signal })
+  await started
+  caller.abort('raw-secret-reason')
+  await assert.rejects(pending, error => error instanceof DemoInspectionFailure && /was cancelled/.test(error.message) && !error.message.includes('raw-secret'))
+  assert.equal(signal.aborted, true)
 })

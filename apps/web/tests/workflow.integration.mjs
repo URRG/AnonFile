@@ -25,7 +25,7 @@ test('real HTTP intake, withholding, independent review and isolation', { timeou
   ]
   const child = spawn(process.env.ANONFLOW_TEST_PYTHON || 'python', ['-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', String(port), '--no-access-log'], {
     cwd: fileURLToPath(new URL('../../../services/api/', import.meta.url)),
-    env: { ...process.env, ANONFLOW_ENV: 'development', ANONFLOW_AUTH_MODE: 'dev-token', ANONFLOW_STORAGE_MODE: 'memory', ANONFLOW_DEV_PRINCIPALS: JSON.stringify(principals), PYTHONDONTWRITEBYTECODE: '1' },
+    env: { ...process.env, ANONFLOW_ENV: 'development', ANONFLOW_AUTH_MODE: 'dev-token', ANONFLOW_STORAGE_MODE: 'memory', ANONFLOW_DEMO_MODE: 'enabled', ANONFLOW_DEV_PRINCIPALS: JSON.stringify(principals), PYTHONDONTWRITEBYTECODE: '1' },
     stdio: 'ignore', windowsHide: true,
   })
   let launchError = false
@@ -41,7 +41,13 @@ test('real HTTP intake, withholding, independent review and isolation', { timeou
     assert.ok(ready, 'API startup deadline')
     const source = readFileSync(new URL('../src/api.ts', import.meta.url), 'utf8')
     const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText
-    const { requestRelease, runControlPlane } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
+    const { requestRelease, runControlPlane, inspectSyntheticDemo } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
+    const demoCsv = readFileSync(new URL('../../../demo-data/synthetic-airline-passengers.csv', import.meta.url), 'utf8')
+    const demoInspection = await inspectSyntheticDemo({ apiBase: base, token: processor, format: 'csv', content: demoCsv })
+    assert.equal(demoInspection.releaseAuthorized, false)
+    assert.ok(demoInspection.transformedPreview.includes('[REDACTED_EMAIL]'))
+    assert.ok(!demoInspection.transformedPreview.includes('alex@example.test'))
+    assert.ok(demoInspection.findings.some(f => f.entityType === 'EMAIL'))
     const content = 'Synthetic contact alex@example.com'
     const release = await requestRelease({ apiBase: base, token: processor, content, mode: 'external_anonymized', recipient: 'synthetic-buyer' })
     assert.equal(release.eligibility, 'REVIEW_REQUIRED')
