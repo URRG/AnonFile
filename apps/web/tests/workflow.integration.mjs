@@ -67,6 +67,13 @@ test('real HTTP intake, withholding, independent review and isolation', { timeou
     assert.equal(batch.verification.status, 'REVIEW_REQUIRED')
     assert.equal(batch.verification.annotationScore.goldAnnotations, 2)
     assert.equal(batch.verification.annotationScore.exact.truePositives, 2)
+    const excluded = await inspectSyntheticBatch({ apiBase: base, token: processor, files: [
+      { id: 'mail', name: 'mail.txt', size: Buffer.byteLength(mailText), contentBase64: Buffer.from(mailText).toString('base64') },
+      { id: 'record', name: 'record.json', size: Buffer.byteLength(recordText), contentBase64: Buffer.from(recordText).toString('base64') },
+    ], manualNames: [], aliasOverrides: {}, reviewExclusions: { [person.id]: 'FALSE_POSITIVE_CONFIRMED' } })
+    assert.equal(excluded.summary.suppressedMentions, person.mentions)
+    assert.ok(excluded.documents[0].candidateText.includes('Riya'))
+    assert.equal(excluded.verification.checks.find(check => check.name === 'Reviewer exclusions').status, 'REVIEW')
     const content = 'Synthetic contact alex@example.com'
     const release = await requestRelease({ apiBase: base, token: processor, content, mode: 'external_anonymized', recipient: 'synthetic-buyer' })
     assert.equal(release.eligibility, 'REVIEW_REQUIRED')

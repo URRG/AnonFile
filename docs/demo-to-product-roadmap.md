@@ -21,7 +21,10 @@ candidate. A complete synthetic reference-label manifest can now produce
 exact-span agreement counts; the built-in example has fixed labels. Those
 numbers describe only the labelled case and include manual corrections. They
 are not an independent holdout, privacy qualification, or a general model
-quality claim.
+quality claim. A reviewer can mark a supported noncritical signal as a false
+positive for this synthetic batch; the retained source remains visibly
+review-required and cannot be exported. That narrow correction path does not
+replace a production annotation workflow or two-person review.
 
 ## Gaps after the synthetic demo
 

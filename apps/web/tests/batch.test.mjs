@@ -14,10 +14,10 @@ const request = { apiBase: 'http://127.0.0.1:8000', token: 'synthetic-token', fi
 const valid = () => ({ posture: 'SYNTHETIC_DEMO_ONLY', release_authorized: false, export_available: false,
   documents: [
     { id: 'f1', name: 'a.txt', kind: 'text', text: 'Riya', candidate_text: 'Gita', size_bytes: 4, preview_fidelity: 'source_text', structure_check: 'not_applicable',
-      matches: [{ start: 0, end: 4, source: 'Riya', entity_id: 'E1', kind: 'PERSON_NAME', replacement: 'Gita' }] },
+      matches: [{ start: 0, end: 4, source: 'Riya', entity_id: 'E1', kind: 'PERSON_NAME', replacement: 'Gita', applied: true }] },
     { id: 'f2', name: 'b.txt', kind: 'text', text: 'note', candidate_text: 'note', size_bytes: 4, preview_fidelity: 'source_text', structure_check: 'not_applicable', matches: [] },
-  ], entities: [{ id: 'E1', kind: 'PERSON_NAME', source: 'Riya', alias: 'Gita', mentions: 1 }], relationships: [],
-  summary: { files: 2, detected_mentions: 1, transformed_mentions: 1, linked_entities: 1, explicit_relationships: 0 },
+  ], entities: [{ id: 'E1', kind: 'PERSON_NAME', source: 'Riya', alias: 'Gita', mentions: 1, excluded: false }], relationships: [],
+  summary: { files: 2, detected_mentions: 1, transformed_mentions: 1, suppressed_mentions: 0, linked_entities: 1, explicit_relationships: 0 },
   verification: { status: 'REVIEW_REQUIRED', known_rule_residual_matches: 0, structure_failures: 0,
     checks: [{ name: 'Application', status: 'PASS', detail: 'One match applied.' }, { name: 'Residual', status: 'REVIEW', detail: 'Review.' },
       { name: 'Benchmark', status: 'NOT_MEASURED', detail: 'No ground truth.' }] }, limitations: ['Synthetic only.'] })
@@ -60,6 +60,8 @@ test('batch client rejects fabricated approval, mismatched content and counts', 
     value => { value.documents[0].candidate_text = 'Riya' },
     value => { value.entities[0].mentions = 2 },
     value => { value.summary.detected_mentions = 0 },
+    value => { value.summary.suppressed_mentions = 1 },
+    value => { value.documents[0].matches[0].applied = false },
     value => { value.verification.status = 'APPROVED' },
   ]) {
     const item = valid(); change(item)
@@ -67,6 +69,22 @@ test('batch client rejects fabricated approval, mismatched content and counts', 
     await assert.rejects(inspectSyntheticBatch(request), /invalid review result/)
     t.mock.restoreAll()
   }
+})
+
+test('explicit reviewer exclusion retains source and is reflected in counts', async t => {
+  const response = valid()
+  response.entities[0].excluded = true
+  response.documents[0].matches[0].applied = false
+  response.documents[0].candidate_text = 'Riya'
+  response.summary.transformed_mentions = 0
+  response.summary.suppressed_mentions = 1
+  const mock = t.mock.method(globalThis, 'fetch', async () => Response.json(response))
+  const result = await inspectSyntheticBatch({ ...request, reviewExclusions: { E1: 'FALSE_POSITIVE_CONFIRMED' } })
+  assert.equal(result.documents[0].candidateText, 'Riya')
+  assert.equal(result.documents[0].matches[0].applied, false)
+  assert.equal(result.summary.suppressedMentions, 1)
+  assert.deepEqual(JSON.parse(mock.mock.calls[0].arguments[1].body).review_exclusions, { E1: 'FALSE_POSITIVE_CONFIRMED' })
+  await assert.rejects(inspectSyntheticBatch(request), /invalid review result/)
 })
 
 test('batch client rejects invalid intake and never sends data', async t => {
