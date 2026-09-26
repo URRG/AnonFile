@@ -16,19 +16,35 @@ npm ci --prefix apps\web --ignore-scripts
 
 The launcher generates a fresh in-memory processor token, starts the API and
 UI on loopback, and prints the URL and token. Paste the token into the UI,
-select `demo-data/synthetic-airline-passengers.csv` (or another entirely
-synthetic UTF-8 file), acknowledge the synthetic-data restriction, and run
-the inspection. The result shows rule findings, applied operations, and a
-transformed preview. CSV and JSONL inputs appear as normalized JSON records
-in the preview, not in their original file layout. A field such as
-`booking_reference` may remain unchanged;
-that visibly demonstrates why the preview is not certified anonymous.
+choose **Use sample batch**, acknowledge that the data is fictional, and click
+**Analyze batch**. The sample has a fictional email thread, a CSV passenger
+list with names, email addresses, fictional passport numbers and birth dates,
+and a JSON support record. The next screen lists detected values and
+proposed replacements. You can add a missed exact person name or change a
+person alias (the alias must have the same character length); then review the
+candidate. The final screen has document comparisons, explicit mail-header
+relationships, and a verification scorecard. It deliberately has no export.
+
+You may instead select two or three synthetic TXT, CSV, JSON, JSONL, or
+text-based PDF files (100 KB each, 300 KB combined). A PDF contributes
+extracted text to the side-by-side review; **the PDF itself is not modified**.
+Scanned PDFs and images are rejected because this demo has no OCR or visual
+residual check. PDF extraction may lose layout, embedded images, annotations,
+and metadata. No score estimates detection recall, precision, anonymity, or
+sale readiness. The bounded detector can miss prose names and other sensitive
+information. CSV review is limited to one-line cells, and ambiguous or
+unsupported structured values are rejected. Replacements are proposals for
+human review only.
+
+The previous one-file inspector and metadata-only control-plane workbench are
+still available at `http://127.0.0.1:5173/?mode=advanced` for development.
+That path has different contracts; neither path authorizes a release.
 
 If Python dependencies are already installed in another environment, pass
 `-PythonPath C:\path\to\python.exe` to the launcher. Press Enter in the
 launcher terminal to stop both services. Its `.demo-run` logs are local and
 ignored by Git. The API's ordinary development workflows remain separate;
-production mode never exposes the demo route, even if the demo opt-in is set.
+production mode never exposes either demo route, even if the demo opt-in is set.
 
 The runnable demo is one milestone in the wider
 [product-readiness plan](demo-to-product-roadmap.md), not a production setup.

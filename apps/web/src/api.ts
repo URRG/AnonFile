@@ -103,6 +103,148 @@ export async function inspectSyntheticDemo(request: { apiBase: string; token: st
     request.signal?.removeEventListener('abort', cancel)
   }
 }
+
+// A separate, opt-in batch preview. It does not use the release/control-plane
+// endpoints and cannot return an exportable artifact or anonymity verdict.
+export type BatchUpload = { id: string; name: string; contentBase64: string; size: number }
+export type BatchMatch = { start: number; end: number; source: string; entityId: string; kind: string; replacement: string }
+export type BatchDocument = { id: string; name: string; kind: 'text' | 'csv' | 'json' | 'jsonl' | 'pdf';
+  text: string; candidateText: string; sizeBytes: number; previewFidelity: 'source_text' | 'extracted_text_only';
+  structureCheck: 'pass' | 'fail' | 'not_applicable'; matches: BatchMatch[] }
+export type BatchEntity = { id: string; kind: string; source: string; alias: string; mentions: number }
+export type BatchRelationship = { sourceId: string; targetId: string; type: 'EMAILED'; documentId: string; basis: string }
+export type BatchCheck = { name: string; status: 'PASS' | 'FAIL' | 'REVIEW' | 'NOT_TESTED' | 'NOT_APPLICABLE' | 'NOT_MEASURED'; detail: string }
+export type BatchInspection = { posture: 'SYNTHETIC_DEMO_ONLY'; releaseAuthorized: false; exportAvailable: false;
+  documents: BatchDocument[]; entities: BatchEntity[]; relationships: BatchRelationship[];
+  summary: { files: number; detectedMentions: number; transformedMentions: number; linkedEntities: number; explicitRelationships: number };
+  verification: { status: 'REVIEW_REQUIRED'; knownRuleResidualMatches: number; structureFailures: number; checks: BatchCheck[] };
+  limitations: string[] }
+
+const BATCH_EXTENSIONS = new Set(['txt', 'csv', 'json', 'jsonl', 'pdf'])
+const BATCH_KIND = new Set(['text', 'csv', 'json', 'jsonl', 'pdf'])
+const BATCH_CHECK = new Set(['PASS', 'FAIL', 'REVIEW', 'NOT_TESTED', 'NOT_APPLICABLE', 'NOT_MEASURED'])
+const safeCount = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0
+const safeText = (value: unknown, max = 120_000): value is string => typeof value === 'string' && value.length <= max
+
+export async function readBatchFile(file: File, id: string): Promise<BatchUpload> {
+  const extension = file.name.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1]
+  if (!extension || !BATCH_EXTENSIONS.has(extension)) throw new DemoInspectionFailure('Choose TXT, CSV, JSON, JSONL, or a text-based PDF. Images and scanned PDFs need OCR, which this demo does not yet provide.')
+  if (!/^[A-Za-z0-9_-]{1,48}$/.test(id) || !file.name || file.name.length > 160 || /[/\\]/.test(file.name)) throw new DemoInspectionFailure('Invalid demo filename.')
+  if (file.size < 1 || file.size > DEMO_MAX_BYTES) throw new DemoInspectionFailure('Each synthetic file must be between 1 byte and 100 KB.')
+  const bytes = new Uint8Array(await file.arrayBuffer())
+  let binary = ''
+  for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192))
+  return { id, name: file.name, contentBase64: btoa(binary), size: bytes.length }
+}
+
+function batchInvalid(): never { throw new DemoInspectionFailure('The batch service returned an invalid review result. Nothing was approved or exported.') }
+
+function batchInspection(value: unknown, expectedIds: string[]): BatchInspection {
+  if (!object(value) || value.posture !== 'SYNTHETIC_DEMO_ONLY' || value.release_authorized !== false || value.export_available !== false ||
+      !Array.isArray(value.documents) || value.documents.length !== expectedIds.length || !Array.isArray(value.entities) ||
+      !Array.isArray(value.relationships) || !object(value.summary) || !object(value.verification) || !Array.isArray(value.limitations)) batchInvalid()
+  const entities: BatchEntity[] = value.entities.map(raw => {
+    if (!object(raw) || typeof raw.id !== 'string' || !/^E\d{1,4}$/.test(raw.id) || !safeText(raw.kind, 64) || !safeText(raw.source, 120) || !safeText(raw.alias, 120) || !safeCount(raw.mentions)) batchInvalid()
+    return { id: raw.id, kind: raw.kind, source: raw.source, alias: raw.alias, mentions: raw.mentions as number }
+  })
+  const entityIds = new Set(entities.map(item => item.id))
+  const entitiesById = new Map(entities.map(item => [item.id, item]))
+  if (entityIds.size !== entities.length) batchInvalid()
+  const documents: BatchDocument[] = value.documents.map((raw, index) => {
+    if (!object(raw) || raw.id !== expectedIds[index] || !safeText(raw.name, 160) || !BATCH_KIND.has(String(raw.kind)) ||
+        !safeText(raw.text) || !safeText(raw.candidate_text) || !safeCount(raw.size_bytes) || (raw.size_bytes as number) > DEMO_MAX_BYTES ||
+        !['source_text', 'extracted_text_only'].includes(String(raw.preview_fidelity)) ||
+        !['pass', 'fail', 'not_applicable'].includes(String(raw.structure_check)) || !Array.isArray(raw.matches)) batchInvalid()
+    const matches: BatchMatch[] = raw.matches.map(match => {
+      if (!object(match) || !safeCount(match.start) || !safeCount(match.end) || (match.end as number) <= (match.start as number) ||
+          (match.end as number) > (raw.text as string).length || !safeText(match.source, 100_000) ||
+          (raw.text as string).slice(match.start as number, match.end as number) !== match.source ||
+          !entityIds.has(String(match.entity_id)) || !safeText(match.kind, 64) || !safeText(match.replacement, 120)) batchInvalid()
+      return { start: match.start as number, end: match.end as number, source: match.source, entityId: match.entity_id as string,
+        kind: match.kind, replacement: match.replacement }
+    })
+    for (let i = 1; i < matches.length; i++) if (matches[i].start < matches[i - 1].end) batchInvalid()
+    const rebuilt: string[] = []
+    let offset = 0
+    for (const match of matches) {
+      const entity = entitiesById.get(match.entityId)
+      if (!entity || entity.kind !== match.kind || entity.alias !== match.replacement) batchInvalid()
+      rebuilt.push((raw.text as string).slice(offset, match.start), match.replacement)
+      offset = match.end
+    }
+    rebuilt.push((raw.text as string).slice(offset))
+    if (rebuilt.join('') !== raw.candidate_text) batchInvalid()
+    return { id: raw.id as string, name: raw.name as string, kind: raw.kind as BatchDocument['kind'], text: raw.text as string,
+      candidateText: raw.candidate_text as string, sizeBytes: raw.size_bytes as number,
+      previewFidelity: raw.preview_fidelity as BatchDocument['previewFidelity'], structureCheck: raw.structure_check as BatchDocument['structureCheck'], matches }
+  })
+  const relationships: BatchRelationship[] = value.relationships.map(raw => {
+    if (!object(raw) || !entityIds.has(String(raw.source_id)) || !entityIds.has(String(raw.target_id)) || raw.type !== 'EMAILED' ||
+        raw.source_id === raw.target_id || entitiesById.get(String(raw.source_id))?.kind !== 'PERSON_NAME' ||
+        entitiesById.get(String(raw.target_id))?.kind !== 'PERSON_NAME' ||
+        !expectedIds.includes(String(raw.document_id)) || raw.basis !== 'explicit From/To or Cc header') batchInvalid()
+    return { sourceId: raw.source_id as string, targetId: raw.target_id as string, type: 'EMAILED', documentId: raw.document_id as string, basis: raw.basis as string }
+  })
+  const summary = value.summary
+  if (summary.files !== documents.length || !safeCount(summary.detected_mentions) || !safeCount(summary.transformed_mentions) ||
+      !safeCount(summary.linked_entities) || !safeCount(summary.explicit_relationships) ||
+      summary.detected_mentions !== documents.reduce((total, doc) => total + doc.matches.length, 0) ||
+      summary.transformed_mentions !== summary.detected_mentions || summary.explicit_relationships !== relationships.length ||
+      summary.linked_entities !== entities.filter(item => item.mentions > 0).length ||
+      entities.some(entity => entity.mentions !== documents.reduce((total, doc) => total + doc.matches.filter(match => match.entityId === entity.id).length, 0))) batchInvalid()
+  const verification = value.verification
+  if (verification.status !== 'REVIEW_REQUIRED' || !safeCount(verification.known_rule_residual_matches) || !safeCount(verification.structure_failures) ||
+      !Array.isArray(verification.checks) || verification.checks.length < 3 || verification.checks.length > 10) batchInvalid()
+  const checks: BatchCheck[] = verification.checks.map(raw => {
+    if (!object(raw) || !safeText(raw.name, 100) || !BATCH_CHECK.has(String(raw.status)) || !safeText(raw.detail, 600)) batchInvalid()
+    return { name: raw.name, status: raw.status as BatchCheck['status'], detail: raw.detail }
+  })
+  if (!value.limitations.every(item => safeText(item, 600))) batchInvalid()
+  return { posture: 'SYNTHETIC_DEMO_ONLY', releaseAuthorized: false, exportAvailable: false, documents, entities, relationships,
+    summary: { files: summary.files as number, detectedMentions: summary.detected_mentions as number, transformedMentions: summary.transformed_mentions as number,
+      linkedEntities: summary.linked_entities as number, explicitRelationships: summary.explicit_relationships as number },
+    verification: { status: 'REVIEW_REQUIRED', knownRuleResidualMatches: verification.known_rule_residual_matches as number,
+      structureFailures: verification.structure_failures as number, checks }, limitations: value.limitations as string[] }
+}
+
+export async function inspectSyntheticBatch(request: { apiBase: string; token: string; files: BatchUpload[]; manualNames: string[];
+  aliasOverrides: Record<string, string>; signal?: AbortSignal }): Promise<BatchInspection> {
+  if (!request.token.trim() || request.files.length < 2 || request.files.length > 3 ||
+      request.files.some(file => file.size < 1 || file.size > DEMO_MAX_BYTES) || request.files.reduce((sum, file) => sum + file.size, 0) > 300_000) {
+    throw new DemoInspectionFailure('A processor token and two or three bounded synthetic files are required.')
+  }
+  const controller = new AbortController()
+  let timedOut = false
+  const cancel = () => controller.abort()
+  request.signal?.addEventListener('abort', cancel, { once: true })
+  if (request.signal?.aborted) cancel()
+  const timer = setTimeout(() => { timedOut = true; controller.abort() }, REQUEST_TIMEOUT_MS)
+  try {
+    return await abortable(async () => {
+      let response: Response
+      try {
+        response = await fetch(request.apiBase.replace(/\/$/, '') + '/demo/batch/inspect', {
+          method: 'POST', credentials: 'omit', redirect: 'error', cache: 'no-store', signal: controller.signal,
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${request.token.trim()}` },
+          body: JSON.stringify({ synthetic_only: true, files: request.files.map(file => ({ id: file.id, name: file.name, content_base64: file.contentBase64 })),
+            manual_names: request.manualNames, alias_overrides: request.aliasOverrides }),
+        })
+      } catch { throw new DemoInspectionFailure('Cannot reach the synthetic batch service. No result was produced.') }
+      if (!response.ok) {
+        const messages: Record<number, string> = { 401: 'Authentication required.', 403: 'Synthetic batch mode is not enabled or permitted.',
+          413: 'The batch exceeds the service limit.', 422: 'A file or correction is invalid. Check formats, PDF text extraction, and alias length.', 503: 'Synthetic batch mode is unavailable.' }
+        throw new DemoInspectionFailure(messages[response.status] || 'The synthetic batch request failed.')
+      }
+      try { return batchInspection(await response.json(), request.files.map(file => file.id)) } catch (cause) {
+        if (cause instanceof DemoInspectionFailure) throw cause
+        return batchInvalid()
+      }
+    }, controller.signal)
+  } catch (cause) {
+    if (controller.signal.aborted) throw new DemoInspectionFailure(timedOut ? 'Batch inspection timed out after 30 seconds.' : 'Batch inspection was cancelled.')
+    throw cause
+  } finally { clearTimeout(timer); request.signal?.removeEventListener('abort', cancel) }
+}
 export type ReleaseView = {
   id: string; dataset_id: string; status: string;
   eligibility: 'BLOCKED' | 'REVIEW_REQUIRED'; output: null;

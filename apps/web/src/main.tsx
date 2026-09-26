@@ -14,6 +14,7 @@ import {
   type SourceFormat,
 } from './api'
 import './styles.css'
+import BatchDemo from './batch-demo'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 const MODE: Mode = 'external_anonymized'
@@ -310,4 +311,4 @@ function App() {
   </main>
 }
 
-createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>)
+createRoot(document.getElementById('root')!).render(<React.StrictMode>{new URLSearchParams(window.location.search).get('mode') === 'advanced' ? <App /> : <BatchDemo />}</React.StrictMode>)

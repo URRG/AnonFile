@@ -68,6 +68,16 @@ try {
         throw 'The synthetic demo inspection self-check failed.'
     }
 
+    $demoFiles = @(
+        @{ id = 'mail'; name = 'mail.txt'; content_base64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("From: Riya <riya@example.test>`nTo: Sita <sita@example.test>")) },
+        @{ id = 'record'; name = 'record.json'; content_base64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('{"full_name":"Riya"}')) }
+    )
+    $batchBody = @{ files = $demoFiles; synthetic_only = $true } | ConvertTo-Json -Depth 5 -Compress
+    $batch = Invoke-RestMethod -Uri "http://127.0.0.1:$ApiPort/demo/batch/inspect" -Method Post -Headers @{ Authorization = "Bearer $token" } -ContentType 'application/json' -Body $batchBody -TimeoutSec 5
+    if ($batch.posture -ne 'SYNTHETIC_DEMO_ONLY' -or $batch.release_authorized -ne $false -or $batch.summary.files -ne 2 -or $batch.summary.explicit_relationships -ne 1) {
+        throw 'The synthetic batch demo self-check failed.'
+    }
+
     Write-Host "Synthetic demo: http://127.0.0.1:$WebPort/"
     Write-Host "Processor token (paste into the UI): $token"
     Write-Host 'Use only synthetic files. No production release or anonymity guarantee is available.'
