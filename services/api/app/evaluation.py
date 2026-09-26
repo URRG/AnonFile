@@ -235,7 +235,7 @@ def evaluate(gold: tuple[GoldDocument, ...], predictions: dict[str, tuple[Annota
         "limitations": [
             "Measures annotation agreement, not anonymity, output leakage, or buyer acceptance.",
             "Unannotated sensitive entities are invisible to these measurements.",
-            "All supplied records are evaluated; split labels do not imply a held-out study.",
+            "Split labels alone do not establish a held-out study or independent annotation.",
             "No confidence intervals or generalization claims are made.",
             "Overlap measurements are lenient and cannot substitute for exact detection coverage.",
             "Counts and content fingerprints are internal evidence, not approved public disclosures.",

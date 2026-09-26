@@ -17,6 +17,7 @@ from pathlib import Path
 
 from app.evaluation import (ENTITY_TYPES, VERSION, EvaluationError, baseline_predictions,
                             canonical_hash, evaluate, parse_gold, parse_predictions, read_jsonl)
+from app.holdout import select_holdout
 
 
 class _Parser(argparse.ArgumentParser):
@@ -30,10 +31,15 @@ def run(args: argparse.Namespace) -> dict:
         sources = [Path(args.gold).resolve()]
         if args.predictions:
             sources.append(Path(args.predictions).resolve())
+        if args.holdout_lock:
+            sources.append(Path(args.holdout_lock).resolve())
         if target in sources:
             raise EvaluationError("Output must not replace an input file.")
     gold_rows, gold_hash = read_jsonl(args.gold)
     gold = parse_gold(gold_rows)
+    holdout = None
+    if args.holdout_lock:
+        gold, holdout = select_holdout(gold, gold_hash, args.holdout_lock)
     source = "supplied-predictions"
     detector_hash = None
     if args.baseline:
@@ -50,13 +56,16 @@ def run(args: argparse.Namespace) -> dict:
     report = evaluate(gold, predictions)
     configuration = {"evaluator": VERSION, "prediction_source": source,
                      "detector_source_sha256": detector_hash,
-                     "entity_types": sorted(ENTITY_TYPES), "split_selection": "ALL_RECORDS",
+                     "entity_types": sorted(ENTITY_TYPES), "split_selection": "holdout" if holdout else "ALL_RECORDS",
                      "matching": "maximum-cardinality-one-to-one-same-type",
                      "evaluator_source_sha256": hashlib.sha256(Path(__file__).with_name("evaluation.py").read_bytes()).hexdigest(),
                      "cli_source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
     report["manifest"] = {"gold_sha256": gold_hash, "predictions_sha256": prediction_hash,
                           "configuration": configuration,
                           "configuration_sha256": canonical_hash(configuration)}
+    if holdout:
+        report["manifest"]["holdout"] = holdout
+        report["limitations"].append("Checksum-pinned selection does not verify external annotation independence, representativeness, training-data separation, or privacy of outputs.")
     return report
 
 
@@ -80,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--predictions")
     source.add_argument("--baseline", choices=["rules-v1"])
+    parser.add_argument("--holdout-lock", help="Pin the full gold file and score only its holdout split; not independence attestation.")
     parser.add_argument("--output", help="Write internal aggregate JSON atomically; defaults to stdout.")
     args = parser.parse_args(argv)
     try:
