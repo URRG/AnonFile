@@ -155,7 +155,7 @@ class SourceDatasetSnapshotFence:
         if self.generation == 0:
             if self.state != "ACTIVE" or self.event_ref is not None:
                 _fail()
-        elif self.state == "ACTIVE" or self.event_ref is None:
+        elif self.generation != 1 or self.state == "ACTIVE" or self.event_ref is None:
             _fail()
         if self.event_ref is not None:
             _text(self.event_ref, _EVENT)

@@ -4,6 +4,8 @@ M48b1 stores an immutable, tenant-bound identity for an already-described
 source dataset: opaque source reference, content/provenance/input-schema
 digests, positive `source_byte_count`, expiry, and a canonical domain-separated
 digest.
+Durable expiry and fence timestamps are whole-second UTC instants, so raw SQL
+cannot create rows the authority would reject as undecodable.
 The source reference is globally unique and deliberately uses the M48a
 `supplierdatasetref:v1` form. Generation zero is ACTIVE; only one append-only
 terminal QUARANTINED, REVOKED, or EXPIRED fence can follow it.

@@ -177,6 +177,8 @@ def test_snapshot_values_fail_closed(changes: dict[str, object]):
 def test_malformed_fence_state_has_fixed_error():
     with pytest.raises(PostgresSourceSnapshotError):
         SourceDatasetSnapshotFence(snapshot(), 1, object(), opaque("sourcesnapshotfence:v1:"), NOW)
+    with pytest.raises(PostgresSourceSnapshotError):
+        SourceDatasetSnapshotFence(snapshot(), 2, "REVOKED", opaque("sourcesnapshotfence:v1:"), NOW)
 
 
 @pytest.fixture
@@ -212,6 +214,15 @@ def test_postgres_orphan_global_collision_replay_terminal_and_immutable(postgres
         service.create(snapshot(source_dataset_ref=item.source_dataset_ref, expires_at=item.expires_at),
                        application_tenant=APP, expected_tenant_generation=0)
     with psycopg.connect(dsn, autocommit=True) as connection:
+        with pytest.raises(psycopg.errors.CheckViolation):
+            connection.execute(
+                "INSERT INTO anonflow_source_dataset_snapshots "
+                "(tenant_ref,source_dataset_ref,source_content_digest,provenance_digest,"
+                "input_schema_digest,source_byte_count,expires_at,snapshot_digest) "
+                "VALUES (%s,%s,%s,%s,%s,1,%s,%s)",
+                (TENANT, opaque("supplierdatasetref:v1:"), "sha256:" + "4" * 64,
+                 "sha256:" + "5" * 64, "sha256:" + "6" * 64,
+                 now + timedelta(minutes=2, microseconds=1), "sha256:" + "7" * 64))
         with pytest.raises(psycopg.errors.ForeignKeyViolation):
             connection.execute(
                 "INSERT INTO anonflow_source_dataset_snapshots "
@@ -225,6 +236,12 @@ def test_postgres_orphan_global_collision_replay_terminal_and_immutable(postgres
             connection.execute("UPDATE anonflow_source_dataset_snapshots SET source_byte_count=2 "
                                "WHERE tenant_ref=%s AND source_dataset_ref=%s",
                                (item.tenant_ref, item.source_dataset_ref))
+        with pytest.raises(psycopg.errors.RaiseException):
+            connection.execute(
+                "INSERT INTO anonflow_source_dataset_snapshot_fences "
+                "(tenant_ref,source_dataset_ref,generation,state,event_ref) "
+                "VALUES (%s,%s,1,'EXPIRED',%s)",
+                (item.tenant_ref, item.source_dataset_ref, opaque("sourcesnapshotfence:v1:")))
     with pytest.raises(PostgresSourceSnapshotError):
         service.terminal(snapshot=item, expected_generation=0, state="EXPIRED",
                          event_ref=opaque("sourcesnapshotfence:v1:"))
@@ -240,3 +257,31 @@ def test_postgres_orphan_global_collision_replay_terminal_and_immutable(postgres
             connection.execute("UPDATE anonflow_source_dataset_snapshot_fences SET state='ACTIVE' "
                                "WHERE tenant_ref=%s AND source_dataset_ref=%s AND generation=%s",
                                (item.tenant_ref, item.source_dataset_ref, result.generation))
+        with pytest.raises(psycopg.errors.RaiseException):
+            connection.execute(
+                "INSERT INTO anonflow_source_dataset_snapshot_fences "
+                "(tenant_ref,source_dataset_ref,generation,state,event_ref) "
+                "VALUES (%s,%s,1,'QUARANTINED',%s)",
+                (item.tenant_ref, item.source_dataset_ref, opaque("sourcesnapshotfence:v1:")))
+        with pytest.raises(psycopg.errors.CheckViolation):
+            connection.execute(
+                "INSERT INTO anonflow_source_dataset_snapshot_fences "
+                "(tenant_ref,source_dataset_ref,generation,state,event_ref) "
+                "VALUES (%s,%s,2,'REVOKED',%s)",
+                (item.tenant_ref, item.source_dataset_ref, opaque("sourcesnapshotfence:v1:")))
+
+
+def test_postgres_deferred_active_fence_invariant_rejects_raw_snapshot(postgres_snapshots):
+    dsn, psycopg = postgres_snapshots
+    item = snapshot(expires_at=datetime.now(UTC).replace(microsecond=0) + timedelta(minutes=2))
+    with psycopg.connect(dsn) as connection:
+        connection.execute(
+            "INSERT INTO anonflow_source_dataset_snapshots "
+            "(tenant_ref,source_dataset_ref,source_content_digest,provenance_digest,"
+            "input_schema_digest,source_byte_count,expires_at,snapshot_digest) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            (item.tenant_ref, item.source_dataset_ref, item.source_content_digest,
+             item.provenance_digest, item.input_schema_digest, item.source_byte_count,
+             item.expires_at, item.digest))
+        with pytest.raises(psycopg.errors.RaiseException):
+            connection.commit()
