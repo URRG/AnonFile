@@ -21,7 +21,12 @@ _ACTOR = re.compile(r"actorref:v1:" + _OPAQUE + r"\Z")
 _KEY = re.compile(r"signingkeyref:v1:" + _OPAQUE + r"\Z")
 _PUBLIC_KEY = re.compile(r"ed25519pub:v1:" + _OPAQUE + r"\Z")
 _EVENT = re.compile(r"signingkeyfence:v1:" + _OPAQUE + r"\Z")
-_ROLES = frozenset({"PRIVACY_REVIEWER", "RELEASE_AUTHORIZER", "SERVICE_ISSUER"})
+_ROLES = frozenset({
+    "PRIVACY_REVIEWER",
+    "RELEASE_AUTHORIZER",
+    "SERVICE_ISSUER",
+    "SUPPLIER_RIGHTS_ATTESTER",
+})
 
 
 class PostgresTrustedSigningKeyError(RuntimeError):

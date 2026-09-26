@@ -132,7 +132,8 @@ def test_creation_is_exact_idempotent_and_rejects_cross_tenant_actor_role_and_pu
             service.create(key(key_ref=item.key_ref, **changed))
 
 
-@pytest.mark.parametrize("role", ("PRIVACY_REVIEWER", "RELEASE_AUTHORIZER", "SERVICE_ISSUER"))
+@pytest.mark.parametrize("role", ("PRIVACY_REVIEWER", "RELEASE_AUTHORIZER", "SERVICE_ISSUER",
+                                  "SUPPLIER_RIGHTS_ATTESTER"))
 def test_exact_roles_are_accepted(role):
     assert key(role=role).role == role
 

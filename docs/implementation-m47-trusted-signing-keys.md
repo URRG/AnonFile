@@ -2,9 +2,14 @@
 
 M47 is a PostgreSQL-native registry of immutable tenant-bound Ed25519 **public
 key metadata**.  It records opaque tenant, actor and key references; exactly
-one of `PRIVACY_REVIEWER`, `RELEASE_AUTHORIZER`, or `SERVICE_ISSUER`; and a
+one of `PRIVACY_REVIEWER`, `RELEASE_AUTHORIZER`, `SERVICE_ISSUER`, or
+`SUPPLIER_RIGHTS_ATTESTER`; and a
 not-before/expiry window.  It has no private keys, signatures, approvals,
 issuer, route, or release capability.
+
+The supplier role is added by M48a migration 015. Its presence identifies a
+key's intended use, not an authenticated supplier organization or a verified
+contract. No route currently lets a supplier register its own key.
 
 Each registration creates generation-zero `ACTIVE`. A revocation appends the
 only later state, terminal `REVOKED`; rows and fences cannot be changed or
