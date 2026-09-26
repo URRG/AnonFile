@@ -211,11 +211,25 @@ class DemoBatchFile(StrictModel):
     name: str = Field(min_length=1, max_length=160)
     content_base64: str = Field(min_length=1, max_length=140_000)
 
+class DemoBatchReferenceSpan(StrictModel):
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+    entity_type: str = Field(min_length=1, max_length=64)
+
+class DemoBatchReferenceFile(StrictModel):
+    id: str = Field(min_length=1, max_length=48)
+    annotations: list[DemoBatchReferenceSpan] = Field(max_length=200)
+
+class DemoBatchReferenceAnnotations(StrictModel):
+    basis: Literal["REVIEWER_ATTESTED_EXHAUSTIVE", "CURATED_SYNTHETIC_SAMPLE"]
+    documents: list[DemoBatchReferenceFile] = Field(min_length=2, max_length=3)
+
 class DemoBatchCreate(StrictModel):
     files: list[DemoBatchFile] = Field(min_length=2, max_length=3)
     synthetic_only: Literal[True]
     manual_names: list[str] = Field(default_factory=list, max_length=20)
     alias_overrides: dict[str, str] = Field(default_factory=dict)
+    reference_annotations: DemoBatchReferenceAnnotations | None = None
 
 class DatasetCreate(DatasetMetadata):
     content: str | None = Field(default=None, min_length=1, max_length=MAX_PAYLOAD_BYTES)

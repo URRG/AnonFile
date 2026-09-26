@@ -14,6 +14,15 @@ unchanged. A local HTTP/UI integration test and full API/web suites are the
 exit gate; a rendered-browser walkthrough is desirable when a browser is
 available.
 
+The newer batch workbench extends this to two or three synthetic files,
+including selectable-text PDFs as extracted text only. It shows consistent
+aliases, explicit mail-header relationships, and a non-exportable side-by-side
+candidate. A complete synthetic reference-label manifest can now produce
+exact-span agreement counts; the built-in example has fixed labels. Those
+numbers describe only the labelled case and include manual corrections. They
+are not an independent holdout, privacy qualification, or a general model
+quality claim.
+
 ## Gaps after the synthetic demo
 
 1. **Detector quality and coverage.** Collect representative, legally usable

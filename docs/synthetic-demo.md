@@ -24,17 +24,45 @@ proposed replacements. You can add a missed exact person name or change a
 person alias (the alias must have the same character length); then review the
 candidate. The final screen has document comparisons, explicit mail-header
 relationships, and a verification scorecard. It deliberately has no export.
+The built-in batch also carries a fixed set of demo-authored reference spans.
+Its scorecard shows exact matched, false-positive, and missed spans for this
+fictional example. The backend accepts that label basis only for the exact
+built-in files and labels; changing the sample invalidates it.
 
 You may instead select two or three synthetic TXT, CSV, JSON, JSONL, or
 text-based PDF files (100 KB each, 300 KB combined). A PDF contributes
 extracted text to the side-by-side review; **the PDF itself is not modified**.
 Scanned PDFs and images are rejected because this demo has no OCR or visual
 residual check. PDF extraction may lose layout, embedded images, annotations,
-and metadata. No score estimates detection recall, precision, anonymity, or
-sale readiness. The bounded detector can miss prose names and other sensitive
+and metadata. Without complete reference labels, precision and recall remain
+**not measured**. The bounded detector can miss prose names and other sensitive
 information. CSV review is limited to one-line cells, and ambiguous or
 unsupported structured values are rejected. Replacements are proposals for
 human review only.
+
+For a different synthetic batch, the Detection review page can attach a
+separate reference-label JSON file. It is not counted as one of the source
+documents. The manifest must list every staged filename exactly once, even
+when a document has no labels. The reviewer must separately confirm the
+completeness checkbox before the score is calculated. For example, with two
+files named `a.txt` and
+`b.txt`:
+
+```json
+{"schema_version":"batch-reference-v1","documents":[
+  {"name":"a.txt","annotations":[{"start":0,"end":4,"entity_type":"PERSON_NAME"}]},
+  {"name":"b.txt","annotations":[]}
+]}
+```
+
+`start` and `end` are half-open Unicode code-point offsets in the original
+text. For a PDF they refer to the extracted text displayed by the workbench,
+not page coordinates. The reviewer must establish that the labels cover all
+relevant spans; the application cannot verify that assertion. The resulting
+precision/recall measure agreement of the **reviewed candidate** (including
+manual corrections) with the supplied labels. They are neither an independent
+holdout benchmark nor a test of residual disclosure, re-identification risk,
+utility, PDF layout, or release eligibility.
 
 The previous one-file inspector and metadata-only control-plane workbench are
 still available at `http://127.0.0.1:5173/?mode=advanced` for development.

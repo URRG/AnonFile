@@ -130,3 +130,82 @@ def test_batch_pdf_is_text_only_not_rewritten(demo_client):
 
 def test_batch_route_is_not_registered_without_demo_opt_in(client):
     assert client.post("/demo/batch/inspect", headers=auth(), json=payload()).status_code == 404
+
+
+def test_reference_labels_measure_exact_reviewed_spans_without_approval(demo_client):
+    request = payload()
+    email_text = "From: Riya <riya@example.test>\nTo: Sita <sita@example.test>\n\nHi Sita, Riya will call you."
+    record_text = '[{"full_name":"Riya","email":"riya@example.test"},{"full_name":"Sita"}]'
+    def label(text, value, kind):
+        start = text.index(value)
+        return {"start": start, "end": start + len(value), "entity_type": kind}
+    request["reference_annotations"] = {"basis": "REVIEWER_ATTESTED_EXHAUSTIVE", "documents": [
+        {"id": "email", "annotations": [label(email_text, "Riya", "PERSON_NAME"),
+                                        label(email_text, "riya@example.test", "EMAIL"),
+                                        label(email_text, "Sita", "PERSON_NAME"),
+                                        label(email_text, "sita@example.test", "EMAIL"),
+                                        label(email_text, "Riya will", "OTHER_SENSITIVE")]},
+        {"id": "record", "annotations": [label(record_text, "Riya", "PERSON_NAME"),
+                                         label(record_text, "riya@example.test", "EMAIL"),
+                                         label(record_text, "Sita", "PERSON_NAME")]},
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    score = body["verification"]["annotation_score"]
+    assert score["basis"] == "REVIEWER_ATTESTED_EXHAUSTIVE"
+    assert score["status"] == "OBSERVATIONAL_ONLY"
+    assert score["labelled_documents"] == 2 and score["gold_annotations"] == 8
+    assert score["exact"]["false_negatives"] >= 1
+    assert score["per_type"]["OTHER_SENSITIVE"]["false_negatives"] == 1
+    assert body["release_authorized"] is False and body["export_available"] is False
+    assert next(check for check in body["verification"]["checks"] if check["name"] == "Reference-label agreement")["status"] == "REVIEW"
+
+
+@pytest.mark.parametrize("change", [
+    lambda manifest: manifest.update(basis="INDEPENDENTLY_VERIFIED"),
+    lambda manifest: manifest["documents"].pop(),
+    lambda manifest: manifest["documents"][1].update(id="email"),
+    lambda manifest: manifest["documents"][0]["annotations"].append({"start": 0, "end": 1000, "entity_type": "EMAIL"}),
+    lambda manifest: manifest["documents"][0]["annotations"].append({"start": 0, "end": 4, "entity_type": "UNKNOWN"}),
+])
+def test_reference_labels_fail_closed_on_invalid_manifest(demo_client, change):
+    request = payload()
+    request["reference_annotations"] = {"basis": "REVIEWER_ATTESTED_EXHAUSTIVE", "documents": [
+        {"id": "email", "annotations": []}, {"id": "record", "annotations": []},
+    ]}
+    change(request["reference_annotations"])
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 422
+    assert "riya@example.test" not in response.text
+
+
+def test_curated_three_file_sample_has_scored_misses_and_cannot_be_forged(demo_client):
+    from app.demo_batch import SAMPLE_REFERENCE_VALUES
+    texts = {
+        "01-email-thread.txt": "From: Riya <riya@example.test>\nTo: Sita <sita@example.test>\nSubject: Flight change\n\nHi Sita, Riya can review the itinerary. Please call +1 415 555 0134.",
+        "02-passenger-list.csv": "full_name,email,passport_number,date_of_birth,booking_reference\nRiya,riya@example.test,DEMO123456,1990-01-01,DEMO-4821\nSita,sita@example.test,DEMO654321,1992-02-02,DEMO-4822\n",
+        "03-support-record.json": '{"client_name":"Sita","account_owner":"Riya","note":"Riya emailed Sita about DEMO-4822."}',
+    }
+    request = {"synthetic_only": True, "files": [], "reference_annotations": {
+        "basis": "CURATED_SYNTHETIC_SAMPLE", "documents": []}}
+    for index, (name, text) in enumerate(texts.items()):
+        identifier = f"sample_{index}"
+        request["files"].append(file(identifier, name, text))
+        annotations = []
+        for value, kind in SAMPLE_REFERENCE_VALUES[name]:
+            start = 0
+            while (start := text.find(value, start)) >= 0:
+                annotations.append({"start": start, "end": start + len(value), "entity_type": kind})
+                start += len(value)
+        request["reference_annotations"]["documents"].append({"id": identifier, "annotations": annotations})
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    score = response.json()["verification"]["annotation_score"]
+    assert score["basis"] == "CURATED_SYNTHETIC_SAMPLE"
+    assert score["exact"]["false_negatives"] >= 3  # booking references are not in the bounded detector
+    removed = request["reference_annotations"]["documents"][0]["annotations"].pop()
+    assert demo_client.post("/demo/batch/inspect", headers=auth(), json=request).status_code == 422
+    request["reference_annotations"]["documents"][0]["annotations"].append(removed)
+    request["files"][0] = file("sample_0", "01-email-thread.txt", texts["01-email-thread.txt"] + " extra")
+    assert demo_client.post("/demo/batch/inspect", headers=auth(), json=request).status_code == 422

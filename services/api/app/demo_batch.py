@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import binascii
 import csv
+import hashlib
 from io import BytesIO, StringIO
 import json
 import re
@@ -17,6 +18,7 @@ from pathlib import PurePath
 from typing import Any
 
 from app.contracts import PayloadError
+from app.evaluation import EvaluationError, evaluate, parse_gold, parse_predictions
 from app.processing import _field_type, detect_text
 
 MAX_FILES = 3
@@ -33,6 +35,84 @@ SAFE_NAME = re.compile(r"^[A-Za-z][A-Za-z .'-]{1,79}$")
 SAFE_ALIAS = re.compile(r"^[A-Za-z][A-Za-z '-]{1,79}$")
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,48}$")
 NAME_POOL = ("Gita", "Maya", "Mira", "Nina", "Arun", "Noah", "Asha", "Anika", "Kiran", "Leela", "Ava", "Ira", "Miriam", "Rohan", "Nora", "Elena")
+MAX_REFERENCE_LABELS_PER_FILE = 200
+SAMPLE_TEXT_DIGESTS = {
+    "01-email-thread.txt": "ef136ed6bb9c2931a07915d8ae22a487c5899cab825d211472cd63cd8f54f8ef",
+    "02-passenger-list.csv": "09887d08254054222a6549ae76cbc8ec4f5f78ef2d6c599932f24e408a5610ca",
+    "03-support-record.json": "3b937a15f585638d31e5c2d02b2b29664ece2aae592878b64997524860882e98",
+}
+SAMPLE_REFERENCE_VALUES = {
+    "01-email-thread.txt": (("Riya", "PERSON_NAME"), ("Sita", "PERSON_NAME"),
+                            ("riya@example.test", "EMAIL"), ("sita@example.test", "EMAIL"),
+                            ("+1 415 555 0134", "PHONE")),
+    "02-passenger-list.csv": (("Riya", "PERSON_NAME"), ("Sita", "PERSON_NAME"),
+                              ("riya@example.test", "EMAIL"), ("sita@example.test", "EMAIL"),
+                              ("DEMO123456", "GOVERNMENT_ID"), ("DEMO654321", "GOVERNMENT_ID"),
+                              ("1990-01-01", "DATE_OF_BIRTH"), ("1992-02-02", "DATE_OF_BIRTH"),
+                              ("DEMO-4821", "OTHER_SENSITIVE"), ("DEMO-4822", "OTHER_SENSITIVE")),
+    "03-support-record.json": (("Riya", "PERSON_NAME"), ("Sita", "PERSON_NAME"),
+                               ("DEMO-4822", "OTHER_SENSITIVE")),
+}
+
+
+def _verify_curated_sample(labelled: list[dict[str, Any]], documents: list[dict[str, Any]]) -> None:
+    if {doc["name"]: hashlib.sha256(doc["text"].encode("utf-8")).hexdigest() for doc in documents} != SAMPLE_TEXT_DIGESTS:
+        raise PayloadError("Curated sample labels require the exact built-in synthetic files.")
+    by_id = {doc["id"]: doc for doc in documents}
+    for item in labelled:
+        doc = by_id[item["id"]]
+        expected = []
+        for value, kind in SAMPLE_REFERENCE_VALUES[doc["name"]]:
+            start = 0
+            while (start := doc["text"].find(value, start)) >= 0:
+                expected.append((start, start + len(value), kind))
+                start += len(value)
+        supplied = [(span["start"], span["end"], span["entity_type"]) for span in item["annotations"]]
+        if sorted(supplied) != sorted(expected):
+            raise PayloadError("Curated sample labels do not match the built-in reference.")
+
+
+def _score_reference_annotations(value: object, documents: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Score reviewed spans only against explicitly supplied synthetic labels.
+
+    The caller's exhaustiveness assertion is not verified. This measures
+    agreement with those labels, not independent detector quality or anonymity.
+    """
+    if value is None:
+        return None
+    if (not isinstance(value, dict) or set(value) != {"basis", "documents"}
+            or value["basis"] not in {"REVIEWER_ATTESTED_EXHAUSTIVE", "CURATED_SYNTHETIC_SAMPLE"}):
+        raise PayloadError("Invalid synthetic reference annotations.")
+    labelled = value["documents"]
+    if not isinstance(labelled, list) or len(labelled) != len(documents):
+        raise PayloadError("Reference annotations must cover every demo file.")
+    by_id = {document["id"]: document for document in documents}
+    if any(not isinstance(item, dict) or set(item) != {"id", "annotations"}
+           or not isinstance(item["id"], str) or item["id"] not in by_id
+           or not isinstance(item["annotations"], list)
+           or len(item["annotations"]) > MAX_REFERENCE_LABELS_PER_FILE for item in labelled):
+        raise PayloadError("Invalid synthetic reference annotations.")
+    if len({item["id"] for item in labelled}) != len(documents):
+        raise PayloadError("Reference annotations must cover every demo file exactly once.")
+    try:
+        gold = parse_gold([{"id": item["id"], "text": by_id[item["id"]]["text"],
+                            "annotations": item["annotations"]} for item in labelled])
+        if value["basis"] == "CURATED_SYNTHETIC_SAMPLE":
+            _verify_curated_sample(labelled, documents)
+        predictions = parse_predictions([{"id": document["id"], "annotations": [
+            {"start": match["start"], "end": match["end"], "entity_type": match["kind"]}
+            for match in document["matches"]]} for document in documents], gold)
+        report = evaluate(gold, predictions)
+    except EvaluationError:
+        raise PayloadError("Invalid synthetic reference annotations.") from None
+    exact = report["exact"]
+    def counts(item: dict[str, Any]) -> dict[str, int]:
+        return {"true_positives": item["true_positives"], "false_positives": item["false_positives"],
+                "false_negatives": item["false_negatives"]}
+    return {"basis": value["basis"], "status": "OBSERVATIONAL_ONLY",
+            "labelled_documents": len(documents), "gold_annotations": exact["corpus"]["gold_annotations"],
+            "exact": counts(exact["corpus"]),
+            "per_type": {kind: counts(item) for kind, item in exact["per_entity"].items()}}
 
 
 def _validate_structured(format_name: str, content: str) -> None:
@@ -374,6 +454,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
                                   "document_id": document_id, "basis": "explicit From/To or Cc header"})
     residual = sum(len(detect_text(doc["candidate_text"])) for doc in documents)
     structure_failures = sum(doc["structure_check"] == "fail" for doc in documents)
+    annotation_score = _score_reference_annotations(payload.get("reference_annotations"), documents)
     return {
         "posture": "SYNTHETIC_DEMO_ONLY", "release_authorized": False, "export_available": False,
         "documents": documents, "entities": entities, "relationships": relationships,
@@ -382,7 +463,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
                     "explicit_relationships": len(relationships)},
         "verification": {
             "status": "REVIEW_REQUIRED", "known_rule_residual_matches": residual,
-            "structure_failures": structure_failures,
+            "structure_failures": structure_failures, "annotation_score": annotation_score,
             "checks": [
                 {"name": "Detected-span application", "status": "PASS" if total_mentions else "REVIEW",
                  "detail": "Every selected detector match received its proposed replacement; this does not measure missed PII."},
@@ -392,8 +473,9 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
                  "detail": f"{residual} detector matches remain in candidate text. Zero matches would not prove anonymity."},
                 {"name": "PDF layout and image OCR", "status": "NOT_TESTED",
                  "detail": "PDFs are extracted-text previews only. No PDF output or image OCR is produced."},
-                {"name": "Independent benchmark precision / recall", "status": "NOT_MEASURED",
-                 "detail": "No labelled ground truth was supplied for this batch."},
+                {"name": "Reference-label agreement", "status": "REVIEW" if annotation_score else "NOT_MEASURED",
+                 "detail": "Exact-span counts compare the reviewed candidate with supplied synthetic labels; they are not an independent model benchmark."
+                 if annotation_score else "No complete reference labels were supplied for this batch."},
             ],
         },
         "limitations": [
@@ -405,5 +487,6 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
             "Images and scanned PDFs need OCR plus visual residual inspection and are rejected here.",
             "Relationship edges are only explicit mail-header links, not inferred social or organizational ties.",
             "Pseudonyms and retained relationships may remain linkable. No release, sale, or export is authorized.",
+            "Reference-label agreement, when present, depends on the reviewer's completeness assertion and does not establish generalization or anonymity.",
         ],
     }
