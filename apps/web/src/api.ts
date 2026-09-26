@@ -118,8 +118,10 @@ export type BatchReferenceSpan = { start: number; end: number; entity_type: stri
 export type BatchReferenceManifest = { basis: 'REVIEWER_ATTESTED_EXHAUSTIVE' | 'CURATED_SYNTHETIC_SAMPLE';
   documents: { name: string; annotations: BatchReferenceSpan[] }[] }
 export type BatchAnnotationCounts = { truePositives: number; falsePositives: number; falseNegatives: number }
+export type BatchFileScore = { id: string; exact: BatchAnnotationCounts; missed: BatchReferenceSpan[] }
 export type BatchAnnotationScore = { basis: BatchReferenceManifest['basis']; status: 'OBSERVATIONAL_ONLY';
-  labelledDocuments: number; goldAnnotations: number; exact: BatchAnnotationCounts; perType: Record<string, BatchAnnotationCounts> }
+  labelledDocuments: number; goldAnnotations: number; exact: BatchAnnotationCounts; perType: Record<string, BatchAnnotationCounts>;
+  perDocument: BatchFileScore[] }
 export type BatchInspection = { posture: 'SYNTHETIC_DEMO_ONLY'; releaseAuthorized: false; exportAvailable: false;
   documents: BatchDocument[]; entities: BatchEntity[]; relationships: BatchRelationship[];
   summary: { files: number; detectedMentions: number; transformedMentions: number; suppressedMentions: number;
@@ -180,8 +182,9 @@ export async function readBatchReferenceManifest(file: File, uploads: BatchUploa
 
 function batchInvalid(): never { throw new DemoInspectionFailure('The batch service returned an invalid review result. Nothing was approved or exported.') }
 
-function batchInspection(value: unknown, expectedIds: string[], expectedReferenceBasis: BatchReferenceManifest['basis'] | null,
+function batchInspection(value: unknown, expectedUploads: BatchUpload[], reference: BatchReferenceManifest | null,
   expectedExclusions: Record<string, 'FALSE_POSITIVE_CONFIRMED'>): BatchInspection {
+  const expectedIds = expectedUploads.map(file => file.id)
   if (!object(value) || value.posture !== 'SYNTHETIC_DEMO_ONLY' || value.release_authorized !== false || value.export_available !== false ||
       !Array.isArray(value.documents) || value.documents.length !== expectedIds.length || !Array.isArray(value.entities) ||
       !Array.isArray(value.relationships) || !object(value.summary) || !object(value.verification) || !Array.isArray(value.limitations)) batchInvalid()
@@ -194,8 +197,8 @@ function batchInspection(value: unknown, expectedIds: string[], expectedReferenc
   if (entityIds.size !== entities.length || Object.keys(expectedExclusions).some(id => !entityIds.has(id)) ||
       entities.some(entity => entity.excluded !== Object.hasOwn(expectedExclusions, entity.id))) batchInvalid()
   const documents: BatchDocument[] = value.documents.map((raw, index) => {
-    if (!object(raw) || raw.id !== expectedIds[index] || !safeText(raw.name, 160) || !BATCH_KIND.has(String(raw.kind)) ||
-        !safeText(raw.text) || !safeText(raw.candidate_text) || !safeCount(raw.size_bytes) || (raw.size_bytes as number) > DEMO_MAX_BYTES ||
+    if (!object(raw) || raw.id !== expectedIds[index] || raw.name !== expectedUploads[index].name || !BATCH_KIND.has(String(raw.kind)) ||
+        !safeText(raw.text) || !safeText(raw.candidate_text) || raw.size_bytes !== expectedUploads[index].size ||
         !['source_text', 'extracted_text_only'].includes(String(raw.preview_fidelity)) ||
         !['pass', 'fail', 'not_applicable'].includes(String(raw.structure_check)) || !Array.isArray(raw.matches)) batchInvalid()
     // The Python API reports Unicode code-point offsets. Browser string.slice
@@ -255,8 +258,8 @@ function batchInspection(value: unknown, expectedIds: string[], expectedReferenc
   if (verification.status !== 'REVIEW_REQUIRED' || !safeCount(verification.known_rule_residual_matches) || !safeCount(verification.structure_failures) ||
       !Array.isArray(verification.checks) || verification.checks.length < 3 || verification.checks.length > 10) batchInvalid()
   const rawScore = verification.annotation_score
-  if (expectedReferenceBasis === null && rawScore != null) batchInvalid()
-  if (expectedReferenceBasis !== null && !object(rawScore)) batchInvalid()
+  if (reference === null && rawScore != null) batchInvalid()
+  if (reference !== null && !object(rawScore)) batchInvalid()
   let annotationScore: BatchAnnotationScore | null = null
   if (object(rawScore)) {
     const countTriple = (raw: unknown): BatchAnnotationCounts => {
@@ -264,8 +267,9 @@ function batchInspection(value: unknown, expectedIds: string[], expectedReferenc
       return { truePositives: raw.true_positives as number, falsePositives: raw.false_positives as number,
         falseNegatives: raw.false_negatives as number }
     }
-    if (rawScore.basis !== expectedReferenceBasis || rawScore.status !== 'OBSERVATIONAL_ONLY' ||
-        rawScore.labelled_documents !== documents.length || !safeCount(rawScore.gold_annotations) || !object(rawScore.per_type)) batchInvalid()
+    if (rawScore.basis !== reference?.basis || rawScore.status !== 'OBSERVATIONAL_ONLY' ||
+        rawScore.labelled_documents !== documents.length || !safeCount(rawScore.gold_annotations) ||
+        !object(rawScore.per_type) || !Array.isArray(rawScore.per_document) || rawScore.per_document.length !== documents.length) batchInvalid()
     const exact = countTriple(rawScore.exact)
     const perType: Record<string, BatchAnnotationCounts> = {}
     for (const [kind, counts] of Object.entries(rawScore.per_type)) {
@@ -277,8 +281,40 @@ function batchInspection(value: unknown, expectedIds: string[], expectedReferenc
         Object.values(perType).reduce((sum, item) => sum + item.truePositives, 0) !== exact.truePositives ||
         Object.values(perType).reduce((sum, item) => sum + item.falsePositives, 0) !== exact.falsePositives ||
         Object.values(perType).reduce((sum, item) => sum + item.falseNegatives, 0) !== exact.falseNegatives) batchInvalid()
+    const perDocument: BatchFileScore[] = rawScore.per_document.map((item, index) => {
+      const doc = documents[index]
+      const labels = reference!.documents.find(entry => entry.name === doc.name)?.annotations
+      if (!object(item) || item.id !== doc.id || !Array.isArray(item.missed) || !labels) batchInvalid()
+      const counts = countTriple(item.exact)
+      const codePoints = Array.from(doc.text)
+      const offsets = [0]
+      for (const point of codePoints) offsets.push(offsets[offsets.length - 1] + point.length)
+      const key = (start: number, end: number, kind: string) => `${start}:${end}:${kind}`
+      const expected = new Set(labels.map(span => {
+        if (!safeCount(span.start) || !safeCount(span.end) || span.end <= span.start || span.end > codePoints.length || !REFERENCE_TYPES.has(span.entity_type)) batchInvalid()
+        return key(offsets[span.start], offsets[span.end], span.entity_type)
+      }))
+      if (expected.size !== labels.length) batchInvalid()
+      const actual = new Set(doc.matches.filter(match => match.applied).map(match => key(match.start, match.end, match.kind)))
+      const missedKeys = [...expected].filter(entry => !actual.has(entry))
+      const missed: BatchReferenceSpan[] = item.missed.map(span => {
+        if (!object(span) || !safeCount(span.start) || !safeCount(span.end) || span.end <= span.start ||
+            span.end > codePoints.length || !REFERENCE_TYPES.has(String(span.entity_type))) batchInvalid()
+        return { start: span.start as number, end: span.end as number, entity_type: span.entity_type as string }
+      })
+      const returnedMissed = new Set(missed.map(span => key(offsets[span.start], offsets[span.end], span.entity_type)))
+      if (returnedMissed.size !== missed.length || returnedMissed.size !== missedKeys.length ||
+          missedKeys.some(entry => !returnedMissed.has(entry)) ||
+          counts.truePositives !== expected.size - missedKeys.length ||
+          counts.falsePositives !== [...actual].filter(entry => !expected.has(entry)).length ||
+          counts.falseNegatives !== missedKeys.length) batchInvalid()
+      return { id: doc.id, exact: counts, missed }
+    })
+    if (perDocument.reduce((sum, item) => sum + item.exact.truePositives, 0) !== exact.truePositives ||
+        perDocument.reduce((sum, item) => sum + item.exact.falsePositives, 0) !== exact.falsePositives ||
+        perDocument.reduce((sum, item) => sum + item.exact.falseNegatives, 0) !== exact.falseNegatives) batchInvalid()
     annotationScore = { basis: rawScore.basis as BatchReferenceManifest['basis'], status: 'OBSERVATIONAL_ONLY',
-      labelledDocuments: documents.length, goldAnnotations: rawScore.gold_annotations as number, exact, perType }
+      labelledDocuments: documents.length, goldAnnotations: rawScore.gold_annotations as number, exact, perType, perDocument }
   }
   const checks: BatchCheck[] = verification.checks.map(raw => {
     if (!object(raw) || !safeText(raw.name, 100) || !BATCH_CHECK.has(String(raw.status)) || !safeText(raw.detail, 600)) batchInvalid()
@@ -335,7 +371,7 @@ export async function inspectSyntheticBatch(request: { apiBase: string; token: s
           413: 'The batch exceeds the service limit.', 422: 'A file or correction is invalid. Check formats, PDF text extraction, and alias length.', 503: 'Synthetic batch mode is unavailable.' }
         throw new DemoInspectionFailure(messages[response.status] || 'The synthetic batch request failed.')
       }
-      try { return batchInspection(await response.json(), request.files.map(file => file.id), reference?.basis || null,
+      try { return batchInspection(await response.json(), request.files, reference || null,
         request.reviewExclusions || {}) } catch (cause) {
         if (cause instanceof DemoInspectionFailure) throw cause
         return batchInvalid()

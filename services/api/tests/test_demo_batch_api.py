@@ -223,6 +223,10 @@ def test_reference_labels_measure_exact_reviewed_spans_without_approval(demo_cli
     assert score["labelled_documents"] == 2 and score["gold_annotations"] == 8
     assert score["exact"]["false_negatives"] >= 1
     assert score["per_type"]["OTHER_SENSITIVE"]["false_negatives"] == 1
+    assert [item["id"] for item in score["per_document"]] == ["email", "record"]
+    assert sum(item["exact"]["false_negatives"] for item in score["per_document"]) == score["exact"]["false_negatives"]
+    assert {"start": email_text.index("Riya will"), "end": email_text.index("Riya will") + len("Riya will"),
+            "entity_type": "OTHER_SENSITIVE"} in score["per_document"][0]["missed"]
     assert body["release_authorized"] is False and body["export_available"] is False
     assert next(check for check in body["verification"]["checks"] if check["name"] == "Reference-label agreement")["status"] == "REVIEW"
 
@@ -269,6 +273,8 @@ def test_curated_three_file_sample_has_scored_misses_and_cannot_be_forged(demo_c
     score = response.json()["verification"]["annotation_score"]
     assert score["basis"] == "CURATED_SYNTHETIC_SAMPLE"
     assert score["exact"]["false_negatives"] >= 3  # booking references are not in the bounded detector
+    assert sum(item["exact"]["true_positives"] for item in score["per_document"]) == score["exact"]["true_positives"]
+    assert any(span["entity_type"] == "OTHER_SENSITIVE" for item in score["per_document"] for span in item["missed"])
     removed = request["reference_annotations"]["documents"][0]["annotations"].pop()
     assert demo_client.post("/demo/batch/inspect", headers=auth(), json=request).status_code == 422
     request["reference_annotations"]["documents"][0]["annotations"].append(removed)
