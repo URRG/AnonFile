@@ -16,7 +16,7 @@ const valid = () => ({ posture: 'SYNTHETIC_DEMO_ONLY', release_authorized: false
     { id: 'f1', name: 'a.txt', kind: 'text', text: 'Riya', candidate_text: 'Gita', size_bytes: 4, preview_fidelity: 'source_text', structure_check: 'not_applicable',
       matches: [{ start: 0, end: 4, source: 'Riya', entity_id: 'E1', kind: 'PERSON_NAME', replacement: 'Gita', applied: true, origin: 'AUTOMATIC' }] },
     { id: 'f2', name: 'b.txt', kind: 'text', text: 'note', candidate_text: 'note', size_bytes: 4, preview_fidelity: 'source_text', structure_check: 'not_applicable', matches: [] },
-  ], entities: [{ id: 'E1', kind: 'PERSON_NAME', source: 'Riya', alias: 'Gita', mentions: 1, excluded: false }], relationships: [],
+  ], entities: [{ id: 'E1', kind: 'PERSON_NAME', source: 'Riya', alias: 'Gita', strategy: 'NAME_LENGTH_MATCH', mentions: 1, excluded: false }], relationships: [],
   summary: { files: 2, detected_mentions: 1, transformed_mentions: 1, suppressed_mentions: 0, linked_entities: 1, explicit_relationships: 0 },
   verification: { status: 'REVIEW_REQUIRED', known_rule_residual_matches: 0, source_value_residuals: 0, structure_failures: 0,
     checks: [{ name: 'Application', status: 'PASS', detail: 'One match applied.' }, { name: 'Residual', status: 'REVIEW', detail: 'Review.' },
@@ -55,7 +55,7 @@ test('batch client accepts non-deliverable email surrogates and refuses old mark
   response.documents[0].size_bytes = 17
   response.documents[0].matches[0] = { start: 0, end: 17, source: 'riya@example.test', entity_id: 'E1',
     kind: 'EMAIL', replacement: 'gita@example.test', applied: true, origin: 'AUTOMATIC' }
-  response.entities[0] = { id: 'E1', kind: 'EMAIL', source: 'riya@example.test', alias: 'gita@example.test', mentions: 1, excluded: false }
+  response.entities[0] = { id: 'E1', kind: 'EMAIL', source: 'riya@example.test', alias: 'gita@example.test', strategy: 'EMAIL_TEST_ADDRESS', mentions: 1, excluded: false }
   t.mock.method(globalThis, 'fetch', async () => Response.json(response))
   assert.equal((await inspectSyntheticBatch(emailRequest)).entities[0].alias, 'gita@example.test')
   t.mock.restoreAll()
@@ -66,6 +66,31 @@ test('batch client accepts non-deliverable email surrogates and refuses old mark
     tampered.documents[0].candidate_text = alias
     t.mock.method(globalThis, 'fetch', async () => Response.json(tampered))
     await assert.rejects(inspectSyntheticBatch(emailRequest), /invalid review result/)
+    t.mock.restoreAll()
+  }
+})
+
+test('batch client binds declared PAN strategy to a deliberately invalid alias', async t => {
+  const panFiles = [{ id: 'f1', name: 'a.txt', size: 10, contentBase64: Buffer.from('ABCPD1234F').toString('base64') }, files[1]]
+  const response = valid()
+  response.documents[0].text = 'ABCPD1234F'
+  response.documents[0].candidate_text = 'TSTZA0001A'
+  response.documents[0].size_bytes = 10
+  response.documents[0].matches[0] = { start: 0, end: 10, source: 'ABCPD1234F', entity_id: 'E1',
+    kind: 'PAN', replacement: 'TSTZA0001A', applied: true, origin: 'AUTOMATIC' }
+  response.entities[0] = { id: 'E1', kind: 'PAN', source: 'ABCPD1234F', alias: 'TSTZA0001A',
+    strategy: 'PAN_INVALID_TEST', mentions: 1, excluded: false }
+  t.mock.method(globalThis, 'fetch', async () => Response.json(response))
+  assert.equal((await inspectSyntheticBatch({ ...request, files: panFiles })).entities[0].strategy, 'PAN_INVALID_TEST')
+  t.mock.restoreAll()
+  for (const [strategy, alias] of [['PAN_INVALID_TEST', 'TSTPA0001A'], ['NAME_LENGTH_MATCH', 'TSTZA0001A']]) {
+    const tampered = structuredClone(response)
+    tampered.entities[0].strategy = strategy
+    tampered.entities[0].alias = alias
+    tampered.documents[0].matches[0].replacement = alias
+    tampered.documents[0].candidate_text = alias
+    t.mock.method(globalThis, 'fetch', async () => Response.json(tampered))
+    await assert.rejects(inspectSyntheticBatch({ ...request, files: panFiles }), /invalid review result/)
     t.mock.restoreAll()
   }
 })

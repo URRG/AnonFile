@@ -18,6 +18,7 @@ from pathlib import PurePath
 from typing import Any
 
 from app.contracts import PayloadError
+from app.demo_surrogates import SSN_SHAPE, demo_field_kind, typed_alias
 from app.evaluation import EvaluationError, evaluate, parse_gold, parse_predictions
 from app.media_preview import extract_media, render_candidate
 from app.processing import _field_type, detect_text
@@ -43,6 +44,7 @@ REVIEW_EXCLUSION_REASON = "FALSE_POSITIVE_CONFIRMED"
 SUPPRESSIBLE_KINDS = frozenset({"PERSON_NAME", "EMAIL", "PHONE", "IP_ADDRESS"})
 MANUAL_FINDING_KINDS = frozenset({"OTHER_SENSITIVE", "BUSINESS_CONFIDENTIAL", "QUASI_IDENTIFIER", "GOVERNMENT_ID", "DATE_OF_BIRTH"})
 SAFE_MANUAL_VALUE = re.compile(r"^[^\x00-\x1f\x7f]{2,80}$")
+TEXT_SSN = re.compile(r"(?im)\b(?:ssn|social[ -]?security[ -]?number)\s*[:=]\s*(?P<value>[0-9]{3}(?:[- ]?[0-9]{2})?[- ]?[0-9]{4})\b")
 SAMPLE_TEXT_DIGESTS = {
     "01-email-thread.txt": "ef136ed6bb9c2931a07915d8ae22a487c5899cab825d211472cd63cd8f54f8ef",
     "02-passenger-list.csv": "09887d08254054222a6549ae76cbc8ec4f5f78ef2d6c599932f24e408a5610ca",
@@ -233,6 +235,7 @@ def _csv_cells(line: str, base: int) -> list[tuple[int, int]]:
 def _structured_fields(document: dict[str, Any]) -> list[tuple[int, int, str]]:
     text, kind = document["text"], document["kind"]
     result: list[tuple[int, int, str]] = []
+    ssn_values: set[str] = set()
     if kind in {"json", "jsonl"}:
         for match in JSON_FIELD.finditer(text):
             try:
@@ -247,7 +250,11 @@ def _structured_fields(document: dict[str, Any]) -> list[tuple[int, int, str]]:
             start, end = match.start("value") + 1, match.end("value") - 1
             if end - start > 120:
                 raise PayloadError("A sensitive structured field exceeds the review value limit.")
-            result.append((start, end, field[0]))
+            field_name = json.loads('"' + match.group("key") + '"')
+            field_kind = demo_field_kind(field_name, text[start:end], field[0])
+            if "".join(char for char in field_name.casefold() if char.isalnum()) in {"ssn", "socialsecuritynumber"} and SSN_SHAPE.fullmatch(text[start:end]):
+                ssn_values.add(text[start:end].casefold())
+            result.append((start, end, field_kind))
     elif kind == "csv":
         offset = 0
         lines = text.splitlines(keepends=True)
@@ -272,8 +279,13 @@ def _structured_fields(document: dict[str, Any]) -> list[tuple[int, int, str]]:
                     if field and end > start:
                         if end - start > 120:
                             raise PayloadError("A sensitive structured field exceeds the review value limit.")
-                        result.append((start, end, field[0]))
+                        value = text[start:end]
+                        field_kind = demo_field_kind(field_name, value, field[0])
+                        if "".join(char for char in field_name.casefold() if char.isalnum()) in {"ssn", "socialsecuritynumber"} and SSN_SHAPE.fullmatch(value):
+                            ssn_values.add(value.casefold())
+                        result.append((start, end, field_kind))
             offset += len(raw_line)
+    document["_ssn_values"] = ssn_values
     return result
 
 
@@ -476,6 +488,10 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
 
     for document in documents:
         document["_fields"] = _structured_fields(document)
+        document["_labelled_ssns"] = [(match.start("value"), match.end("value")) for match in TEXT_SSN.finditer(document["text"])
+                                     if SSN_SHAPE.fullmatch(match.group("value"))]
+        document["_ssn_values"].update(document["text"][start:end].casefold()
+                                       for start, end in document["_labelled_ssns"])
     names, raw_edges = _names_and_headers(documents)
     email_owners = _email_owners(documents)
     role_edges = _structured_role_edges(documents)
@@ -500,6 +516,8 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
             remember(span.entity_type, doc["text"][span.start:span.end])
         for start, end, kind in doc["_fields"]:
             remember(kind, doc["text"][start:end])
+        for start, end in doc["_labelled_ssns"]:
+            remember("GOVERNMENT_ID", doc["text"][start:end])
     for item in manual_findings:
         remember(item["kind"], item["value"])
     keys = sorted(set(keys))
@@ -529,6 +547,9 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
     name_aliases = {normalized: overrides.get(id_by_key[("PERSON_NAME", normalized)], default_aliases[normalized])
                     for normalized in names_by_key}
     email_aliases = _email_aliases(keys, names_by_key, name_aliases, email_owners, exclusions, id_by_key)
+    source_values = {source.casefold() for source in names_by_key.values()} | {source.casefold() for source in source_by_key.values()}
+    used_typed_aliases: set[str] = set()
+    typed_ordinals = {"PAN": 0, "GOVERNMENT_ID": 0, "PHONE": 0}
     entities: list[dict[str, Any]] = []
     for kind, normalized in keys:
         entity_id = id_by_key[(kind, normalized)]
@@ -541,16 +562,31 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
             display = raw_display[:100] + ("…" if len(raw_display) > 100 else "")
         if kind == "PERSON_NAME":
             alias = name_aliases[normalized]
+            strategy = "NAME_LENGTH_MATCH"
         elif kind == "EMAIL":
             if entity_id in overrides:
                 raise PayloadError("Only person-name aliases can be changed in this demo.")
             alias = email_aliases[normalized]
+            strategy = "EMAIL_TEST_ADDRESS"
         else:
             if entity_id in overrides:
                 raise PayloadError("Only person-name aliases can be changed in this demo.")
-            alias = f"[{kind}_{entity_id}]"
+            alias, strategy = f"[{kind}_{entity_id}]", "OPAQUE_REDACTION"
+            eligible = kind in typed_ordinals and (kind != "GOVERNMENT_ID" or any(
+                normalized in doc["_ssn_values"] for doc in documents))
+            if eligible:
+                limit = 100 if kind == "PHONE" else 9999
+                while typed_ordinals[kind] < limit:
+                    typed_ordinals[kind] += 1
+                    proposal = typed_alias(kind, source_by_key[(kind, normalized)], typed_ordinals[kind])
+                    if proposal is None:
+                        break
+                    if proposal[0].casefold() not in source_values and proposal[0].casefold() not in used_typed_aliases:
+                        alias, strategy = proposal
+                        used_typed_aliases.add(alias.casefold())
+                        break
         entities.append({"id": entity_id, "kind": kind, "source": display, "alias": alias,
-                         "mentions": 0, "excluded": entity_id in exclusions})
+                         "strategy": strategy, "mentions": 0, "excluded": entity_id in exclusions})
     entities_by_id = {entity["id"]: entity for entity in entities}
 
     total_mentions = transformed_mentions = 0
@@ -559,6 +595,9 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
         spans: list[tuple[int, int, str, int, str]] = []
         for start, end, kind in doc["_fields"]:
             entity_id = id_by_key[(kind, text[start:end].casefold())]
+            spans.append((start, end, entity_id, 3, "AUTOMATIC"))
+        for start, end in doc["_labelled_ssns"]:
+            entity_id = id_by_key[("GOVERNMENT_ID", text[start:end].casefold())]
             spans.append((start, end, entity_id, 3, "AUTOMATIC"))
         for span in detect_text(text):
             entity_id = id_by_key[(span.entity_type, text[span.start:span.end].casefold())]
@@ -604,6 +643,8 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
         if "_media_pages" in doc:
             doc["media_preview"] = render_candidate(doc.pop("_media_pages"), matches, doc["kind"])
         doc.pop("_fields")
+        doc.pop("_ssn_values")
+        doc.pop("_labelled_ssns")
 
     person_id = {value: id_by_key[("PERSON_NAME", value)] for value in names_by_key}
     relationships = []
@@ -664,7 +705,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
                 {"name": "Source-value persistence", "status": "REVIEW" if source_value_residuals else "PASS",
                  "detail": f"{source_value_residuals} detected source values still occur in candidate text. This exact-value check cannot find source values that detection missed or independently assess pixels."},
                 {"name": "Residual known-rule scan", "status": "REVIEW" if residual or exclusions else "PASS",
-                 "detail": f"{residual} bounded-rule matches occur in candidate text, including expected email-shaped pseudonyms. This pattern count is not the number of retained source values; zero does not prove anonymity."},
+                 "detail": f"{residual} bounded-rule matches occur in candidate text, including expected email- or PAN-shaped pseudonyms. This pattern count is not the number of retained source values; zero does not prove anonymity."},
                 {"name": "Raster media and OCR review", "status": "REVIEW" if media_documents else "NOT_TESTED",
                  "detail": f"{len(media_documents)} media files were rasterized and OCR-reviewed; {visual_residuals} source values remain under the same OCR engine and {visual_fallbacks} lines needed solid-redaction fallback. This is not independent visual validation or release approval."
                  if media_documents else "No PDF/image was processed in this batch."},
@@ -680,6 +721,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
             "Structured field recognition is bounded to supported JSON key/value syntax and one-line CSV cells; unsupported forms are rejected rather than silently passed through.",
             "Exact-name linking can merge different people who share a name; ambiguous identities need human resolution.",
             "Email-shaped pseudonyms use reserved .test domains and preserve only explicitly evidenced person/email and source-domain equivalence within this batch; they are not deliverable contact addresses.",
+            "PAN and explicitly identified US SSN examples are deliberately invalid; explicit +1 NANP phones use a reserved fictional range. Other identifiers remain opaque. Syntax preservation is not validity or release qualification.",
             "PDF candidates are rebuilt as image-only PDFs in memory, but only raster page previews and a digest are returned; no PDF download or delivery is authorized.",
             "Image and scanned-PDF OCR may miss or misread content. The same-engine raster recheck is not independent validation, and source content outside recognized OCR lines may remain visible.",
             "Relationship edges require explicit mail headers or account_owner/client_name in the same parsed record; they do not infer social or organizational ties.",

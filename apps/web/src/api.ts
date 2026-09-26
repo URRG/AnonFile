@@ -117,7 +117,10 @@ export type BatchMediaPreview = { pages: BatchMediaPage[]; fallbackLines: number
 export type BatchDocument = { id: string; name: string; kind: 'text' | 'csv' | 'json' | 'jsonl' | 'pdf' | 'image';
   text: string; candidateText: string; sizeBytes: number; previewFidelity: 'source_text' | 'raster_ocr_review';
   structureCheck: 'pass' | 'fail' | 'not_applicable'; matches: BatchMatch[]; mediaPreview: BatchMediaPreview | null }
-export type BatchEntity = { id: string; kind: string; source: string; alias: string; mentions: number; excluded: boolean }
+export type BatchAliasStrategy = 'NAME_LENGTH_MATCH' | 'EMAIL_TEST_ADDRESS' | 'PAN_INVALID_TEST' |
+  'US_SSN_INVALID' | 'NANP_FICTIONAL' | 'OPAQUE_REDACTION'
+export type BatchEntity = { id: string; kind: string; source: string; alias: string; strategy: BatchAliasStrategy;
+  mentions: number; excluded: boolean }
 export type BatchRelationship = { sourceId: string; targetId: string; type: 'EMAILED' | 'ACCOUNT_OWNER_OF'; documentId: string; basis: string }
 export type BatchCheck = { name: string; status: 'PASS' | 'FAIL' | 'REVIEW' | 'NOT_TESTED' | 'NOT_APPLICABLE' | 'NOT_MEASURED'; detail: string }
 export type BatchReferenceSpan = { start: number; end: number; entity_type: string }
@@ -213,9 +216,17 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
       !Array.isArray(value.relationships) || !object(value.summary) || !object(value.verification) || !Array.isArray(value.limitations)) batchInvalid()
   const entities: BatchEntity[] = value.entities.map(raw => {
     if (!object(raw) || typeof raw.id !== 'string' || !/^E\d{1,4}$/.test(raw.id) || !safeText(raw.kind, 64) || !safeText(raw.source, 120) || !safeText(raw.alias, 120) || !safeCount(raw.mentions) || typeof raw.excluded !== 'boolean') batchInvalid()
+    if (!['NAME_LENGTH_MATCH', 'EMAIL_TEST_ADDRESS', 'PAN_INVALID_TEST', 'US_SSN_INVALID', 'NANP_FICTIONAL', 'OPAQUE_REDACTION'].includes(String(raw.strategy))) batchInvalid()
+    if (raw.strategy === 'NAME_LENGTH_MATCH' && (raw.kind !== 'PERSON_NAME' || (raw.alias as string).length !== (raw.source as string).length)) batchInvalid()
+    if (raw.strategy === 'EMAIL_TEST_ADDRESS' && raw.kind !== 'EMAIL') batchInvalid()
+    if (raw.strategy === 'PAN_INVALID_TEST' && (raw.kind !== 'PAN' || !/^[A-Z]{3}Z[A-Z][0-9]{4}[A-Z]$/.test(raw.alias as string))) batchInvalid()
+    if (raw.strategy === 'US_SSN_INVALID' && (raw.kind !== 'GOVERNMENT_ID' || !/^000([- ]?)01\1[0-9]{4}$/.test(raw.alias as string))) batchInvalid()
+    if (raw.strategy === 'NANP_FICTIONAL' && (raw.kind !== 'PHONE' || !/^\+1[ .()\-]*202[ .()\-]*555[ .()\-]*01[0-9]{2}$/.test(raw.alias as string))) batchInvalid()
+    if (raw.strategy === 'OPAQUE_REDACTION' && raw.alias !== `[${raw.kind}_${raw.id}]`) batchInvalid()
     if (raw.kind === 'EMAIL' && (!/^[a-z0-9][a-z0-9._+-]*@[a-z0-9-]+(?:\.[a-z0-9-]+)*\.test$/.test(raw.alias as string) ||
         (raw.alias as string).toLowerCase() === (raw.source as string).toLowerCase())) batchInvalid()
-    return { id: raw.id, kind: raw.kind, source: raw.source, alias: raw.alias, mentions: raw.mentions as number, excluded: raw.excluded }
+    return { id: raw.id, kind: raw.kind, source: raw.source, alias: raw.alias,
+      strategy: raw.strategy as BatchAliasStrategy, mentions: raw.mentions as number, excluded: raw.excluded }
   })
   const entityIds = new Set(entities.map(item => item.id))
   const entitiesById = new Map(entities.map(item => [item.id, item]))

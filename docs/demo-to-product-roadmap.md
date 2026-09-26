@@ -37,6 +37,11 @@ source PDF objects. This demonstrates actual pixel rewriting, but not safe
 redaction: content missed by OCR can remain visible, the same OCR recheck is
 not independent, and untrusted media parsing is not isolated in a hardened
 production worker. No candidate download or release path is enabled.
+The workbench now uses documented non-issuable examples for a narrow set of
+PAN, explicit US SSN, and `+1` NANP phone shapes, retaining opaque markers
+otherwise. Born-digital PDF text-layer signals are cross-checked against OCR,
+but this cannot establish visual coverage. See
+[format-aware replacement policy](format-aware-pseudonyms.md).
 
 ## Gaps after the synthetic demo
 
