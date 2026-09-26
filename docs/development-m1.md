@@ -44,6 +44,14 @@ The bundled synthetic examples are regression fixtures, not a qualification benc
 
 ## Limits and known gaps
 
+- M49a1 supplier-organization records, when a PostgreSQL deployment elects to
+  use the migration, are inert tenant-bound identity metadata: an opaque
+  supplier reference, an administrator-supplied opaque case reference, an
+  evidence digest, an expiry, and an append-only fence. They have no HTTP/API
+  provisioning route and are not a supplier self-service feature. They do not
+  determine when anything is signed, admit processing, authorize release, map
+  any keys, or establish a supplier's legal identity, authority, or validity.
+
 - One nonempty text input OR a nonempty list of objects, not both; at most 2 MB UTF-8 processing input, 10,000 records, depth 32 and bounded nodes. The HTTP body has a separate 2.1 MB cap, so JSON escaping/metadata can reduce the effective accepted payload.
 - Immutable-original spans and overlap union prevent replacement offsets from skipping known hits. Recognized sensitive scalar strings become markers; numeric/boolean sensitive values become null. Container-valued sensitive fields are rejected because nested keys may themselves contain identities or secrets. Source transformation markers are reserved and rejected in both modes to prevent collisions. Sensitive values in object keys are rejected instead of collision-prone renaming. This is not comprehensive semantic detection. Some unsupported processing structures can be retained at intake but will fail processing with a fixed error; no release is created.
 - Restricted-mode aliases are local, noncryptographic and not a production tokenization vault. Numbers may be unvalidated candidates. Learned names, medical/business meaning, indirect identification and relationships remain incomplete.
