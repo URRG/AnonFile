@@ -188,7 +188,7 @@ function App() {
           <article><h3>Detected categories</h3>{demoResult.findings.length ? <ul>{demoResult.findings.map(item => <li key={`${item.entityType}-${item.severity}`}><code>{item.entityType}</code> · {item.count} ({item.severity})</li>)}</ul> : <p>No rules matched. This does not establish that the sample contains no PII.</p>}</article>
           <article><h3>Applied operations</h3>{demoResult.operations.length ? <ul>{demoResult.operations.map(item => <li key={`${item.entityType}-${item.action}`}><code>{item.entityType}</code> · {item.count} {item.action}</li>)}</ul> : <p>No transformation operations were recorded.</p>}</article>
         </div>
-        <article className="preview"><h3>Transformed synthetic preview</h3><pre>{demoResult.transformedPreview}</pre></article>
+        <article className="preview"><h3>Transformed synthetic preview</h3>{(demoResult.format === 'csv' || demoResult.format === 'jsonl') && <p className="field-help">Structured input is displayed as normalized JSON; the original file layout is not preserved.</p>}<pre>{demoResult.transformedPreview}</pre></article>
         <article className="limitations"><h3>Detector limitations</h3><ul>{demoResult.limitations.map((item, index) => <li key={index}>{item}</li>)}<li>Identifiers represented by unrecognized fields, such as <code>booking_reference</code>, may remain visible.</li><li>This preview is synthetic-demo-only and cannot approve a release, export, anonymity claim, or sale.</li></ul></article>
       </section>}
     </section>

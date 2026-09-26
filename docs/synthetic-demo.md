@@ -19,7 +19,9 @@ UI on loopback, and prints the URL and token. Paste the token into the UI,
 select `demo-data/synthetic-airline-passengers.csv` (or another entirely
 synthetic UTF-8 file), acknowledge the synthetic-data restriction, and run
 the inspection. The result shows rule findings, applied operations, and a
-transformed preview. A field such as `booking_reference` may remain unchanged;
+transformed preview. CSV and JSONL inputs appear as normalized JSON records
+in the preview, not in their original file layout. A field such as
+`booking_reference` may remain unchanged;
 that visibly demonstrates why the preview is not certified anonymous.
 
 If Python dependencies are already installed in another environment, pass
