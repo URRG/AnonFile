@@ -1099,7 +1099,7 @@ def create_app() -> FastAPI:
         """Return only the server-bound authenticated identity."""
         return {"subject": principal.subject, "tenant": principal.tenant, "roles": sorted(principal.roles)}
 
-    # This is deliberately not a release, processing-run, or candidate API.
+    # This is deliberately not a release, processing-run, or production candidate API.
     # Register it only when a local operator opts in to a synthetic-data demo;
     # production never has this route, even with otherwise valid JWT identity.
     if (app.state.auth_environment == "development"
@@ -1107,7 +1107,7 @@ def create_app() -> FastAPI:
         @app.post("/demo/batch/inspect")
         def inspect_synthetic_batch(request: DemoBatchCreate,
                                     principal: Principal = Depends(require_roles("processor"))):
-            """Bounded, ephemeral review data; no artifact, release or export."""
+            """Bounded synthetic review data; demo copies are never release artifacts."""
             return analyze_batch(request.model_dump())
 
         @app.post("/demo/inspect", response_model=DemoInspectView)

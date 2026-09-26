@@ -1,10 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { ArrowDown, ArrowLeft, ArrowRight, Check, ChevronRight, CircleAlert, FileCode2, FileText,
+import { ArrowDown, ArrowLeft, ArrowRight, Check, ChevronRight, CircleAlert, Download, FileCode2, FileText,
   Files, Fingerprint, FlaskConical, ImageIcon, Link2, LockKeyhole, Plus, RefreshCw, Search, ShieldCheck,
-  Sparkles, UploadCloud, X } from 'lucide-react'
+  Sparkles, UploadCloud, X, ZoomIn, ZoomOut } from 'lucide-react'
 import { inspectSyntheticBatch, readBatchFile, readBatchReferenceManifest, type BatchDocument, type BatchInspection,
   type BatchManualFinding, type BatchReferenceManifest, type BatchReferenceSpan, type BatchUpload,
   BATCH_MAX_TOTAL_BYTES, DemoInspectionFailure } from './api'
+import { downloadDemoCandidate } from './demo-download'
+import { RelationshipGraph } from './relationship-graph'
 import './batch.css'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
@@ -17,6 +19,9 @@ const MANUAL_FINDING_OPTIONS: { kind: BatchManualFinding['kind']; label: string 
 const MANUAL_FINDING_KINDS = new Set(MANUAL_FINDING_OPTIONS.map(item => item.kind))
 type Step = 'upload' | 'detect' | 'results'
 type ResultTab = 'documents' | 'relationships' | 'verification'
+type ComparisonMode = 'split' | 'original' | 'candidate'
+type MediaZoom = 'fit' | 50 | 75 | 100 | 125 | 150 | 200
+const MEDIA_ZOOMS = [50, 75, 100, 125, 150, 200] as const
 
 const SAMPLE_DOCUMENTS = [
   { name: '01-email-thread.txt', type: 'text/plain', text: 'From: Riya <riya@example.test>\nTo: Sita <sita@example.test>\nSubject: Flight change\n\nHi Sita, Riya can review the itinerary. Please call +1 415 555 0134.' },
@@ -50,8 +55,20 @@ const SAMPLE_REFERENCE: BatchReferenceManifest = { basis: 'CURATED_SYNTHETIC_SAM
 ] }
 
 function shortType(kind: string) { return kind === 'PERSON_NAME' ? 'Person' : kind.replaceAll('_', ' ').toLowerCase().replace(/^./, c => c.toUpperCase()) }
+type RegisterGroup = 'all' | 'people' | 'contacts' | 'identifiers' | 'other'
+const REGISTER_GROUPS: { id: RegisterGroup; label: string }[] = [
+  { id: 'all', label: 'All' }, { id: 'people', label: 'People' }, { id: 'contacts', label: 'Contacts' },
+  { id: 'identifiers', label: 'IDs' }, { id: 'other', label: 'Other' },
+]
+function registerGroup(kind: string): Exclude<RegisterGroup, 'all'> {
+  if (kind === 'PERSON_NAME') return 'people'
+  if (kind === 'EMAIL' || kind === 'PHONE') return 'contacts'
+  if (['GOVERNMENT_ID', 'PAN', 'AADHAAR', 'CARD'].includes(kind)) return 'identifiers'
+  return 'other'
+}
+const REGISTER_PAGE_SIZE = 8
 const STRATEGY_LABELS: Record<BatchInspection['entities'][number]['strategy'], string> = {
-  NAME_LENGTH_MATCH: 'Length-matched name', EMAIL_TEST_ADDRESS: 'Reserved .test address',
+  NAME_LENGTH_MATCH: 'Plausible same-length name', EMAIL_TEST_ADDRESS: 'Reserved .test address',
   PAN_INVALID_TEST: 'PAN-shaped · invalid', US_SSN_INVALID: 'SSN-shaped · invalid',
   NANP_FICTIONAL: 'Fictional US number', OPAQUE_REDACTION: 'Opaque redaction',
 }
@@ -93,11 +110,14 @@ function HighlightedSource({ document }: { document: BatchDocument }) {
   return <pre>{chunks}</pre>
 }
 
-function MediaPages({ document, candidate }: { document: BatchDocument; candidate: boolean }) {
-  return <div className="media-preview-pages">{document.mediaPreview?.pages.map(page => <figure key={page.number}>
+function MediaPages({ document, candidate, zoom }: { document: BatchDocument; candidate: boolean; zoom: MediaZoom }) {
+  return <div className={`media-preview-pages ${zoom === 'fit' ? 'is-fit' : ''}`}>{document.mediaPreview?.pages.map(page => <figure key={page.number}
+    style={{ width: zoom === 'fit' ? `min(100%, ${page.width + 16}px)` : `${Math.round(page.width * zoom / 100) + 16}px` }}>
     <img src={`data:image/png;base64,${candidate ? page.candidatePngBase64 : page.sourcePngBase64}`}
+      width={page.width} height={page.height}
+      style={{ width: zoom === 'fit' ? '100%' : `${Math.round(page.width * zoom / 100)}px` }}
       alt={`${candidate ? 'Raster candidate' : 'Source rendering'} of ${document.name}, page ${page.number}`} />
-    <figcaption>Page {page.number} · {page.ocrLines} OCR lines</figcaption>
+    <figcaption>Page {page.number} · {page.width} × {page.height} px · {page.ocrLines} OCR lines</figcaption>
   </figure>)}</div>
 }
 
@@ -124,6 +144,14 @@ export default function BatchDemo() {
   const [excludedIds, setExcludedIds] = useState<string[]>([])
   const [exclusionAcknowledged, setExclusionAcknowledged] = useState(false)
   const [selectedDoc, setSelectedDoc] = useState('')
+  const [registerGroupFilter, setRegisterGroupFilter] = useState<RegisterGroup>('all')
+  const [registerSearch, setRegisterSearch] = useState('')
+  const [registerPage, setRegisterPage] = useState(0)
+  const [comparisonMode, setComparisonMode] = useState<ComparisonMode>('split')
+  const [mediaZoom, setMediaZoom] = useState<MediaZoom>(100)
+  const [demoDownloadAcknowledged, setDemoDownloadAcknowledged] = useState(false)
+  const sourcePane = useRef<HTMLDivElement | null>(null)
+  const candidatePane = useRef<HTMLDivElement | null>(null)
   const sequence = useRef(0)
   const request = useRef<AbortController | null>(null)
   const intakeEpoch = useRef(0)
@@ -217,6 +245,7 @@ export default function BatchDemo() {
         signal: controller.signal })
       if (request.current !== controller || controller.signal.aborted) return
       setInspection(value)
+      setDemoDownloadAcknowledged(false)
       setManualNames(nextNames)
       setManualFindings(nextFindings)
       setAliasOverrides(nextAliases)
@@ -263,9 +292,35 @@ export default function BatchDemo() {
 
   const selected = inspection?.documents.find(doc => doc.id === selectedDoc) || inspection?.documents[0]
   const visibleEntities = inspection?.entities.filter(item => item.mentions > 0) || []
+  const registerEntities = [...visibleEntities].sort((left, right) => {
+    const order = ['people', 'contacts', 'identifiers', 'other']
+    return order.indexOf(registerGroup(left.kind)) - order.indexOf(registerGroup(right.kind)) || left.source.localeCompare(right.source)
+  })
+  const registerFiltered = registerEntities.filter(entity =>
+    (registerGroupFilter === 'all' || registerGroup(entity.kind) === registerGroupFilter) &&
+    (!registerSearch.trim() || `${entity.source} ${entity.kind} ${entity.alias}`.toLocaleLowerCase().includes(registerSearch.trim().toLocaleLowerCase())))
+  const registerPageCount = Math.max(1, Math.ceil(registerFiltered.length / REGISTER_PAGE_SIZE))
+  const registerCurrentPage = Math.min(registerPage, registerPageCount - 1)
+  const registerVisiblePage = registerFiltered.slice(registerCurrentPage * REGISTER_PAGE_SIZE, (registerCurrentPage + 1) * REGISTER_PAGE_SIZE)
   const byId = new Map(visibleEntities.map(item => [item.id, item]))
   const hasPendingAliases = inspection?.entities.some(entity => aliasOverrides[entity.id] !== undefined && aliasOverrides[entity.id] !== entity.alias) || false
   const hasPendingExclusions = inspection?.entities.some(entity => excludedIds.includes(entity.id) !== entity.excluded) || false
+  const demoDownloadBlockReason = inspection?.summary.suppressedMentions ? 'Download is blocked while reviewer-excluded source values are retained.'
+    : inspection?.verification.sourceValueResiduals ? 'Download is blocked because detected source values remain in the candidate.'
+    : inspection?.verification.structureFailures ? 'Download is blocked because a candidate failed its structure check.'
+    : inspection?.documents.some(document => document.mediaPreview && document.mediaPreview.selfOcrResidualSources > 0)
+      ? 'Download is blocked because the raster recheck found a detected source value.' : ''
+
+  function changeMediaZoom(direction: -1 | 1) {
+    const position = MEDIA_ZOOMS.indexOf(mediaZoom === 'fit' ? 100 : mediaZoom)
+    setMediaZoom(MEDIA_ZOOMS[Math.max(0, Math.min(MEDIA_ZOOMS.length - 1, position + direction))])
+  }
+
+  function syncPaneScroll(source: HTMLDivElement, target: HTMLDivElement | null) {
+    if (!target || comparisonMode !== 'split') return
+    if (Math.abs(target.scrollTop - source.scrollTop) > 1) target.scrollTop = source.scrollTop
+    if (Math.abs(target.scrollLeft - source.scrollLeft) > 1) target.scrollLeft = source.scrollLeft
+  }
 
   function toggleExclusion(entityId: string) {
     setExcludedIds(current => current.includes(entityId) ? current.filter(id => id !== entityId) : [...current, entityId])
@@ -286,12 +341,12 @@ export default function BatchDemo() {
       <div className="sidebar-divider" />
       <div className="sidebar-section-label">CURRENT SESSION</div>
       <div className="session-card"><Files size={19} /><div><strong>{files.length ? `${files.length} files staged` : 'No batch yet'}</strong><span>Ephemeral synthetic preview</span></div></div>
-      <div className="sidebar-bottom"><div className="sidebar-note"><LockKeyhole size={17} /><span>No release or export is available in this demo.</span></div><a href="?mode=advanced">Developer controls <ArrowRight size={14} /></a></div>
+      <div className="sidebar-bottom"><div className="sidebar-note"><LockKeyhole size={17} /><span>Only unverified synthetic review copies can be downloaded. No buyer release is available.</span></div><a href="?mode=advanced">Developer controls <ArrowRight size={14} /></a></div>
     </aside>
 
     <main className="batch-main">
       <header className="topbar"><div className="breadcrumb">Workbench <ChevronRight size={14} /> <strong>{step === 'upload' ? 'Upload batch' : step === 'detect' ? 'Detection review' : 'Results & verification'}</strong></div><span className="environment-badge"><span /> SYNTHETIC DEMO</span></header>
-      <div className="batch-content">
+      <div className={`batch-content ${step === 'results' ? 'batch-content-results' : ''}`}>
         {step === 'upload' && <>
           <div className="page-heading"><div><p className="overline">01 / INTAKE</p><h1>Start with your dataset.</h1><p>Bring two or three synthetic documents together. We’ll trace sensitive mentions across files, then give you a reviewable candidate—not an anonymity claim.</p></div><div className="heading-icon"><UploadCloud size={29} /></div></div>
           <div className="flow-strip"><div className="current"><span>1</span><strong>Upload</strong><small>Choose a batch</small></div><div className="flow-line" /><div><span>2</span><strong>Detect</strong><small>Review matches</small></div><div className="flow-line" /><div><span>3</span><strong>Verify</strong><small>Compare & assess</small></div></div>
@@ -309,8 +364,21 @@ export default function BatchDemo() {
         {step === 'detect' && inspection && <>
           <div className="page-heading"><div><p className="overline">02 / DETECTION REVIEW</p><h1>Know what was found.</h1><p>Inspect the rule matches and consistent aliases across the batch. Add a missed name before opening the candidate comparison.</p></div><div className="heading-icon"><Search size={29} /></div></div>
           {sampleMode === 'media' && <div className="media-guidance"><CircleAlert size={18} /><span>Guided media case: the fictional booking code <code>DEMO-4822</code> is deliberately left for review. Add it as <strong>Other sensitive</strong>, rescan, then compare both raster pages. No independent media accuracy score is available.</span></div>}
-          <div className="metrics-grid"><div className="metric-card"><span>Documents inspected</span><strong>{inspection.summary.files}</strong><small>One connected batch</small></div><div className="metric-card"><span>Selected mentions</span><strong>{inspection.summary.detectedMentions}</strong><small>Rules + reviewer corrections</small></div><div className="metric-card"><span>Unique signals</span><strong>{visibleEntities.length}</strong><small>Across all documents</small></div><div className="metric-card"><span>Explicit links</span><strong>{inspection.summary.explicitRelationships}</strong><small>Headers & record fields</small></div></div>
-          <div className="review-grid"><section className="batch-card entity-review"><div className="card-header"><div><p className="overline">ENTITY REGISTER</p><h2>Detected identities & signals</h2></div><span className="quiet-tag">{visibleEntities.length} entities</span></div><div className="table-scroll"><table><thead><tr><th>Source value</th><th>Type</th><th>Mentions</th><th>Proposed replacement</th><th>Review decision</th></tr></thead><tbody>{visibleEntities.map(entity => { const excluded = excludedIds.includes(entity.id); const suppressible = SUPPRESSIBLE_KINDS.has(entity.kind); return <tr key={entity.id} className={excluded ? 'entity-excluded' : ''}><td className="source-cell">{entity.source}</td><td><span className="type-pill">{shortType(entity.kind)}</span></td><td>{entity.mentions}</td><td><div className="alias-proposal">{entity.kind === 'PERSON_NAME' ? <input className="alias-input" aria-label={`Replacement for ${entity.source}`} value={aliasOverrides[entity.id] ?? entity.alias} maxLength={entity.source.length} disabled={excluded} onChange={event => setAliasOverrides(current => ({ ...current, [entity.id]: event.target.value }))} /> : <code>{entity.alias}</code>}<small>{STRATEGY_LABELS[entity.strategy]}</small></div></td><td><button type="button" className={`decision-button ${excluded ? 'excluded' : ''}`} disabled={!suppressible || busy} title={suppressible ? 'Review this signal across every file' : 'Critical or unsupported categories cannot be excluded in this demo'} aria-label={`${excluded ? 'Restore' : 'Exclude'} ${entity.source}`} onClick={() => toggleExclusion(entity.id)}>{excluded ? 'Restore' : 'Exclude'}</button></td></tr> })}</tbody></table></div>{visibleEntities.length === 0 && <p className="empty-note">No rule matches were found. That does not establish that the files contain no sensitive information.</p>}<div className="card-footnote"><CircleAlert size={16} /> Format-aware examples are intentionally invalid or non-working; they are not safe real identifiers. Other IDs stay opaque. Excluding a signal keeps its source value. Names in arbitrary prose may still be missed.</div></section>
+          <div className="metrics-grid"><div className="metric-card"><span>Documents inspected</span><strong>{inspection.summary.files}</strong><small>One connected batch</small></div><div className="metric-card"><span>Selected mentions</span><strong>{inspection.summary.detectedMentions}</strong><small>Rules + reviewer corrections</small></div><div className="metric-card"><span>Unique signals</span><strong>{visibleEntities.length}</strong><small>Across all documents</small></div><div className="metric-card"><span>Evidenced graph links</span><strong>{inspection.entityGraph.edges.length}</strong><small>Typed roles & mail headers</small></div></div>
+          <div className="review-grid"><section className="batch-card entity-review">
+            <div className="card-header"><div><p className="overline">ENTITY REGISTER</p><h2>Detected identities & signals</h2></div><span className="quiet-tag">{visibleEntities.length} entities</span></div>
+            <div className="register-toolbar">
+              <div className="register-filters" role="group" aria-label="Filter detected signals">
+                {REGISTER_GROUPS.map(group => { const count = group.id === 'all' ? registerEntities.length : registerEntities.filter(entity => registerGroup(entity.kind) === group.id).length; return <button type="button" key={group.id} className={registerGroupFilter === group.id ? 'selected' : ''} aria-pressed={registerGroupFilter === group.id} onClick={() => { setRegisterGroupFilter(group.id); setRegisterPage(0) }}>{group.label} <span>{count}</span></button> })}
+              </div>
+              <label className="register-search"><Search size={16} aria-hidden="true" /><input aria-label="Search detected signals" value={registerSearch} placeholder="Search values" onChange={event => { setRegisterSearch(event.target.value); setRegisterPage(0) }} /></label>
+            </div>
+            <div className="table-scroll"><table><thead><tr><th scope="col">Source value</th><th scope="col">Type</th><th scope="col">Mentions</th><th scope="col">Proposed replacement</th><th scope="col">Review decision</th></tr></thead><tbody>{registerVisiblePage.map(entity => { const excluded = excludedIds.includes(entity.id); const suppressible = SUPPRESSIBLE_KINDS.has(entity.kind); return <tr key={entity.id} className={excluded ? 'entity-excluded' : ''}><td className="source-cell">{entity.source}</td><td><span className="type-pill">{shortType(entity.kind)}</span></td><td>{entity.mentions}</td><td><div className="alias-proposal">{entity.kind === 'PERSON_NAME' ? <input className="alias-input" aria-label={`Replacement for ${entity.source}`} value={aliasOverrides[entity.id] ?? entity.alias} maxLength={entity.source.length} disabled={excluded} onChange={event => setAliasOverrides(current => ({ ...current, [entity.id]: event.target.value }))} /> : <code>{entity.alias}</code>}<small>{STRATEGY_LABELS[entity.strategy]}</small>{entity.kind === 'GOVERNMENT_ID' && entity.strategy === 'OPAQUE_REDACTION' && <small>No verified non-issuable range for this issuer.</small>}</div></td><td><button type="button" className={`decision-button ${excluded ? 'excluded' : ''}`} disabled={!suppressible || busy} title={suppressible ? 'Review this signal across every file' : 'Critical or unsupported categories cannot be excluded in this demo'} aria-label={`${excluded ? 'Restore' : 'Exclude'} ${entity.source}`} onClick={() => toggleExclusion(entity.id)}>{excluded ? 'Restore' : 'Exclude'}</button></td></tr> })}</tbody></table></div>
+            {visibleEntities.length === 0 && <p className="empty-note">No rule matches were found. That does not establish that the files contain no sensitive information.</p>}
+            {visibleEntities.length > 0 && registerFiltered.length === 0 && <p className="empty-note">No signals match this filter. All detected signals remain available in the other categories.</p>}
+            {registerFiltered.length > 0 && <div className="register-pagination"><span>Showing {registerCurrentPage * REGISTER_PAGE_SIZE + 1}–{Math.min(registerFiltered.length, (registerCurrentPage + 1) * REGISTER_PAGE_SIZE)} of {registerFiltered.length}</span><div><button type="button" disabled={registerCurrentPage === 0} onClick={() => setRegisterPage(page => page - 1)}>Previous</button><span>Page {registerCurrentPage + 1} of {registerPageCount}</span><button type="button" disabled={registerCurrentPage >= registerPageCount - 1} onClick={() => setRegisterPage(page => page + 1)}>Next</button></div></div>}
+            <div className="card-footnote"><CircleAlert size={16} /> Format-aware examples are intentionally invalid or non-working; they are not safe real identifiers. Other IDs stay opaque. Excluding a signal keeps its source value. Names in arbitrary prose may still be missed.</div>
+          </section>
             <aside className="batch-card review-side"><p className="overline">HUMAN-IN-THE-LOOP</p><h2>Found a miss?</h2><p>Add an exact person name or sensitive value. We’ll rescan all documents; manual corrections are tracked separately from automatic detector quality.</p><div className="inline-form"><label htmlFor="manual-name">Person name</label><input id="manual-name" value={manualInput} onChange={event => setManualInput(event.target.value)} placeholder="e.g. Tara" onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); void addManualName() } }} /><button type="button" className="secondary-button" onClick={() => void addManualName()} disabled={busy || !manualInput.trim()}><Plus size={16} /> Add name & rescan</button></div>{manualNames.length > 0 && <div className="manual-list">Names added: {manualNames.join(', ')}</div>}
               <div className="inline-form manual-sensitive-form"><label htmlFor="manual-sensitive">Sensitive value</label><input id="manual-sensitive" value={manualValue} onChange={event => setManualValue(event.target.value)} placeholder="e.g. DEMO-4821" /><label htmlFor="manual-sensitive-kind">Category</label><select id="manual-sensitive-kind" value={manualKind} onChange={event => setManualKind(event.target.value as BatchManualFinding['kind'])}>{MANUAL_FINDING_OPTIONS.map(item => <option key={item.kind} value={item.kind}>{item.label}</option>)}</select><button type="button" className="secondary-button" onClick={() => void addManualFinding({ value: manualValue, kind: manualKind })} disabled={busy || !manualValue.trim()}><Plus size={16} /> Add value & rescan</button></div>{manualFindings.length > 0 && <div className="manual-list">Sensitive values added: {manualFindings.map(item => item.value).join(', ')}</div>}<div className="review-hint"><ShieldCheck size={19} /><span>Corrections target exact phrases across the batch. They do not teach the detector or establish PDF layout fidelity or anonymity.</span></div></aside></div>
           {excludedIds.length > 0 && <div className="exclusion-notice"><CircleAlert size={19} /><label className="check-label"><input type="checkbox" checked={exclusionAcknowledged} onChange={event => setExclusionAcknowledged(event.target.checked)} /><span>I confirm the {excludedIds.length} excluded {excludedIds.length === 1 ? 'signal is' : 'signals are'} a false positive for this synthetic batch. Its source values will remain visible in the proposed candidate.</span></label></div>}
@@ -331,13 +399,58 @@ export default function BatchDemo() {
           {inspection.summary.suppressedMentions > 0 && <div className="result-alert exclusion-result"><CircleAlert size={19} /><div><strong>{inspection.summary.suppressedMentions} detected {inspection.summary.suppressedMentions === 1 ? 'mention was' : 'mentions were'} retained after reviewer exclusion</strong><span>Those original values remain in the proposed text. This preview cannot be exported or treated as anonymized.</span></div></div>}
           <div className="result-tabs" role="tablist" aria-label="Batch result views">{([['documents', 'Documents', Files], ['relationships', 'Entities & relationships', Link2], ['verification', 'Verification scorecard', ShieldCheck]] as const).map(([key, label, Icon]) => <button key={key} type="button" role="tab" aria-selected={resultTab === key} className={resultTab === key ? 'selected' : ''} onClick={() => setResultTab(key)}><Icon size={17} /> {label}</button>)}</div>
           {resultTab === 'documents' && selected && <section className="batch-card result-panel">
-            <div className="card-header"><div><p className="overline">DOCUMENT COMPARISON</p><h2>Before & after, side by side</h2></div><span className="quiet-tag">{selected.matches.length} matches in this file</span></div>
+            <div className="card-header"><div><p className="overline">DOCUMENT COMPARISON</p><h2>Inspect the source and proposed candidate</h2></div><span className="quiet-tag">{selected.matches.length} matches in this file</span></div>
             <div className="doc-selector" role="tablist" aria-label="Documents">{inspection.documents.map(document => <button type="button" role="tab" aria-selected={selected.id === document.id} className={selected.id === document.id ? 'selected' : ''} key={document.id} onClick={() => setSelectedDoc(document.id)}>{fileIcon(document.name)}<span>{document.name}</span><small>{document.matches.length}</small></button>)}</div>
-            {selected.mediaPreview && <div className="pdf-note"><CircleAlert size={16} /> {selected.kind === 'pdf' ? 'Pages were rebuilt as pixels in a new image-only PDF held in memory.' : 'The image was re-encoded without source metadata.'} OCR may miss visible text; this same-engine visual check is not independent validation. No media download is authorized.</div>}
-            <div className="comparison"><div><div className="pane-heading"><span>ORIGINAL · SYNTHETIC INPUT</span><span>{selected.matches.length} highlighted matches</span></div><div className="document-pane">{selected.mediaPreview && <MediaPages document={selected} candidate={false} />}<details className="ocr-transcript" open={!selected.mediaPreview}><summary>{selected.mediaPreview ? 'OCR transcript' : 'Source text'}</summary><HighlightedSource document={selected} /></details></div></div><div className="compare-divider"><ArrowDown size={17} /></div><div><div className="pane-heading"><span>{selected.mediaPreview ? 'RASTER CANDIDATE' : 'PROPOSED TEXT CANDIDATE'}</span><span>Not exportable</span></div><div className="document-pane candidate">{selected.mediaPreview && <MediaPages document={selected} candidate={true} />}<details className="ocr-transcript" open={!selected.mediaPreview}><summary>{selected.mediaPreview ? 'Proposed OCR text' : 'Candidate text'}</summary><pre>{selected.candidateText}</pre></details></div></div></div>
+            <div className="comparison-toolbar">
+              <div className="comparison-layout" role="group" aria-label="Comparison layout">
+                {([['split', 'Side by side'], ['original', 'Original only'], ['candidate', 'Candidate only']] as const).map(([mode, label]) =>
+                  <button key={mode} type="button" aria-pressed={comparisonMode === mode}
+                    className={comparisonMode === mode ? 'selected' : ''} onClick={() => setComparisonMode(mode)}>{label}</button>)}
+              </div>
+              {selected.mediaPreview && <div className="zoom-controls" role="group" aria-label="Document zoom">
+                <button type="button" aria-label="Zoom out" title="Zoom out" disabled={mediaZoom === 50}
+                  onClick={() => changeMediaZoom(-1)}><ZoomOut size={17} /></button>
+                <select aria-label="Document zoom" value={String(mediaZoom)}
+                  onChange={event => setMediaZoom(event.target.value === 'fit' ? 'fit' : Number(event.target.value) as MediaZoom)}>
+                  <option value="fit">Fit width</option>
+                  {MEDIA_ZOOMS.map(zoom => <option key={zoom} value={zoom}>{zoom}%</option>)}
+                </select>
+                <button type="button" aria-label="Zoom in" title="Zoom in" disabled={mediaZoom === 200}
+                  onClick={() => changeMediaZoom(1)}><ZoomIn size={17} /></button>
+              </div>}
+            </div>
+            {selected.mediaPreview && <p className="zoom-hint">100% shows native preview pixels. Fit width may shrink text; zoom above 100% magnifies raster pixels. Scroll to pan, with panes synchronized side by side.</p>}
+            {selected.mediaPreview && <div className="pdf-note"><CircleAlert size={16} /> {selected.kind === 'pdf' ? 'Pages were rebuilt as pixels in a new image-only PDF held in memory.' : 'The image was re-encoded without source metadata.'} OCR may miss visible text; this same-engine visual check is not independent validation.</div>}
+            <div className={`comparison ${comparisonMode !== 'split' ? 'is-single' : ''}`}>
+              {comparisonMode !== 'candidate' && <div className="comparison-column"><div className="pane-heading"><span>ORIGINAL · SYNTHETIC INPUT</span><span>{selected.matches.length} highlighted matches</span></div>
+                <div className="document-pane" ref={sourcePane} onScroll={event => syncPaneScroll(event.currentTarget, candidatePane.current)}>
+                  {selected.mediaPreview && <MediaPages document={selected} candidate={false} zoom={mediaZoom} />}
+                  <details className="ocr-transcript" open={!selected.mediaPreview}><summary>{selected.mediaPreview ? 'OCR transcript' : 'Source text'}</summary><HighlightedSource document={selected} /></details>
+                </div></div>}
+              {comparisonMode === 'split' && <div className="compare-divider"><ArrowDown size={17} /></div>}
+              {comparisonMode !== 'original' && <div className="comparison-column"><div className="pane-heading"><span>{selected.mediaPreview ? 'RASTER CANDIDATE' : 'PROPOSED TEXT CANDIDATE'}</span><span>Demo review only</span></div>
+                <div className="document-pane candidate" ref={candidatePane} onScroll={event => syncPaneScroll(event.currentTarget, sourcePane.current)}>
+                  {selected.mediaPreview && <MediaPages document={selected} candidate={true} zoom={mediaZoom} />}
+                  <details className="ocr-transcript" open={!selected.mediaPreview}><summary>{selected.mediaPreview ? 'Proposed OCR text' : 'Candidate text'}</summary><pre>{selected.candidateText}</pre></details>
+                </div></div>}
+            </div>
             <div className="card-footnote"><CircleAlert size={16} /> Highlighting shows selected rule or reviewer spans only. Unmarked content has not been certified safe.</div>
+            <div className="demo-download-actions">
+              <label className="check-label"><input type="checkbox" checked={demoDownloadAcknowledged}
+                onChange={event => setDemoDownloadAcknowledged(event.target.checked)} />
+                I confirm this batch contains synthetic test data only. The candidate is unverified and must not be shared or used as a release artifact.</label>
+              <button type="button" className="demo-download-button" disabled={!demoDownloadAcknowledged || busy || Boolean(demoDownloadBlockReason)}
+                onClick={() => void downloadDemoCandidate(selected).catch(cause => setError(cause instanceof Error ? cause.message : 'Could not save the demo candidate.'))}>
+                <Download size={17} /> Download this demo candidate
+              </button>
+            </div>
+            {demoDownloadBlockReason && <p className="download-blocked">{demoDownloadBlockReason}</p>}
           </section>}
-          {resultTab === 'relationships' && <section className="batch-card result-panel"><div className="card-header"><div><p className="overline">CROSS-DOCUMENT CONTEXT</p><h2>Entities & relationships</h2></div><span className="quiet-tag">Explicit evidence only</span></div><p className="panel-intro">Links require explicit mail headers or account_owner/client_name fields in the same CSV or JSON record. Surrogates are shown for transformed names; excluded names are marked as retained without displaying their source in this graph.</p><div className="relationship-list">{inspection.relationships.length ? inspection.relationships.map((relationship, index) => { const source = byId.get(relationship.sourceId), target = byId.get(relationship.targetId), labels = relationLabels(relationship.type); return <div className="relationship-row" key={`${relationship.documentId}-${relationship.type}-${index}`}><div className="relation-person"><span className="avatar">{graphLabel(source).slice(0, 1).toUpperCase()}</span><div><strong>{graphLabel(source)}</strong><small>{labels.source}</small></div></div><div className="relation-verb" title={relationship.basis}><span>{labels.verb} <ArrowRight size={16} /></span><small>{inspection.documents.find(doc => doc.id === relationship.documentId)?.name}</small></div><div className="relation-person"><span className="avatar purple">{graphLabel(target).slice(0, 1).toUpperCase()}</span><div><strong>{graphLabel(target)}</strong><small>{labels.target}</small></div></div></div> }) : <div className="empty-note">No explicit mail-header or same-record role relationship was found. No relationship is inferred from proximity alone.</div>}</div><div className="entity-chips">{visibleEntities.filter(entity => entity.kind === 'PERSON_NAME').map(entity => <span key={entity.id}><Fingerprint size={15} /> {graphLabel(entity)} <small>· {entity.mentions} mentions</small></span>)}</div></section>}
+          {resultTab === 'relationships' && <section className="batch-card result-panel relationship-panel">
+            <div className="card-header"><div><p className="overline">CROSS-DOCUMENT CONTEXT</p><h2>Entity relationship map</h2></div><span className="quiet-tag">Explicit evidence only</span></div>
+            <p className="panel-intro">This map separates people, organizations, and projects. Arrows carry a typed relationship; it never derives a tie from proximity or co-mentions.</p>
+            <RelationshipGraph graph={inspection.entityGraph} documentNames={new Map(inspection.documents.map((document, index) => [document.id, `Document ${String(index + 1).padStart(2, '0')} · ${document.kind.toUpperCase()}`]))} onInspectDocument={id => { setSelectedDoc(id); setResultTab('documents') }} />
+          </section>}
           {resultTab === 'verification' && <section className="batch-card result-panel"><div className="card-header"><div><p className="overline">EVIDENCE, NOT A VANITY SCORE</p><h2>Verification scorecard</h2></div><span className="status-pill">REVIEW REQUIRED</span></div>
             <p className="panel-intro">These are observable checks for this run. Reference-label agreement appears only when complete synthetic labels were supplied; it does not measure anonymity or performance on other datasets.</p>
             {inspection.verification.annotationScore ? (() => { const score = inspection.verification.annotationScore; return <div className="annotation-panel"><div className="annotation-heading"><div><span className="overline">EXACT-SPAN AGREEMENT</span><h3>Reviewed candidate vs reference labels</h3></div><span className="quiet-tag">{score.basis === 'CURATED_SYNTHETIC_SAMPLE' ? 'Demo-authored sample' : 'Reviewer-attested labels'}</span></div>
@@ -348,7 +461,7 @@ export default function BatchDemo() {
               <p className="annotation-caveat">Counts include manual corrections made before this review. They depend on the supplied labels being complete and are not an independent holdout test, a residual-disclosure test, or release approval.</p>
             </div> })() : <div className="unmeasured-panel"><strong>Precision and recall not measured</strong><span>No complete reference-label set was attached. Return to Detection review to add one; zero retained detected values cannot substitute for labelled ground truth.</span></div>}
             <div className="scorecard-list">{inspection.verification.checks.map((check, index) => <div key={`${check.name}-${index}`}><span className={`check-status status-${check.status.toLowerCase()}`}>{check.status === 'PASS' ? <Check size={15} /> : <CircleAlert size={15} />}{check.status.replaceAll('_', ' ')}</span><div><strong>{check.name}</strong><p>{check.detail}</p></div></div>)}</div><div className="limitations-panel"><h3>What remains unproven</h3><ul>{inspection.limitations.map((item, index) => <li key={index}>{item}</li>)}</ul></div></section>}
-          <div className="page-actions"><button type="button" className="back-button" onClick={() => { setStep('detect'); setResultTab('documents') }}><ArrowLeft size={17} /> Back to detection</button><span className="no-export"><LockKeyhole size={16} /> Export disabled for this development preview</span></div>
+          <div className="page-actions"><button type="button" className="back-button" onClick={() => { setStep('detect'); setResultTab('documents') }}><ArrowLeft size={17} /> Back to detection</button><span className="no-export"><LockKeyhole size={16} /> Buyer release and production export remain disabled</span></div>
         </>}
         {error && <div className="batch-error" role="alert"><CircleAlert size={19} /><span>{error}</span><button type="button" aria-label="Dismiss error" onClick={() => setError('')}><X size={17} /></button></div>}
         {busy && <div className="batch-working" role="status"><RefreshCw size={18} className="spinning" /> Inspecting synthetic files… <button type="button" onClick={() => request.current?.abort()}>Cancel</button></div>}

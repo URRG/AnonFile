@@ -8,6 +8,7 @@ residual detection are *not* independent privacy qualification.
 from __future__ import annotations
 
 import base64
+from collections import Counter
 from functools import lru_cache
 import hashlib
 from io import BytesIO
@@ -26,9 +27,19 @@ MAX_TOTAL_PIXELS = 3_000_000
 MAX_OCR_LINES = 200
 MAX_OCR_CHARS = 30_000
 MAX_PNG_BYTES = 2_500_000
-PDF_SCALE = 1.5
+MAX_CANDIDATE_PDF_BYTES = 10_000_000
+PDF_SCALE = 1.7
 _OCR_LOCK = Lock()
 _PDFIUM_LOCK = Lock()  # PDFium is not thread-safe, even across separate documents.
+_EXPLICIT_HEADER_NAME = re.compile(
+    r"(?im)^(?:from|to|cc):\s*(?P<name>[A-Za-z][A-Za-z .'-]{1,79}?)\s*<[^<>\s]+@[^<>\s]+>\s*$"
+)
+_EXPLICIT_NAME_FIELD = re.compile(r"(?im)^\s*name:\s*(?P<name>[A-Za-z][A-Za-z .'-]{1,79})\s*$")
+_EXPLICIT_ROLE_NAME = re.compile(
+    r"(?im)^(?P<name>[A-Za-z][A-Za-z .'-]{1,79}) is (?:a client of|assistant (?:to|for)) [^.\r\n]{2,100}\.$|"
+    r"^(?P<worker>[A-Za-z][A-Za-z .'-]{1,79}) works on [^.\r\n]{2,100}\.$|"
+    r"^[^.\r\n]{2,100} is assigned to (?P<assignee>[A-Za-z][A-Za-z .'-]{1,79})\.$"
+)
 
 
 @lru_cache(maxsize=1)
@@ -176,16 +187,27 @@ def _verify_pdf_text_layer(native_text: str, lines: list[dict[str, Any]]) -> Non
     if not native_text:
         return
     ocr_values = [line["text"].casefold() for line in lines]
+    required: Counter[tuple[str, str]] = Counter()
     for span in detect_text(native_text):
         if span.entity_type not in {"EMAIL", "PAN", "PHONE", "IP_ADDRESS", "AADHAAR", "CARD"}:
             continue
         source = native_text[span.start:span.end].casefold()
         if span.entity_type in {"PHONE", "AADHAAR", "CARD"}:
-            digits = "".join(char for char in source if char.isdigit())
-            present = any(digits in "".join(char for char in line if char.isdigit()) for line in ocr_values)
-        else:
-            present = any(source in line for line in ocr_values)
-        if not present:
+            source = "".join(char for char in source if char.isdigit())
+        required[(span.entity_type, source)] += 1
+    # A native text layer can expose explicit relationship evidence that is not
+    # matched by detect_text.  Require OCR to preserve those bounded person
+    # signals too, otherwise a graph could claim a relationship from text the
+    # review candidate never actually saw.
+    for pattern in (_EXPLICIT_HEADER_NAME, _EXPLICIT_NAME_FIELD, _EXPLICIT_ROLE_NAME):
+        for match in pattern.finditer(native_text):
+            for group in ("name", "worker", "assignee"):
+                value = match.groupdict().get(group)
+                if value:
+                    required[("PERSON_NAME", value.strip().casefold())] += 1
+    for (kind, source), count in required.items():
+        values = ("".join(char for char in line if char.isdigit()) for line in ocr_values) if kind in {"PHONE", "AADHAAR", "CARD"} else iter(ocr_values)
+        if sum(line.count(source) for line in values) < count:
             raise PayloadError("PDF text-layer and OCR disagree on a sensitive value; inspect the source manually.")
 
 
@@ -275,14 +297,20 @@ def render_candidate(pages: list[dict[str, Any]], matches: list[dict[str, Any]],
         public_pages.append({"number": page["number"], "width": source_image.width, "height": source_image.height,
                              "source_png_base64": base64.b64encode(source_png).decode("ascii"),
                              "candidate_png_base64": base64.b64encode(candidate_png).decode("ascii"),
+                             "candidate_png_sha256": hashlib.sha256(candidate_png).hexdigest(),
                              "ocr_lines": len(page["lines"])})
         candidate_images.append(candidate)
     if len(assigned) != len(matches):
         raise PayloadError("A finding cannot be located on an OCR page; no visual candidate was made.")
     pdf_evidence = None
+    candidate_pdf_base64 = None
     if kind == "pdf":
         generated = _image_pdf(candidate_images)
+        if len(generated) > MAX_CANDIDATE_PDF_BYTES:
+            raise PayloadError("The raster PDF candidate exceeds the synthetic demo response limit.")
         pdf_evidence = {"sha256": hashlib.sha256(generated).hexdigest(), "bytes": len(generated),
                         "pages": len(candidate_images), "source_objects_copied": False}
+        candidate_pdf_base64 = base64.b64encode(generated).decode("ascii")
     return {"pages": public_pages, "fallback_lines": fallback_lines,
-            "self_ocr_residual_sources": visual_residuals, "pdf_raster_evidence": pdf_evidence}
+            "self_ocr_residual_sources": visual_residuals, "pdf_raster_evidence": pdf_evidence,
+            "candidate_pdf_base64": candidate_pdf_base64}

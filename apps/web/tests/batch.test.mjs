@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import ts from 'typescript'
 
@@ -16,7 +17,7 @@ const valid = () => ({ posture: 'SYNTHETIC_DEMO_ONLY', release_authorized: false
     { id: 'f1', name: 'a.txt', kind: 'text', text: 'Riya', candidate_text: 'Gita', size_bytes: 4, preview_fidelity: 'source_text', structure_check: 'not_applicable',
       matches: [{ start: 0, end: 4, source: 'Riya', entity_id: 'E1', kind: 'PERSON_NAME', replacement: 'Gita', applied: true, origin: 'AUTOMATIC' }] },
     { id: 'f2', name: 'b.txt', kind: 'text', text: 'note', candidate_text: 'note', size_bytes: 4, preview_fidelity: 'source_text', structure_check: 'not_applicable', matches: [] },
-  ], entities: [{ id: 'E1', kind: 'PERSON_NAME', source: 'Riya', alias: 'Gita', strategy: 'NAME_LENGTH_MATCH', mentions: 1, excluded: false }], relationships: [],
+  ], entities: [{ id: 'E1', kind: 'PERSON_NAME', source: 'Riya', alias: 'Gita', strategy: 'NAME_LENGTH_MATCH', mentions: 1, excluded: false }], relationships: [], entity_graph: { nodes: [], edges: [] },
   summary: { files: 2, detected_mentions: 1, transformed_mentions: 1, suppressed_mentions: 0, linked_entities: 1, explicit_relationships: 0 },
   verification: { status: 'REVIEW_REQUIRED', known_rule_residual_matches: 0, source_value_residuals: 0, structure_failures: 0,
     checks: [{ name: 'Application', status: 'PASS', detail: 'One match applied.' }, { name: 'Residual', status: 'REVIEW', detail: 'Review.' },
@@ -112,8 +113,9 @@ test('batch client binds raster image previews to staged media and PNG dimension
   response.documents[1].kind = 'image'
   response.documents[1].preview_fidelity = 'raster_ocr_review'
   response.documents[1].media_preview = { pages: [{ number: 1, width: 16, height: 16,
-    source_png_base64: png, candidate_png_base64: png, ocr_lines: 1 }], fallback_lines: 0,
-    self_ocr_residual_sources: 0, pdf_raster_evidence: null }
+    source_png_base64: png, candidate_png_base64: png,
+    candidate_png_sha256: createHash('sha256').update(Buffer.from(png, 'base64')).digest('hex'), ocr_lines: 1 }], fallback_lines: 0,
+    self_ocr_residual_sources: 0, pdf_raster_evidence: null, candidate_pdf_base64: null }
   const mediaRequest = { ...request, files: [files[0], { ...files[1], name: 'b.png' }] }
   t.mock.method(globalThis, 'fetch', async () => Response.json(response))
   const result = await inspectSyntheticBatch(mediaRequest)
@@ -122,8 +124,54 @@ test('batch client binds raster image previews to staged media and PNG dimension
   for (const change of [
     value => { value.documents[1].media_preview.pages[0].width = 17 },
     value => { value.documents[1].media_preview.pages[0].candidate_png_base64 = 'not-a-png' },
+    value => { value.documents[1].media_preview.pages[0].candidate_png_sha256 = 'bad' },
     value => { value.documents[1].media_preview.pdf_raster_evidence = { sha256: '0'.repeat(64), bytes: 500, pages: 1, source_objects_copied: false } },
+    value => { value.documents[1].media_preview.candidate_pdf_base64 = 'JVBERi0xLjQ=' },
     value => { value.documents[1].kind = 'pdf' },
+  ]) {
+    const tampered = structuredClone(response); change(tampered)
+    t.mock.method(globalThis, 'fetch', async () => Response.json(tampered))
+    await assert.rejects(inspectSyntheticBatch(mediaRequest), /invalid review result/)
+    t.mock.restoreAll()
+  }
+})
+
+test('batch client accepts only a typed, non-source entity graph', async t => {
+  const response = valid()
+  response.entity_graph = { nodes: [{ id: 'E1', kind: 'person', label: 'Gita', document_ids: ['f1'] }, { id: 'organization_1', kind: 'organization', label: 'Organization 1', document_ids: ['f2'] }], edges: [{ id: 'relationship_1', type: 'works_at', source_id: 'E1', target_id: 'organization_1', evidence: [{ document_id: 'f2', rule: 'explicit_structured_field_pair', field: 'company' }] }] }
+  t.mock.method(globalThis, 'fetch', async () => Response.json(response))
+  assert.equal((await inspectSyntheticBatch(request)).entityGraph.edges[0].type, 'works_at')
+  t.mock.restoreAll()
+  for (const change of [value => { value.entity_graph.nodes[0].label = 'Riya' }, value => { value.entity_graph.edges[0].evidence[0].field = 'raw@example.test' }, value => { value.entity_graph.edges[0].type = 'sent_to' }]) {
+    const tampered = structuredClone(response); change(tampered)
+    t.mock.method(globalThis, 'fetch', async () => Response.json(tampered))
+    await assert.rejects(inspectSyntheticBatch(request), /invalid review result/)
+    t.mock.restoreAll()
+  }
+})
+
+test('batch client requires bounded candidate PDF bytes matching raster evidence', async t => {
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAI0lEQVR4nGP8//8/AymAiSTVDKMaiANMRKqDg1ENxACSQwkAVW0DHeN02ZEAAAAASUVORK5CYII='
+  const candidate = Buffer.from(`%PDF-1.4\n${'0'.repeat(180)}\n%%EOF\n`)
+  const response = valid()
+  response.documents[1].name = 'b.pdf'
+  response.documents[1].kind = 'pdf'
+  response.documents[1].preview_fidelity = 'raster_ocr_review'
+  response.documents[1].media_preview = { pages: [{ number: 1, width: 16, height: 16,
+    source_png_base64: png, candidate_png_base64: png,
+    candidate_png_sha256: createHash('sha256').update(Buffer.from(png, 'base64')).digest('hex'), ocr_lines: 1 }], fallback_lines: 0,
+    self_ocr_residual_sources: 0, pdf_raster_evidence: { sha256: '0'.repeat(64),
+      bytes: candidate.length, pages: 1, source_objects_copied: false },
+    candidate_pdf_base64: candidate.toString('base64') }
+  const mediaRequest = { ...request, files: [files[0], { ...files[1], name: 'b.pdf' }] }
+  t.mock.method(globalThis, 'fetch', async () => Response.json(response))
+  assert.equal((await inspectSyntheticBatch(mediaRequest)).documents[1].mediaPreview.candidatePdfBase64,
+    candidate.toString('base64'))
+  t.mock.restoreAll()
+  for (const change of [
+    value => { value.documents[1].media_preview.candidate_pdf_base64 = undefined },
+    value => { value.documents[1].media_preview.candidate_pdf_base64 = 'AAAA' },
+    value => { value.documents[1].media_preview.pdf_raster_evidence.bytes++ },
   ]) {
     const tampered = structuredClone(response); change(tampered)
     t.mock.method(globalThis, 'fetch', async () => Response.json(tampered))

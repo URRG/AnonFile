@@ -5,7 +5,7 @@ The target workflow is enterprise source data → intermediary processing and qu
 
 ## Current status: synthetic demo and security foundations, not production-ready
 
-This is **not production-ready** and must not receive customer data. The current rules do not establish anonymity or data-sale rights. There is no approved release, production candidate-output API, or buyer download. Release output is withheld and approval requests fail closed. An explicitly opted-in development-only synthetic inspector can display an unqualified transformed preview; that preview is not an artifact, qualification, approval or export.
+This is **not production-ready** and must not receive customer data. The current rules do not establish anonymity or data-sale rights. There is no approved release, production candidate-output API, or buyer download. Release output is withheld and approval requests fail closed. An explicitly opted-in development-only synthetic inspector can display an unqualified transformed preview and let an operator save a local demo candidate after a synthetic-data acknowledgement. That review copy is not qualification, approval, or a production export.
 
 Implemented: bounded typed text/JSON processing, Unicode-aware original-offset spans, sensitive-field suppression, explicit development authentication, tenant/role checks, independent-review restrictions, safe error responses, and a gold-label detection evaluation CLI. The advanced browser control plane displays metadata only and has no offline success fallback. The separately enabled synthetic inspector supports small UTF-8 text/CSV/JSON/JSONL previews and prominently disclaims incomplete detection.
 
@@ -30,6 +30,9 @@ With Docker Compose installed, `docker compose up --build` serves localhost port
 For a local, no-Docker synthetic upload and rules-preview walkthrough, see the
 [demo guide](docs/synthetic-demo.md). The complete set of remaining product
 gates is tracked in the [demo-to-product roadmap](docs/demo-to-product-roadmap.md).
+The synthetic review UI's typed relationship model and strict evidence rules
+are documented in the [entity graph contract](docs/entity-relationship-graph.md);
+identifier replacement safety tiers are in the [format-aware pseudonym policy](docs/format-aware-pseudonyms.md).
 
 Without Docker, run the API and Vite as described in the development guide. The API does not automatically load `.env`; explicitly export its variables for non-Compose execution.
 
