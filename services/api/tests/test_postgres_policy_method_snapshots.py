@@ -164,7 +164,7 @@ def test_live_postgres_constraints_replay_terminal_and_immutability(live):
     with psycopg.connect(dsn, autocommit=False) as connection:
         connection.execute("INSERT INTO anonflow_policy_method_snapshots (tenant_ref,policy_method_ref,policy_digest,method_id,method_version,method_config_digest,taxonomy_mapping_digest,output_schema_digest,expires_at) VALUES (%s,%s,%s,'x','v',%s,%s,%s,date_trunc('second',clock_timestamp())+interval '1 minute')",(tenant_ref,raw_timestamp_ref,digest(),digest(),digest(),digest()))
         with pytest.raises(psycopg.errors.CheckViolation):
-            connection.execute("INSERT INTO anonflow_policy_method_snapshot_fences (tenant_ref,policy_method_ref,generation,state,event_ref,changed_at) VALUES (%s,%s,0,'ACTIVE',NULL,clock_timestamp())",(tenant_ref,raw_timestamp_ref))
+            connection.execute("INSERT INTO anonflow_policy_method_snapshot_fences (tenant_ref,policy_method_ref,generation,state,event_ref,changed_at) VALUES (%s,%s,0,'ACTIVE',NULL,date_trunc('second',clock_timestamp())+interval '1 microsecond')",(tenant_ref,raw_timestamp_ref))
 
 
 def test_live_postgres_expiry_boundary_is_fail_closed(live):
