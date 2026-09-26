@@ -57,7 +57,7 @@ def setup():
     db=DB(); factory=lambda:Conn(db); tenant=PostgresTenantIdentityAuthority(factory); return db,tenant,PostgresSupplierOrganizationAuthority(factory,tenant)
 def org(ref=None,**changes):
     values=dict(tenant_ref=opaque("tenantref:v1:"),supplier_org_ref=ref or opaque("supplierorgref:v1:"),provisioning_case_ref=opaque("supplierorgcase:v1:"),evidence_digest=digest(),expires_at=NOW+timedelta(minutes=2)); values.update(changes); return SupplierOrganization(**values)
-def provision(tenant,ref): tenant.create(TenantIdentity("server-tenant",ref))
+def provision(tenant,ref,app="server-tenant"): tenant.create(TenantIdentity(app,ref))
 
 def test_domain_separated_identity_exact_replay_and_no_self_provisioning():
     db,tenant,service=setup(); item=org(); provision(tenant,item.tenant_ref)
@@ -85,10 +85,13 @@ def live():
     factory=lambda:psycopg.connect(dsn,autocommit=True); tenant=PostgresTenantIdentityAuthority(factory); return dsn,psycopg,tenant,PostgresSupplierOrganizationAuthority(factory,tenant)
 
 def test_live_postgres_raw_sql_state_machine_immutability_and_reapply(live):
-    dsn,psycopg,tenant,service=live; item=org(); provision(tenant,item.tenant_ref); service.create(item,application_tenant="server-tenant",expected_tenant_generation=0)
+    dsn,psycopg,tenant,service=live
+    app="supplier-live-"+secrets.token_hex(8)
+    item=org(expires_at=datetime.now(UTC).replace(microsecond=0)+timedelta(minutes=2))
+    provision(tenant,item.tenant_ref,app); service.create(item,application_tenant=app,expected_tenant_generation=0)
     with psycopg.connect(dsn,autocommit=True) as c:
         with pytest.raises(psycopg.errors.RaiseException): c.execute("UPDATE anonflow_supplier_organizations SET evidence_digest=%s WHERE supplier_org_ref=%s",(digest(),item.supplier_org_ref))
         with pytest.raises(psycopg.errors.RaiseException): c.execute("INSERT INTO anonflow_supplier_organization_fences (tenant_ref,supplier_org_ref,generation,state,event_ref) VALUES (%s,%s,2,'REVOKED',%s)",(item.tenant_ref,item.supplier_org_ref,opaque("supplierorgfence:v1:")))
-    terminal=service.terminal(application_tenant="server-tenant",tenant_ref=item.tenant_ref,supplier_org_ref=item.supplier_org_ref,expected_tenant_generation=0,expected_generation=0,state="REVOKED",event_ref=opaque("supplierorgfence:v1:")); assert terminal.state=="REVOKED"
+    terminal=service.terminal(application_tenant=app,tenant_ref=item.tenant_ref,supplier_org_ref=item.supplier_org_ref,expected_tenant_generation=0,expected_generation=0,state="REVOKED",event_ref=opaque("supplierorgfence:v1:")); assert terminal.state=="REVOKED"
     with psycopg.connect(dsn,autocommit=True) as c:
         with pytest.raises(psycopg.errors.RaiseException): c.execute("DELETE FROM anonflow_supplier_organization_fences WHERE supplier_org_ref=%s",(item.supplier_org_ref,))
