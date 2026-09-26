@@ -23,8 +23,9 @@ from app.media_preview import extract_media, render_candidate
 from app.processing import _field_type, detect_text
 
 MAX_FILES = 3
-MAX_FILE_BYTES = 100_000
-MAX_TOTAL_BYTES = 300_000
+MAX_TEXT_FILE_BYTES = 100_000
+MAX_MEDIA_FILE_BYTES = 500_000
+MAX_TOTAL_BYTES = 1_500_000
 MAX_BATCH_MEDIA_PIXELS = 3_000_000
 SUPPORTED = {".txt": "text", ".csv": "csv", ".json": "json", ".jsonl": "jsonl", ".pdf": "pdf",
              ".png": "image", ".jpg": "image", ".jpeg": "image"}
@@ -164,15 +165,16 @@ def _read_file(item: dict[str, Any]) -> dict[str, Any]:
     extension = PurePath(name.lower()).suffix
     if extension not in SUPPORTED:
         raise PayloadError("Supported demo files are TXT, CSV, JSON, JSONL, PDF, PNG, and JPEG.")
-    if not isinstance(encoded, str) or len(encoded) > 140_000:
+    kind = SUPPORTED[extension]
+    if not isinstance(encoded, str) or len(encoded) > 670_000:
         raise PayloadError("Demo file exceeds the size limit.")
     try:
         raw = base64.b64decode(encoded, validate=True)
     except (ValueError, binascii.Error):
         raise PayloadError("Invalid demo file encoding.") from None
-    if not raw or len(raw) > MAX_FILE_BYTES:
-        raise PayloadError("Each demo file must be between 1 byte and 100 KB.")
-    kind = SUPPORTED[extension]
+    limit = MAX_MEDIA_FILE_BYTES if kind in {"pdf", "image"} else MAX_TEXT_FILE_BYTES
+    if not raw or len(raw) > limit:
+        raise PayloadError("A demo file exceeds the size limit for its format.")
     media_pages = None
     if kind in {"pdf", "image"}:
         if kind == "pdf" and not raw.startswith(b"%PDF-"):
@@ -314,9 +316,8 @@ def _names_and_headers(documents: list[dict[str, Any]]) -> tuple[set[str], list[
     return names, edges
 
 
-def _structured_role_edges(documents: list[dict[str, Any]]) -> list[tuple[str, str, str, str]]:
-    """Read only direct owner/client fields in one parsed record, never proximity."""
-    edges: list[tuple[str, str, str, str]] = []
+def _structured_records(documents: list[dict[str, Any]]):
+    """Yield one parsed record at a time; never link values across records."""
     for document in documents:
         kind = document["kind"]
         if kind == "json":
@@ -329,14 +330,81 @@ def _structured_role_edges(documents: list[dict[str, Any]]) -> list[tuple[str, s
         else:
             continue
         for record in records:
-            if not isinstance(record, dict):
-                continue
-            owner, client = record.get("account_owner"), record.get("client_name")
-            if (isinstance(owner, str) and isinstance(client, str)
-                    and SAFE_NAME.fullmatch(owner.strip()) and SAFE_NAME.fullmatch(client.strip())
-                    and owner.strip().casefold() != client.strip().casefold()):
-                edges.append((owner.strip(), client.strip(), document["id"], kind))
+            if isinstance(record, dict):
+                yield document, record
+
+
+def _email_owners(documents: list[dict[str, Any]]) -> dict[str, str]:
+    """Bind an address to a person only with a header or unambiguous same-record evidence."""
+    owners: dict[str, str] = {}
+
+    def bind(address: str, name: str) -> None:
+        key = address.casefold()
+        prior = owners.get(key)
+        if prior is not None and prior != name.casefold():
+            raise PayloadError("Conflicting person/email associations need manual identity review.")
+        owners[key] = name.casefold()
+
+    for document in documents:
+        for match in HEADER.finditer(document["text"]):
+            name = match.group(2).strip()
+            if SAFE_NAME.fullmatch(name):
+                bind(match.group(3), name)
+    for _, record in _structured_records(documents):
+        names = {value.strip().casefold() for key, value in record.items()
+                 if isinstance(key, str) and key.strip().casefold() in NAME_FIELDS
+                 and isinstance(value, str) and SAFE_NAME.fullmatch(value.strip())}
+        if len(names) != 1:
+            continue
+        addresses = [value.strip() for key, value in record.items()
+                     if isinstance(key, str) and _field_type(key) and _field_type(key)[0] == "EMAIL"
+                     and isinstance(value, str)]
+        for address in addresses:
+            bind(address, next(iter(names)))
+    return owners
+
+
+def _structured_role_edges(documents: list[dict[str, Any]]) -> list[tuple[str, str, str, str]]:
+    """Read only direct owner/client fields in one parsed record, never proximity."""
+    edges: list[tuple[str, str, str, str]] = []
+    for document, record in _structured_records(documents):
+        kind = document["kind"]
+        owner, client = record.get("account_owner"), record.get("client_name")
+        if (isinstance(owner, str) and isinstance(client, str)
+                and SAFE_NAME.fullmatch(owner.strip()) and SAFE_NAME.fullmatch(client.strip())
+                and owner.strip().casefold() != client.strip().casefold()):
+            edges.append((owner.strip(), client.strip(), document["id"], kind))
     return edges
+
+
+def _email_aliases(keys: list[tuple[str, str]], names_by_key: dict[str, str],
+                   name_aliases: dict[str, str], owners: dict[str, str],
+                   exclusions: dict[str, str], id_by_key: dict[tuple[str, str], str]) -> dict[str, str]:
+    """Keep email syntax and owner/domain equivalence without using a routable domain."""
+    emails = [value for kind, value in keys if kind == "EMAIL"]
+    domains = sorted({value.rsplit("@", 1)[1] for value in emails})
+    domain_aliases = {domain: f"org{index}.test"
+                      for index, domain in enumerate((domain for domain in domains if domain != "example.test"), 1)}
+    if "example.test" in domains:
+        domain_aliases["example.test"] = "example.test"
+    reserved = set(emails)
+    used: set[str] = set()
+    aliases: dict[str, str] = {}
+    for index, email in enumerate(emails, 1):
+        owner = owners.get(email)
+        if owner not in names_by_key or id_by_key[("PERSON_NAME", owner)] in exclusions:
+            owner = None
+        local = re.sub(r"[^a-z0-9]", "", name_aliases[owner].casefold()) if owner else f"contact{index}"
+        local = local or f"contact{index}"
+        domain = domain_aliases[email.rsplit("@", 1)[1]]
+        candidate = f"{local}@{domain}"
+        suffix = 1
+        while candidate in used or candidate in reserved:
+            suffix += 1
+            candidate = f"{local}{suffix}@{domain}"
+        aliases[email] = candidate
+        used.add(candidate)
+    return aliases
 
 
 def _choose_alias(name: str, used: set[str]) -> str:
@@ -379,7 +447,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
                 raise PayloadError("The synthetic batch exceeds the three-million-pixel media review limit.")
         documents.append(document)
     if len({doc["id"] for doc in documents}) != len(documents) or sum(doc["size_bytes"] for doc in documents) > MAX_TOTAL_BYTES:
-        raise PayloadError("Duplicate file identities or batch size over 300 KB.")
+        raise PayloadError("Duplicate file identities or batch size over 1.5 MB.")
     phrases = payload.get("manual_names", [])
     manual_findings = payload.get("manual_findings", [])
     overrides = payload.get("alias_overrides", {})
@@ -409,6 +477,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
     for document in documents:
         document["_fields"] = _structured_fields(document)
     names, raw_edges = _names_and_headers(documents)
+    email_owners = _email_owners(documents)
     role_edges = _structured_role_edges(documents)
     for document in documents:
         for start, end, kind in document["_fields"]:
@@ -457,6 +526,9 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
         if any(alias.casefold() == other.casefold() for other_name, other in default_aliases.items()
                if other_name != normalized and id_by_key[("PERSON_NAME", other_name)] not in overrides):
             raise PayloadError("An alias conflicts with another person's proposed replacement.")
+    name_aliases = {normalized: overrides.get(id_by_key[("PERSON_NAME", normalized)], default_aliases[normalized])
+                    for normalized in names_by_key}
+    email_aliases = _email_aliases(keys, names_by_key, name_aliases, email_owners, exclusions, id_by_key)
     entities: list[dict[str, Any]] = []
     for kind, normalized in keys:
         entity_id = id_by_key[(kind, normalized)]
@@ -468,7 +540,11 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
             raw_display = source_by_key[(kind, normalized)]
             display = raw_display[:100] + ("…" if len(raw_display) > 100 else "")
         if kind == "PERSON_NAME":
-            alias = overrides.get(entity_id) or default_aliases[normalized]
+            alias = name_aliases[normalized]
+        elif kind == "EMAIL":
+            if entity_id in overrides:
+                raise PayloadError("Only person-name aliases can be changed in this demo.")
+            alias = email_aliases[normalized]
         else:
             if entity_id in overrides:
                 raise PayloadError("Only person-name aliases can be changed in this demo.")
@@ -552,6 +628,11 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
                                   "type": "ACCOUNT_OWNER_OF", "document_id": document_id,
                                   "basis": f"same {kind.upper()} record account_owner/client_name"})
     residual = sum(len(detect_text(doc["candidate_text"])) for doc in documents)
+    source_value_residuals = sum(
+        any(_exact_phrase_matches(doc["candidate_text"], names_by_key[normalized] if kind == "PERSON_NAME"
+                                  else source_by_key[(kind, normalized)]) for doc in documents)
+        for kind, normalized in keys
+    )
     media_documents = [doc for doc in documents if "media_preview" in doc]
     visual_residuals = sum(doc["media_preview"]["self_ocr_residual_sources"] for doc in media_documents)
     visual_fallbacks = sum(doc["media_preview"]["fallback_lines"] for doc in media_documents)
@@ -571,6 +652,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
                     "explicit_relationships": len(relationships)},
         "verification": {
             "status": "REVIEW_REQUIRED", "known_rule_residual_matches": residual,
+            "source_value_residuals": source_value_residuals,
             "structure_failures": structure_failures, "annotation_score": annotation_score,
             "checks": [
                 {"name": "Selected-span application", "status": "PASS" if total_mentions and transformed_mentions == total_mentions else "REVIEW",
@@ -579,8 +661,10 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
                  "detail": f"{total_mentions - transformed_mentions} matches were retained after explicit false-positive review. No exclusion authorizes release."},
                 {"name": "Structured syntax", "status": "FAIL" if structure_failures else "PASS",
                  "detail": "CSV/JSON/JSONL candidates were reparsed where applicable."},
+                {"name": "Source-value persistence", "status": "REVIEW" if source_value_residuals else "PASS",
+                 "detail": f"{source_value_residuals} detected source values still occur in candidate text. This exact-value check cannot find source values that detection missed or independently assess pixels."},
                 {"name": "Residual known-rule scan", "status": "REVIEW" if residual or exclusions else "PASS",
-                 "detail": f"{residual} bounded-rule matches remain in candidate text. Reviewer-excluded names may not be covered by this scan; zero matches do not prove anonymity."},
+                 "detail": f"{residual} bounded-rule matches occur in candidate text, including expected email-shaped pseudonyms. This pattern count is not the number of retained source values; zero does not prove anonymity."},
                 {"name": "Raster media and OCR review", "status": "REVIEW" if media_documents else "NOT_TESTED",
                  "detail": f"{len(media_documents)} media files were rasterized and OCR-reviewed; {visual_residuals} source values remain under the same OCR engine and {visual_fallbacks} lines needed solid-redaction fallback. This is not independent visual validation or release approval."
                  if media_documents else "No PDF/image was processed in this batch."},
@@ -595,6 +679,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
             "Manually added sensitive phrases are exact bounded corrections, not automatic recognition of similar unseen values.",
             "Structured field recognition is bounded to supported JSON key/value syntax and one-line CSV cells; unsupported forms are rejected rather than silently passed through.",
             "Exact-name linking can merge different people who share a name; ambiguous identities need human resolution.",
+            "Email-shaped pseudonyms use reserved .test domains and preserve only explicitly evidenced person/email and source-domain equivalence within this batch; they are not deliverable contact addresses.",
             "PDF candidates are rebuilt as image-only PDFs in memory, but only raster page previews and a digest are returned; no PDF download or delivery is authorized.",
             "Image and scanned-PDF OCR may miss or misread content. The same-engine raster recheck is not independent validation, and source content outside recognized OCR lines may remain visible.",
             "Relationship edges require explicit mail headers or account_owner/client_name in the same parsed record; they do not infer social or organizational ties.",

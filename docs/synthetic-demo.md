@@ -44,8 +44,18 @@ remains unchanged. These corrections do not teach the detector to recognize
 unseen values. The backend accepts that label basis only for the exact
 built-in files and labels; changing the sample invalidates it.
 
+To demonstrate actual raster rewriting, choose **Use PDF + image sample** on
+the upload screen instead. This loads a fictional email PDF, an image service
+note, and a JSON record. Analyze the batch, inspect the two explicit
+relationships, and open both media documents in the side-by-side comparison.
+The image intentionally retains fictional booking code `DEMO-4822` until you
+add it as **Other sensitive** in Detection review and rescan. This is a visible
+example of the detector's limitations, not a claim that all PII is found.
+The media scorecard remains **not measured** because OCR transcript matches
+are not an independently annotated pixel-level holdout.
+
 You may instead select two or three synthetic TXT, CSV, JSON, JSONL, PDF,
-PNG, or JPEG files (100 KB each, 300 KB combined). The demo rasterizes up to
+PNG, or JPEG files (100 KB per text file, 500 KB per PDF/image, 1.5 MB combined). The demo rasterizes up to
 two PDF pages per file and OCRs each raster page or image. The entire batch is
 limited to three million media pixels. Detected spans are applied to the OCR
 lines on a new pixel image, with side-by-side source and candidate page views.
@@ -57,7 +67,16 @@ or ambiguous media are rejected.
 This is a visual *review candidate*, not safe redaction certification. OCR can
 miss or misread visible sensitive content; no detection outside recognized
 lines is assured. The candidate is rechecked only by the same OCR engine, so
-zero residual matches is not independent assurance. The page rasterization
+zero retained *detected source values* is not independent assurance. Names
+are replaced with same-length pseudonyms. Emails linked by explicit mail
+headers or one unambiguous structured record use the person's pseudonym as
+their local part, for example `Riya <riya@example.test>` becomes
+`Gita <gita@example.test>` consistently across the batch. Other source domains
+are mapped consistently to reserved `.test` domains rather than potentially
+deliverable addresses. An email with no evidenced owner gets a generic
+`contactN@orgN.test` surrogate. The scorecard separates retained source values
+from expected PII-shaped surrogate matches. Neither metric proves complete
+detection or anonymity. The page rasterization
 also loses selectable text and can change fidelity. Never use this demo for
 real supplier data or treat the candidate preview as releasable. Without
 complete reference labels, precision and recall remain **not measured**. The

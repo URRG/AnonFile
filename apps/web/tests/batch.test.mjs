@@ -18,13 +18,17 @@ const valid = () => ({ posture: 'SYNTHETIC_DEMO_ONLY', release_authorized: false
     { id: 'f2', name: 'b.txt', kind: 'text', text: 'note', candidate_text: 'note', size_bytes: 4, preview_fidelity: 'source_text', structure_check: 'not_applicable', matches: [] },
   ], entities: [{ id: 'E1', kind: 'PERSON_NAME', source: 'Riya', alias: 'Gita', mentions: 1, excluded: false }], relationships: [],
   summary: { files: 2, detected_mentions: 1, transformed_mentions: 1, suppressed_mentions: 0, linked_entities: 1, explicit_relationships: 0 },
-  verification: { status: 'REVIEW_REQUIRED', known_rule_residual_matches: 0, structure_failures: 0,
+  verification: { status: 'REVIEW_REQUIRED', known_rule_residual_matches: 0, source_value_residuals: 0, structure_failures: 0,
     checks: [{ name: 'Application', status: 'PASS', detail: 'One match applied.' }, { name: 'Residual', status: 'REVIEW', detail: 'Review.' },
       { name: 'Benchmark', status: 'NOT_MEASURED', detail: 'No ground truth.' }] }, limitations: ['Synthetic only.'] })
 
 test('batch upload accepts bounded raster media and rejects unsupported types before reading', async () => {
   await assert.rejects(readBatchFile({ name: 'image.gif', size: 50, arrayBuffer: () => { throw new Error('must not read') } }, 'f1'), /Choose/)
   await assert.rejects(readBatchFile({ name: 'a.txt', size: 100_001, arrayBuffer: () => { throw new Error('must not read') } }, 'f1'), /100 KB/)
+  await assert.rejects(readBatchFile({ name: 'large.pdf', size: 500_001, arrayBuffer: () => { throw new Error('must not read') } }, 'f1'), /500 KB/)
+  const largerPdf = await readBatchFile({ name: 'larger.pdf', size: 100_001,
+    arrayBuffer: async () => new Uint8Array(100_001).buffer }, 'f1')
+  assert.equal(largerPdf.size, 100_001)
   const accepted = await readBatchFile({ name: 'a.pdf', size: 4, arrayBuffer: async () => Uint8Array.from([37, 80, 68, 70]).buffer }, 'f1')
   assert.equal(accepted.contentBase64, 'JVBERg==')
   const image = await readBatchFile({ name: 'photo.png', size: 4, arrayBuffer: async () => Uint8Array.from([1, 2, 3, 4]).buffer }, 'f2')
@@ -40,6 +44,30 @@ test('batch client sends one synthetic-only request and validates candidate', as
   assert.equal(body.synthetic_only, true)
   assert.equal(body.files.length, 2)
   assert.equal(mock.mock.calls[0].arguments[1].headers.Authorization, 'Bearer synthetic-token')
+})
+
+test('batch client accepts non-deliverable email surrogates and refuses old markers', async t => {
+  const emailFiles = [{ id: 'f1', name: 'a.txt', size: 17, contentBase64: Buffer.from('riya@example.test').toString('base64') }, files[1]]
+  const emailRequest = { ...request, files: emailFiles }
+  const response = valid()
+  response.documents[0].text = 'riya@example.test'
+  response.documents[0].candidate_text = 'gita@example.test'
+  response.documents[0].size_bytes = 17
+  response.documents[0].matches[0] = { start: 0, end: 17, source: 'riya@example.test', entity_id: 'E1',
+    kind: 'EMAIL', replacement: 'gita@example.test', applied: true, origin: 'AUTOMATIC' }
+  response.entities[0] = { id: 'E1', kind: 'EMAIL', source: 'riya@example.test', alias: 'gita@example.test', mentions: 1, excluded: false }
+  t.mock.method(globalThis, 'fetch', async () => Response.json(response))
+  assert.equal((await inspectSyntheticBatch(emailRequest)).entities[0].alias, 'gita@example.test')
+  t.mock.restoreAll()
+  for (const alias of ['[EMAIL_E1]', 'riya@example.test', 'gita@company.com']) {
+    const tampered = structuredClone(response)
+    tampered.entities[0].alias = alias
+    tampered.documents[0].matches[0].replacement = alias
+    tampered.documents[0].candidate_text = alias
+    t.mock.method(globalThis, 'fetch', async () => Response.json(tampered))
+    await assert.rejects(inspectSyntheticBatch(emailRequest), /invalid review result/)
+    t.mock.restoreAll()
+  }
 })
 
 test('batch client sends bounded reviewer corrections and rejects invalid values before transport', async t => {
@@ -105,6 +133,7 @@ test('batch client rejects fabricated approval, mismatched content and counts', 
     value => { value.documents[0].matches[0].applied = false },
     value => { value.documents[0].matches[0].origin = 'UNVERIFIED' },
     value => { value.verification.status = 'APPROVED' },
+    value => { value.verification.source_value_residuals = -1 },
   ]) {
     const item = valid(); change(item)
     t.mock.method(globalThis, 'fetch', async () => Response.json(item))

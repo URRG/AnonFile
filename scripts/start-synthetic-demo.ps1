@@ -78,6 +78,23 @@ try {
         throw 'The synthetic batch demo self-check failed.'
     }
 
+    # Exercise the public fictional media fixtures before presenting a PDF/image
+    # demo. The media bytes stay on loopback; this is not a redaction guarantee.
+    $mediaRoot = Join-Path $repoRoot 'apps\web\public\demo-media'
+    $mediaFiles = @(
+        @{ id = 'pdf'; name = '01-email-thread.pdf'; content_base64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $mediaRoot '01-email-thread.pdf'))) },
+        @{ id = 'image'; name = '02-service-note.png'; content_base64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $mediaRoot '02-service-note.png'))) },
+        @{ id = 'record'; name = '03-support-record.json'; content_base64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('{"client_name":"Sita","account_owner":"Riya","note":"Riya emailed Sita about DEMO-4822."}')) }
+    )
+    $mediaBody = @{ files = $mediaFiles; synthetic_only = $true } | ConvertTo-Json -Depth 5 -Compress
+    $mediaCheck = Invoke-RestMethod -Uri "http://127.0.0.1:$ApiPort/demo/batch/inspect" -Method Post -Headers @{ Authorization = "Bearer $token" } -ContentType 'application/json' -Body $mediaBody -TimeoutSec 30
+    if ($mediaCheck.posture -ne 'SYNTHETIC_DEMO_ONLY' -or $mediaCheck.export_available -ne $false -or
+        $mediaCheck.summary.files -ne 3 -or $mediaCheck.summary.explicit_relationships -ne 2 -or
+        $mediaCheck.documents[0].media_preview.pages.Count -ne 1 -or $mediaCheck.documents[1].media_preview.pages.Count -ne 1 -or
+        $mediaCheck.documents[0].candidate_text.Contains('Riya') -or $mediaCheck.documents[1].candidate_text.Contains('Sita')) {
+        throw 'The fictional PDF/image batch self-check failed.'
+    }
+
     Write-Host "Synthetic demo: http://127.0.0.1:$WebPort/"
     Write-Host "Processor token (paste into the UI): $token"
     Write-Host 'Use only synthetic files. No production release or anonymity guarantee is available.'
