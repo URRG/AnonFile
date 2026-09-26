@@ -90,6 +90,8 @@ def test_live_postgres_raw_sql_state_machine_immutability_and_reapply(live):
     item=org(expires_at=datetime.now(UTC).replace(microsecond=0)+timedelta(minutes=2))
     provision(tenant,item.tenant_ref,app); service.create(item,application_tenant=app,expected_tenant_generation=0)
     with psycopg.connect(dsn,autocommit=True) as c:
+        with pytest.raises(psycopg.errors.RaiseException):
+            c.execute("INSERT INTO anonflow_supplier_organizations (tenant_ref,supplier_org_ref,provisioning_case_ref,evidence_digest,expires_at) VALUES (%s,%s,%s,%s,date_trunc('second',clock_timestamp())-interval '1 second')",(item.tenant_ref,opaque("supplierorgref:v1:"),opaque("supplierorgcase:v1:"),digest()))
         with pytest.raises(psycopg.errors.RaiseException): c.execute("UPDATE anonflow_supplier_organizations SET evidence_digest=%s WHERE supplier_org_ref=%s",(digest(),item.supplier_org_ref))
         with pytest.raises(psycopg.errors.RaiseException): c.execute("INSERT INTO anonflow_supplier_organization_fences (tenant_ref,supplier_org_ref,generation,state,event_ref) VALUES (%s,%s,2,'REVOKED',%s)",(item.tenant_ref,item.supplier_org_ref,opaque("supplierorgfence:v1:")))
     terminal=service.terminal(application_tenant=app,tenant_ref=item.tenant_ref,supplier_org_ref=item.supplier_org_ref,expected_tenant_generation=0,expected_generation=0,state="REVOKED",event_ref=opaque("supplierorgfence:v1:")); assert terminal.state=="REVOKED"

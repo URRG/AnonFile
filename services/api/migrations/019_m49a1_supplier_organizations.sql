@@ -21,6 +21,16 @@ CREATE TABLE IF NOT EXISTS anonflow_supplier_organization_fences (
  CHECK ((generation=0 AND state='ACTIVE' AND event_ref IS NULL) OR (generation=1 AND state IN ('QUARANTINED','REVOKED','EXPIRED') AND event_ref IS NOT NULL)),
  CHECK (changed_at = date_trunc('second', changed_at))
 );
+-- Raw SQL cannot create an already-expired ACTIVE identity and then supply its
+-- baseline fence.  ``clock_timestamp`` is deliberately used rather than a
+-- transaction-start timestamp so a long-running transaction cannot bypass it.
+CREATE OR REPLACE FUNCTION anonflow_validate_supplier_organization_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF NEW.expires_at <= date_trunc('second',clock_timestamp()) THEN
+   RAISE EXCEPTION 'supplier organization is already expired';
+ END IF;
+ RETURN NEW;
+END; $$;
 CREATE OR REPLACE FUNCTION anonflow_validate_supplier_organization_fence_insert() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE prior_generation BIGINT; prior_state TEXT; parent_expiry TIMESTAMPTZ;
 BEGIN
@@ -44,6 +54,8 @@ CREATE OR REPLACE FUNCTION anonflow_reject_supplier_organization_mutation() RETU
 CREATE OR REPLACE FUNCTION anonflow_reject_supplier_organization_fence_mutation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'supplier organization fences are immutable'; END; $$;
 DROP TRIGGER IF EXISTS anonflow_supplier_organizations_immutable ON anonflow_supplier_organizations;
 CREATE TRIGGER anonflow_supplier_organizations_immutable BEFORE UPDATE OR DELETE ON anonflow_supplier_organizations FOR EACH ROW EXECUTE FUNCTION anonflow_reject_supplier_organization_mutation();
+DROP TRIGGER IF EXISTS anonflow_supplier_organizations_expiry_gate ON anonflow_supplier_organizations;
+CREATE TRIGGER anonflow_supplier_organizations_expiry_gate BEFORE INSERT ON anonflow_supplier_organizations FOR EACH ROW EXECUTE FUNCTION anonflow_validate_supplier_organization_insert();
 DROP TRIGGER IF EXISTS anonflow_supplier_organization_fences_immutable ON anonflow_supplier_organization_fences;
 CREATE TRIGGER anonflow_supplier_organization_fences_immutable BEFORE UPDATE OR DELETE ON anonflow_supplier_organization_fences FOR EACH ROW EXECUTE FUNCTION anonflow_reject_supplier_organization_fence_mutation();
 DROP TRIGGER IF EXISTS anonflow_supplier_organization_fences_state_machine ON anonflow_supplier_organization_fences;
