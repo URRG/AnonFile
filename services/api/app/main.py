@@ -224,10 +224,15 @@ class DemoBatchReferenceAnnotations(StrictModel):
     basis: Literal["REVIEWER_ATTESTED_EXHAUSTIVE", "CURATED_SYNTHETIC_SAMPLE"]
     documents: list[DemoBatchReferenceFile] = Field(min_length=2, max_length=3)
 
+class DemoBatchManualFinding(StrictModel):
+    value: str = Field(min_length=2, max_length=80)
+    kind: Literal["OTHER_SENSITIVE", "BUSINESS_CONFIDENTIAL", "QUASI_IDENTIFIER", "GOVERNMENT_ID", "DATE_OF_BIRTH"]
+
 class DemoBatchCreate(StrictModel):
     files: list[DemoBatchFile] = Field(min_length=2, max_length=3)
     synthetic_only: Literal[True]
     manual_names: list[str] = Field(default_factory=list, max_length=20)
+    manual_findings: list[DemoBatchManualFinding] = Field(default_factory=list, max_length=20)
     alias_overrides: dict[str, str] = Field(default_factory=dict)
     review_exclusions: dict[str, Literal["FALSE_POSITIVE_CONFIRMED"]] = Field(default_factory=dict, max_length=100)
     reference_annotations: DemoBatchReferenceAnnotations | None = None

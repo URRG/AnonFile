@@ -3,11 +3,17 @@ import { ArrowDown, ArrowLeft, ArrowRight, Check, ChevronRight, CircleAlert, Fil
   Files, Fingerprint, FlaskConical, Link2, LockKeyhole, Plus, RefreshCw, Search, ShieldCheck,
   Sparkles, UploadCloud, X } from 'lucide-react'
 import { inspectSyntheticBatch, readBatchFile, readBatchReferenceManifest, type BatchDocument, type BatchInspection,
-  type BatchReferenceManifest, type BatchReferenceSpan, type BatchUpload, DemoInspectionFailure } from './api'
+  type BatchManualFinding, type BatchReferenceManifest, type BatchReferenceSpan, type BatchUpload, DemoInspectionFailure } from './api'
 import './batch.css'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 const SUPPRESSIBLE_KINDS = new Set(['PERSON_NAME', 'EMAIL', 'PHONE', 'IP_ADDRESS'])
+const MANUAL_FINDING_OPTIONS: { kind: BatchManualFinding['kind']; label: string }[] = [
+  { kind: 'OTHER_SENSITIVE', label: 'Other sensitive' }, { kind: 'BUSINESS_CONFIDENTIAL', label: 'Business confidential' },
+  { kind: 'QUASI_IDENTIFIER', label: 'Quasi-identifier' }, { kind: 'GOVERNMENT_ID', label: 'Government ID' },
+  { kind: 'DATE_OF_BIRTH', label: 'Date of birth' },
+]
+const MANUAL_FINDING_KINDS = new Set(MANUAL_FINDING_OPTIONS.map(item => item.kind))
 type Step = 'upload' | 'detect' | 'results'
 type ResultTab = 'documents' | 'relationships' | 'verification'
 
@@ -51,8 +57,9 @@ function relationLabels(type: BatchInspection['relationships'][number]['type']) 
 }
 function percent(numerator: number, denominator: number) { return denominator ? `${Math.round(100 * numerator / denominator)}%` : '—' }
 
-function FileScorecard({ score, documents, onInspect }: {
-  score: NonNullable<BatchInspection['verification']['annotationScore']>; documents: BatchDocument[]; onInspect: (id: string) => void
+function FileScorecard({ score, documents, onInspect, onCorrect }: {
+  score: NonNullable<BatchInspection['verification']['annotationScore']>; documents: BatchDocument[];
+  onInspect: (id: string) => void; onCorrect: (finding: BatchManualFinding) => void
 }) {
   return <div className="file-scorecard"><h4>Review by document</h4><p>Exact-span counts show where supplied labels and applied replacements disagree. A miss means a labelled source span is not replaced by an exact same-category match.</p>
     <div className="table-scroll"><table><thead><tr><th>Document</th><th>Matched</th><th>Unmatched predictions</th><th>Missed labels</th><th>Review</th></tr></thead><tbody>{score.perDocument.map(item => {
@@ -61,7 +68,7 @@ function FileScorecard({ score, documents, onInspect }: {
     })}</tbody></table></div>
     {score.perDocument.filter(item => item.missed.length > 0).map(item => {
       const document = documents.find(doc => doc.id === item.id)!
-      return <details key={item.id} className="missed-file"><summary>{item.missed.length} unmatched reference {item.missed.length === 1 ? 'span' : 'spans'} in {document.name}</summary><ul>{item.missed.map((span, index) => <li key={`${span.start}-${span.end}-${span.entity_type}-${index}`}><span className="type-pill">{shortType(span.entity_type)}</span><code>{Array.from(document.text).slice(span.start, span.end).join('')}</code><small>Character {span.start + 1}</small></li>)}</ul></details>
+      return <details key={item.id} className="missed-file"><summary>{item.missed.length} unmatched reference {item.missed.length === 1 ? 'span' : 'spans'} in {document.name}</summary><ul>{item.missed.map((span, index) => { const value = Array.from(document.text).slice(span.start, span.end).join(''); return <li key={`${span.start}-${span.end}-${span.entity_type}-${index}`}><span className="type-pill">{shortType(span.entity_type)}</span><code>{value}</code><small>Character {span.start + 1}</small>{MANUAL_FINDING_KINDS.has(span.entity_type as BatchManualFinding['kind']) && <button type="button" className="text-button" onClick={() => onCorrect({ value, kind: span.entity_type as BatchManualFinding['kind'] })}>Add correction</button>}</li> })}</ul></details>
     })}
   </div>
 }
@@ -94,6 +101,9 @@ export default function BatchDemo() {
   const [referenceAttested, setReferenceAttested] = useState(false)
   const [manualNames, setManualNames] = useState<string[]>([])
   const [manualInput, setManualInput] = useState('')
+  const [manualFindings, setManualFindings] = useState<BatchManualFinding[]>([])
+  const [manualValue, setManualValue] = useState('')
+  const [manualKind, setManualKind] = useState<BatchManualFinding['kind']>('OTHER_SENSITIVE')
   const [aliasOverrides, setAliasOverrides] = useState<Record<string, string>>({})
   const [excludedIds, setExcludedIds] = useState<string[]>([])
   const [exclusionAcknowledged, setExclusionAcknowledged] = useState(false)
@@ -104,7 +114,7 @@ export default function BatchDemo() {
 
   useEffect(() => () => { request.current?.abort(); intakeEpoch.current += 1 }, [])
 
-  function resetReview() { setInspection(null); setReferenceManifest(null); setReferenceAttested(false); setManualNames([]); setAliasOverrides({}); setExcludedIds([]); setExclusionAcknowledged(false); setStep('upload'); setError('') }
+  function resetReview() { setInspection(null); setReferenceManifest(null); setReferenceAttested(false); setManualNames([]); setManualFindings([]); setAliasOverrides({}); setExcludedIds([]); setExclusionAcknowledged(false); setStep('upload'); setError('') }
 
   async function addFiles(selected: File[], replace = false) {
     if (!selected.length) return false
@@ -122,6 +132,9 @@ export default function BatchDemo() {
       setInspection(null)
       setReferenceManifest(null)
       setReferenceAttested(false)
+      setManualNames([])
+      setManualFindings([])
+      setAliasOverrides({})
       setExcludedIds([])
       setExclusionAcknowledged(false)
       return true
@@ -145,7 +158,8 @@ export default function BatchDemo() {
     } catch (cause) { if (epoch === intakeEpoch.current) setError(cause instanceof Error ? cause.message : 'Could not read reference labels.') }
   }
 
-  async function inspect(nextNames = manualNames, nextAliases = aliasOverrides, nextStep: Step = 'detect', nextExclusions = excludedIds) {
+  async function inspect(nextNames = manualNames, nextAliases = aliasOverrides, nextStep: Step = 'detect', nextExclusions = excludedIds,
+    nextFindings = manualFindings) {
     if (busy || !acknowledged || !token.trim()) { setError('Enter a processor token and confirm the batch is synthetic.'); return }
     if (nextStep === 'results' && nextExclusions.length && !exclusionAcknowledged) {
       setError('Confirm that excluded findings are false positives and will remain in the candidate preview.'); return
@@ -158,13 +172,15 @@ export default function BatchDemo() {
     setBusy(true)
     setError('')
     try {
-      const value = await inspectSyntheticBatch({ apiBase: API_BASE, token, files, manualNames: nextNames, aliasOverrides: nextAliases,
+      const value = await inspectSyntheticBatch({ apiBase: API_BASE, token, files, manualNames: nextNames, manualFindings: nextFindings,
+        aliasOverrides: nextAliases,
         reviewExclusions: Object.fromEntries(nextExclusions.map(id => [id, 'FALSE_POSITIVE_CONFIRMED' as const])),
         referenceManifest: referenceManifest?.basis === 'CURATED_SYNTHETIC_SAMPLE' || referenceAttested ? referenceManifest : null,
         signal: controller.signal })
       if (request.current !== controller || controller.signal.aborted) return
       setInspection(value)
       setManualNames(nextNames)
+      setManualFindings(nextFindings)
       setAliasOverrides(nextAliases)
       setExcludedIds(nextExclusions)
       setSelectedDoc(value.documents[0]?.id || '')
@@ -188,6 +204,23 @@ export default function BatchDemo() {
     setExcludedIds([])
     setExclusionAcknowledged(false)
     await inspect([...manualNames, name], {}, 'detect', [])
+  }
+
+  async function addManualFinding(finding: BatchManualFinding) {
+    const value = finding.value.trim()
+    if (Array.from(value).length < 2 || Array.from(value).length > 80 || /[\p{C}\p{Zl}\p{Zp}]/u.test(value)) {
+      setError('Enter an exact sensitive value of 2–80 printable characters.'); return
+    }
+    if (manualFindings.some(item => item.kind === finding.kind && item.value.toLocaleLowerCase() === value.toLocaleLowerCase())) {
+      setError('This correction is already in the review list.'); return
+    }
+    if (!inspection?.documents.some(document => new RegExp(`(?<!\\w)${value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?!\\w)`, 'i').test(document.text))) {
+      setError('That exact value was not found in the current files.'); return
+    }
+    setManualValue('')
+    setExcludedIds([])
+    setExclusionAcknowledged(false)
+    await inspect(manualNames, {}, 'detect', [], [...manualFindings, { value, kind: finding.kind }])
   }
 
   const selected = inspection?.documents.find(doc => doc.id === selectedDoc) || inspection?.documents[0]
@@ -237,9 +270,10 @@ export default function BatchDemo() {
 
         {step === 'detect' && inspection && <>
           <div className="page-heading"><div><p className="overline">02 / DETECTION REVIEW</p><h1>Know what was found.</h1><p>Inspect the rule matches and consistent aliases across the batch. Add a missed name before opening the candidate comparison.</p></div><div className="heading-icon"><Search size={29} /></div></div>
-          <div className="metrics-grid"><div className="metric-card"><span>Documents inspected</span><strong>{inspection.summary.files}</strong><small>One connected batch</small></div><div className="metric-card"><span>Detected mentions</span><strong>{inspection.summary.detectedMentions}</strong><small>Proposed transformations</small></div><div className="metric-card"><span>Unique signals</span><strong>{visibleEntities.length}</strong><small>Across all documents</small></div><div className="metric-card"><span>Explicit links</span><strong>{inspection.summary.explicitRelationships}</strong><small>Headers & record fields</small></div></div>
+          <div className="metrics-grid"><div className="metric-card"><span>Documents inspected</span><strong>{inspection.summary.files}</strong><small>One connected batch</small></div><div className="metric-card"><span>Selected mentions</span><strong>{inspection.summary.detectedMentions}</strong><small>Rules + reviewer corrections</small></div><div className="metric-card"><span>Unique signals</span><strong>{visibleEntities.length}</strong><small>Across all documents</small></div><div className="metric-card"><span>Explicit links</span><strong>{inspection.summary.explicitRelationships}</strong><small>Headers & record fields</small></div></div>
           <div className="review-grid"><section className="batch-card entity-review"><div className="card-header"><div><p className="overline">ENTITY REGISTER</p><h2>Detected identities & signals</h2></div><span className="quiet-tag">{visibleEntities.length} entities</span></div><div className="table-scroll"><table><thead><tr><th>Source value</th><th>Type</th><th>Mentions</th><th>Proposed replacement</th><th>Review decision</th></tr></thead><tbody>{visibleEntities.map(entity => { const excluded = excludedIds.includes(entity.id); const suppressible = SUPPRESSIBLE_KINDS.has(entity.kind); return <tr key={entity.id} className={excluded ? 'entity-excluded' : ''}><td className="source-cell">{entity.source}</td><td><span className="type-pill">{shortType(entity.kind)}</span></td><td>{entity.mentions}</td><td>{entity.kind === 'PERSON_NAME' ? <input className="alias-input" aria-label={`Replacement for ${entity.source}`} value={aliasOverrides[entity.id] ?? entity.alias} maxLength={entity.source.length} disabled={excluded} onChange={event => setAliasOverrides(current => ({ ...current, [entity.id]: event.target.value }))} /> : <code>{entity.alias}</code>}</td><td><button type="button" className={`decision-button ${excluded ? 'excluded' : ''}`} disabled={!suppressible || busy} title={suppressible ? 'Review this signal across every file' : 'Critical or unsupported categories cannot be excluded in this demo'} aria-label={`${excluded ? 'Restore' : 'Exclude'} ${entity.source}`} onClick={() => toggleExclusion(entity.id)}>{excluded ? 'Restore' : 'Exclude'}</button></td></tr> })}</tbody></table></div>{visibleEntities.length === 0 && <p className="empty-note">No rule matches were found. That does not establish that the files contain no sensitive information.</p>}<div className="card-footnote"><CircleAlert size={16} /> Excluding a signal keeps every matched source value in the candidate. Critical and unsupported categories cannot be excluded. Names in arbitrary prose may still be missed.</div></section>
-            <aside className="batch-card review-side"><p className="overline">HUMAN-IN-THE-LOOP</p><h2>Found a missed name?</h2><p>Add the exact person name. We’ll rescan all documents and keep the replacement consistent across files.</p><div className="inline-form"><label htmlFor="manual-name">Person name</label><input id="manual-name" value={manualInput} onChange={event => setManualInput(event.target.value)} placeholder="e.g. Tara" onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); void addManualName() } }} /><button type="button" className="secondary-button" onClick={() => void addManualName()} disabled={busy || !manualInput.trim()}><Plus size={16} /> Add & rescan</button></div>{manualNames.length > 0 && <div className="manual-list">Added: {manualNames.join(', ')}</div>}<div className="review-hint"><ShieldCheck size={19} /><span>Equal-character-length aliases are proposed for names. This does not establish PDF layout fidelity or anonymity.</span></div></aside></div>
+            <aside className="batch-card review-side"><p className="overline">HUMAN-IN-THE-LOOP</p><h2>Found a miss?</h2><p>Add an exact person name or sensitive value. We’ll rescan all documents; manual corrections are tracked separately from automatic detector quality.</p><div className="inline-form"><label htmlFor="manual-name">Person name</label><input id="manual-name" value={manualInput} onChange={event => setManualInput(event.target.value)} placeholder="e.g. Tara" onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); void addManualName() } }} /><button type="button" className="secondary-button" onClick={() => void addManualName()} disabled={busy || !manualInput.trim()}><Plus size={16} /> Add name & rescan</button></div>{manualNames.length > 0 && <div className="manual-list">Names added: {manualNames.join(', ')}</div>}
+              <div className="inline-form manual-sensitive-form"><label htmlFor="manual-sensitive">Sensitive value</label><input id="manual-sensitive" value={manualValue} onChange={event => setManualValue(event.target.value)} placeholder="e.g. DEMO-4821" /><label htmlFor="manual-sensitive-kind">Category</label><select id="manual-sensitive-kind" value={manualKind} onChange={event => setManualKind(event.target.value as BatchManualFinding['kind'])}>{MANUAL_FINDING_OPTIONS.map(item => <option key={item.kind} value={item.kind}>{item.label}</option>)}</select><button type="button" className="secondary-button" onClick={() => void addManualFinding({ value: manualValue, kind: manualKind })} disabled={busy || !manualValue.trim()}><Plus size={16} /> Add value & rescan</button></div>{manualFindings.length > 0 && <div className="manual-list">Sensitive values added: {manualFindings.map(item => item.value).join(', ')}</div>}<div className="review-hint"><ShieldCheck size={19} /><span>Corrections target exact phrases across the batch. They do not teach the detector or establish PDF layout fidelity or anonymity.</span></div></aside></div>
           {excludedIds.length > 0 && <div className="exclusion-notice"><CircleAlert size={19} /><label className="check-label"><input type="checkbox" checked={exclusionAcknowledged} onChange={event => setExclusionAcknowledged(event.target.checked)} /><span>I confirm the {excludedIds.length} excluded {excludedIds.length === 1 ? 'signal is' : 'signals are'} a false positive for this synthetic batch. Its source values will remain visible in the proposed candidate.</span></label></div>}
           <section className="batch-card reference-card" aria-labelledby="reference-heading"><div className="card-header"><div><p className="overline">OPTIONAL MEASUREMENT</p><h2 id="reference-heading">Reference labels</h2></div><span className="quiet-tag">{referenceManifest ? 'Attached' : 'Not supplied'}</span></div>
             <p>To measure exact-span agreement, attach a complete annotation manifest for all staged files. The built-in sample includes demo-authored labels. Uploaded labels are reviewer-attested, not independently verified.</p>
@@ -254,17 +288,18 @@ export default function BatchDemo() {
         {step === 'results' && inspection && <>
           <div className="page-heading"><div><p className="overline">03 / RESULTS & VERIFICATION</p><h1>Review the proposed output.</h1><p>Trace every replacement, inspect explicit relationships, and understand what this run did—and did not—prove.</p></div><div className="heading-icon"><ShieldCheck size={29} /></div></div>
           <div className="result-alert"><CircleAlert size={21} /><div><strong>Review required · not anonymous or export-ready</strong><span>This is a synthetic text preview. Detector completeness, privacy risk, PDF layout, and release eligibility are not certified.</span></div></div>
-          <div className="metrics-grid"><div className="metric-card"><span>Files processed</span><strong>{inspection.summary.files}</strong><small>In this batch</small></div><div className="metric-card"><span>Mentions transformed</span><strong>{inspection.summary.transformedMentions}</strong><small>Detected spans only</small></div><div className="metric-card"><span>Unique signals</span><strong>{visibleEntities.length}</strong><small>Tracked across files</small></div><div className="metric-card"><span>Residual rule matches</span><strong>{inspection.verification.knownRuleResidualMatches}</strong><small>Requires human review</small></div></div>
+          <div className="metrics-grid"><div className="metric-card"><span>Files processed</span><strong>{inspection.summary.files}</strong><small>In this batch</small></div><div className="metric-card"><span>Mentions transformed</span><strong>{inspection.summary.transformedMentions}</strong><small>Selected spans only</small></div><div className="metric-card"><span>Unique signals</span><strong>{visibleEntities.length}</strong><small>Tracked across files</small></div><div className="metric-card"><span>Residual rule matches</span><strong>{inspection.verification.knownRuleResidualMatches}</strong><small>Requires human review</small></div></div>
           {inspection.summary.suppressedMentions > 0 && <div className="result-alert exclusion-result"><CircleAlert size={19} /><div><strong>{inspection.summary.suppressedMentions} detected {inspection.summary.suppressedMentions === 1 ? 'mention was' : 'mentions were'} retained after reviewer exclusion</strong><span>Those original values remain in the proposed text. This preview cannot be exported or treated as anonymized.</span></div></div>}
           <div className="result-tabs" role="tablist" aria-label="Batch result views">{([['documents', 'Documents', Files], ['relationships', 'Entities & relationships', Link2], ['verification', 'Verification scorecard', ShieldCheck]] as const).map(([key, label, Icon]) => <button key={key} type="button" role="tab" aria-selected={resultTab === key} className={resultTab === key ? 'selected' : ''} onClick={() => setResultTab(key)}><Icon size={17} /> {label}</button>)}</div>
-          {resultTab === 'documents' && selected && <section className="batch-card result-panel"><div className="card-header"><div><p className="overline">DOCUMENT COMPARISON</p><h2>Before & after, side by side</h2></div><span className="quiet-tag">{selected.matches.length} matches in this file</span></div><div className="doc-selector" role="tablist" aria-label="Documents">{inspection.documents.map(document => <button type="button" role="tab" aria-selected={selected.id === document.id} className={selected.id === document.id ? 'selected' : ''} key={document.id} onClick={() => setSelectedDoc(document.id)}>{fileIcon(document.name)}<span>{document.name}</span><small>{document.matches.length}</small></button>)}</div>{selected.kind === 'pdf' && <div className="pdf-note"><CircleAlert size={16} /> This is extracted text, not an edited PDF. Page layout, annotations, embedded images, and metadata have not been checked.</div>}<div className="comparison"><div><div className="pane-heading"><span>ORIGINAL · SYNTHETIC INPUT</span><span>{selected.matches.length} highlighted matches</span></div><div className="document-pane"><HighlightedSource document={selected} /></div></div><div className="compare-divider"><ArrowDown size={17} /></div><div><div className="pane-heading"><span>PROPOSED TEXT CANDIDATE</span><span>Not exportable</span></div><div className="document-pane candidate"><pre>{selected.candidateText}</pre></div></div></div><div className="card-footnote"><CircleAlert size={16} /> Highlighting shows detected spans only. Unmarked content has not been certified safe.</div></section>}
+          {resultTab === 'documents' && selected && <section className="batch-card result-panel"><div className="card-header"><div><p className="overline">DOCUMENT COMPARISON</p><h2>Before & after, side by side</h2></div><span className="quiet-tag">{selected.matches.length} matches in this file</span></div><div className="doc-selector" role="tablist" aria-label="Documents">{inspection.documents.map(document => <button type="button" role="tab" aria-selected={selected.id === document.id} className={selected.id === document.id ? 'selected' : ''} key={document.id} onClick={() => setSelectedDoc(document.id)}>{fileIcon(document.name)}<span>{document.name}</span><small>{document.matches.length}</small></button>)}</div>{selected.kind === 'pdf' && <div className="pdf-note"><CircleAlert size={16} /> This is extracted text, not an edited PDF. Page layout, annotations, embedded images, and metadata have not been checked.</div>}<div className="comparison"><div><div className="pane-heading"><span>ORIGINAL · SYNTHETIC INPUT</span><span>{selected.matches.length} highlighted matches</span></div><div className="document-pane"><HighlightedSource document={selected} /></div></div><div className="compare-divider"><ArrowDown size={17} /></div><div><div className="pane-heading"><span>PROPOSED TEXT CANDIDATE</span><span>Not exportable</span></div><div className="document-pane candidate"><pre>{selected.candidateText}</pre></div></div></div><div className="card-footnote"><CircleAlert size={16} /> Highlighting shows selected rule or reviewer spans only. Unmarked content has not been certified safe.</div></section>}
           {resultTab === 'relationships' && <section className="batch-card result-panel"><div className="card-header"><div><p className="overline">CROSS-DOCUMENT CONTEXT</p><h2>Entities & relationships</h2></div><span className="quiet-tag">Explicit evidence only</span></div><p className="panel-intro">Links require explicit mail headers or account_owner/client_name fields in the same CSV or JSON record. Surrogates are shown for transformed names; excluded names are marked as retained without displaying their source in this graph.</p><div className="relationship-list">{inspection.relationships.length ? inspection.relationships.map((relationship, index) => { const source = byId.get(relationship.sourceId), target = byId.get(relationship.targetId), labels = relationLabels(relationship.type); return <div className="relationship-row" key={`${relationship.documentId}-${relationship.type}-${index}`}><div className="relation-person"><span className="avatar">{graphLabel(source).slice(0, 1).toUpperCase()}</span><div><strong>{graphLabel(source)}</strong><small>{labels.source}</small></div></div><div className="relation-verb" title={relationship.basis}><span>{labels.verb} <ArrowRight size={16} /></span><small>{inspection.documents.find(doc => doc.id === relationship.documentId)?.name}</small></div><div className="relation-person"><span className="avatar purple">{graphLabel(target).slice(0, 1).toUpperCase()}</span><div><strong>{graphLabel(target)}</strong><small>{labels.target}</small></div></div></div> }) : <div className="empty-note">No explicit mail-header or same-record role relationship was found. No relationship is inferred from proximity alone.</div>}</div><div className="entity-chips">{visibleEntities.filter(entity => entity.kind === 'PERSON_NAME').map(entity => <span key={entity.id}><Fingerprint size={15} /> {graphLabel(entity)} <small>· {entity.mentions} mentions</small></span>)}</div></section>}
           {resultTab === 'verification' && <section className="batch-card result-panel"><div className="card-header"><div><p className="overline">EVIDENCE, NOT A VANITY SCORE</p><h2>Verification scorecard</h2></div><span className="status-pill">REVIEW REQUIRED</span></div>
             <p className="panel-intro">These are observable checks for this run. Reference-label agreement appears only when complete synthetic labels were supplied; it does not measure anonymity or performance on other datasets.</p>
             {inspection.verification.annotationScore ? (() => { const score = inspection.verification.annotationScore; return <div className="annotation-panel"><div className="annotation-heading"><div><span className="overline">EXACT-SPAN AGREEMENT</span><h3>Reviewed candidate vs reference labels</h3></div><span className="quiet-tag">{score.basis === 'CURATED_SYNTHETIC_SAMPLE' ? 'Demo-authored sample' : 'Reviewer-attested labels'}</span></div>
-              <div className="annotation-metrics"><div><span>Precision on these labels</span><strong>{percent(score.exact.truePositives, score.exact.truePositives + score.exact.falsePositives)}</strong><small>{score.exact.falsePositives} unmatched predictions</small></div><div><span>Recall on these labels</span><strong>{percent(score.exact.truePositives, score.exact.truePositives + score.exact.falseNegatives)}</strong><small>{score.exact.falseNegatives} missed reference spans</small></div><div><span>Labelled spans</span><strong>{score.goldAnnotations}</strong><small>Across {score.labelledDocuments} documents</small></div></div>
+              <div className="automatic-baseline"><div><strong>Automatic baseline</strong><span>Before manual additions or false-positive exclusions</span></div><div><span>Precision</span><strong>{percent(score.automaticExact.truePositives, score.automaticExact.truePositives + score.automaticExact.falsePositives)}</strong></div><div><span>Recall</span><strong>{percent(score.automaticExact.truePositives, score.automaticExact.truePositives + score.automaticExact.falseNegatives)}</strong></div></div>
+              <div className="annotation-metrics"><div><span>Precision after review</span><strong>{percent(score.exact.truePositives, score.exact.truePositives + score.exact.falsePositives)}</strong><small>{score.exact.falsePositives} unmatched predictions</small></div><div><span>Recall after review</span><strong>{percent(score.exact.truePositives, score.exact.truePositives + score.exact.falseNegatives)}</strong><small>{score.exact.falseNegatives} missed reference spans</small></div><div><span>Labelled spans</span><strong>{score.goldAnnotations}</strong><small>Across {score.labelledDocuments} documents</small></div></div>
               <div className="table-scroll"><table><thead><tr><th>Reference category</th><th>Matched</th><th>False positives</th><th>Missed</th></tr></thead><tbody>{Object.entries(score.perType).sort(([a], [b]) => a.localeCompare(b)).map(([kind, counts]) => <tr key={kind}><td>{shortType(kind)}</td><td>{counts.truePositives}</td><td>{counts.falsePositives}</td><td>{counts.falseNegatives}</td></tr>)}{Object.keys(score.perType).length === 0 && <tr><td colSpan={4}>No labelled or predicted spans. Precision and recall are undefined.</td></tr>}</tbody></table></div>
-              <FileScorecard score={score} documents={inspection.documents} onInspect={id => { setSelectedDoc(id); setResultTab('documents') }} />
+              <FileScorecard score={score} documents={inspection.documents} onInspect={id => { setSelectedDoc(id); setResultTab('documents') }} onCorrect={finding => { void addManualFinding(finding) }} />
               <p className="annotation-caveat">Counts include manual corrections made before this review. They depend on the supplied labels being complete and are not an independent holdout test, a residual-disclosure test, or release approval.</p>
             </div> })() : <div className="unmeasured-panel"><strong>Precision and recall not measured</strong><span>No complete reference-label set was attached. Return to Detection review to add one; zero residual rule matches cannot substitute for labelled ground truth.</span></div>}
             <div className="scorecard-list">{inspection.verification.checks.map((check, index) => <div key={`${check.name}-${index}`}><span className={`check-status status-${check.status.toLowerCase()}`}>{check.status === 'PASS' ? <Check size={15} /> : <CircleAlert size={15} />}{check.status.replaceAll('_', ' ')}</span><div><strong>{check.name}</strong><p>{check.detail}</p></div></div>)}</div><div className="limitations-panel"><h3>What remains unproven</h3><ul>{inspection.limitations.map((item, index) => <li key={index}>{item}</li>)}</ul></div></section>}

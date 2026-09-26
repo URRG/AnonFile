@@ -17,4 +17,14 @@
 .missed-file li{display:flex;align-items:center;gap:9px;min-width:0;color:#697789;font-size:.69rem}
 .missed-file code{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#263f55}
 .missed-file small{margin-left:auto;white-space:nowrap;color:#92a0ad}
+.manual-sensitive-form{margin-top:18px;padding-top:17px;border-top:1px solid var(--line)}
+.manual-sensitive-form select{width:100%;min-height:39px;padding:7px 10px;border:1px solid #d5e0e8;border-radius:7px;background:white;color:#263b50;font:inherit;font-size:.75rem}
+.missed-file .text-button{margin-left:6px;font-size:.68rem}
+.batch-app select:focus-visible{outline:3px solid #45bcb2;outline-offset:2px}
+.automatic-baseline{display:grid;grid-template-columns:1fr auto auto;align-items:center;gap:23px;margin-top:18px;padding:13px 16px;border:1px solid #ebdec5;border-radius:8px;background:#fffaf0;color:#755b32}
+.automatic-baseline>div{display:grid;gap:3px}
+.automatic-baseline strong{font-size:.81rem}
+.automatic-baseline span{font-size:.67rem;color:#8b7654}
+.automatic-baseline>div:not(:first-child) strong{font-size:1.05rem;color:#604725}
+@media(max-width:650px){.automatic-baseline{grid-template-columns:1fr 1fr}.automatic-baseline>div:first-child{grid-column:1/-1}}
 .batch-app .decision-button{min-height:36px;margin:0;padding:7px 10px;border:1px solid #cbd8e1;border-radius:7px;background:#fff;color:#577084;font-size:.7rem;font-weight:750;white-space:nowrap}.batch-app .decision-button:hover:not(:disabled){border-color:#cfa65d;background:#fffaf0;color:#8b6425}.batch-app .decision-button.excluded{border-color:#e5c791;background:#fff6e6;color:#926823}.batch-app .decision-button:disabled{opacity:.42}.entity-excluded{background:#fffcf5}.batch-app .entity-excluded td.source-cell{color:#976a24}.batch-app .entity-excluded .alias-input:disabled{background:#f3f5f7;color:#9aa6b2}.exclusion-notice{display:flex;align-items:flex-start;gap:11px;margin-top:17px;padding:15px 18px;border:1px solid #efd7aa;border-radius:10px;background:#fffaf0;color:#926a30}.exclusion-notice>svg{flex:none;margin-top:1px}.batch-app .exclusion-notice .check-label{margin:0;color:#876b44;font-size:.74rem}.exclusion-result{margin-top:-4px}.document-pane mark.excluded{background:#fff0cf;color:#8a6224;box-shadow:inset 0 -2px #d29b45}

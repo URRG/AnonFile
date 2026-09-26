@@ -20,8 +20,11 @@ aliases, explicit mail-header and same-record role relationships, and a non-expo
 candidate. A complete synthetic reference-label manifest can now produce
 exact-span agreement counts; the built-in example has fixed labels. The
 scorecard now breaks counts down by file, lists unmatched reference spans,
-and links each file to its before/after comparison. Those numbers describe
-only the labelled case and include manual corrections. They
+and links each file to its before/after comparison. Reviewers can add exact
+non-name sensitive phrases across the batch, including from a missed reference
+span. The scorecard separates automatic baseline counts from post-review
+counts so corrections cannot be mistaken for detector performance. Both
+measurements describe only the labelled case. They
 are not an independent holdout, privacy qualification, or a general model
 quality claim. A reviewer can mark a supported noncritical signal as a false
 positive for this synthetic batch; the retained source remains visibly
