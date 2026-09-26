@@ -109,7 +109,7 @@ def _public_key(value: object) -> Ed25519PublicKey:
 
 @dataclass(frozen=True, slots=True)
 class SupplierRightsAssertion:
-    """One supplier's signed assertion for one exact dataset and recipient."""
+    """One signed supplier-rights claim for one exact dataset and recipient."""
 
     tenant_ref: str
     supplier_actor_ref: str

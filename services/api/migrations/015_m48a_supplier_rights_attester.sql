@@ -1,4 +1,5 @@
--- M48a: allow a supplier-owned key to attest an exact rights statement.
+-- M48a: designate a key role for exact-scope supplier-rights assertions.
+-- The registry does not prove supplier ownership or agency.
 -- This changes only the closed trusted-key role set. It stores neither an
 -- assertion nor private key material and grants no release capability.
 BEGIN;
