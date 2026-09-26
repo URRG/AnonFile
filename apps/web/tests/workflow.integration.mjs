@@ -41,13 +41,25 @@ test('real HTTP intake, withholding, independent review and isolation', { timeou
     assert.ok(ready, 'API startup deadline')
     const source = readFileSync(new URL('../src/api.ts', import.meta.url), 'utf8')
     const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText
-    const { requestRelease, runControlPlane, inspectSyntheticDemo } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
+    const { requestRelease, runControlPlane, inspectSyntheticDemo, inspectSyntheticBatch } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
     const demoCsv = readFileSync(new URL('../../../demo-data/synthetic-airline-passengers.csv', import.meta.url), 'utf8')
     const demoInspection = await inspectSyntheticDemo({ apiBase: base, token: processor, format: 'csv', content: demoCsv })
     assert.equal(demoInspection.releaseAuthorized, false)
     assert.ok(demoInspection.transformedPreview.includes('[REDACTED_EMAIL]'))
     assert.ok(!demoInspection.transformedPreview.includes('alex@example.test'))
     assert.ok(demoInspection.findings.some(f => f.entityType === 'EMAIL'))
+    const batch = await inspectSyntheticBatch({ apiBase: base, token: processor, files: [
+      { id: 'mail', name: 'mail.txt', size: 90, contentBase64: Buffer.from('From: Riya <riya@example.test>\nTo: Sita <sita@example.test>\nHi Sita!').toString('base64') },
+      { id: 'record', name: 'record.json', size: 60, contentBase64: Buffer.from('{"full_name":"Riya","email":"riya@example.test"}').toString('base64') },
+    ], manualNames: [], aliasOverrides: {} })
+    assert.equal(batch.releaseAuthorized, false)
+    assert.equal(batch.exportAvailable, false)
+    assert.equal(batch.documents.length, 2)
+    assert.equal(batch.relationships.length, 1)
+    const person = batch.entities.find(entity => entity.source === 'Riya')
+    assert.equal(person.alias.length, 4)
+    assert.ok(batch.documents.every(document => document.candidateText.includes(person.alias)))
+    assert.equal(batch.verification.status, 'REVIEW_REQUIRED')
     const content = 'Synthetic contact alex@example.com'
     const release = await requestRelease({ apiBase: base, token: processor, content, mode: 'external_anonymized', recipient: 'synthetic-buyer' })
     assert.equal(release.eligibility, 'REVIEW_REQUIRED')

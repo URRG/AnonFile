@@ -22,6 +22,7 @@ from app.contracts import PayloadError
 from app.processing import (RULES_METHOD_CONFIG_DIGEST, RULES_METHOD_ID, RULES_METHOD_VERSION,
                             detect_text, process_payload)
 from app.ingestion import IngestionError, parse_source
+from app.demo_batch import analyze_batch
 from app.storage_config import create_store
 from app.security import Principal, configure_auth, require_roles
 from app.policies import PolicyError, PolicyProfile, PolicyRule, PolicySnapshot
@@ -204,6 +205,17 @@ class DemoInspectView(BaseModel):
     transformed_preview: str
     limitations: list[str]
     release_authorized: Literal[False]
+
+class DemoBatchFile(StrictModel):
+    id: str = Field(min_length=1, max_length=48)
+    name: str = Field(min_length=1, max_length=160)
+    content_base64: str = Field(min_length=1, max_length=140_000)
+
+class DemoBatchCreate(StrictModel):
+    files: list[DemoBatchFile] = Field(min_length=2, max_length=3)
+    synthetic_only: Literal[True]
+    manual_names: list[str] = Field(default_factory=list, max_length=20)
+    alias_overrides: dict[str, str] = Field(default_factory=dict)
 
 class DatasetCreate(DatasetMetadata):
     content: str | None = Field(default=None, min_length=1, max_length=MAX_PAYLOAD_BYTES)
@@ -1072,6 +1084,12 @@ def create_app() -> FastAPI:
     # production never has this route, even with otherwise valid JWT identity.
     if (app.state.auth_environment == "development"
             and os.getenv("ANONFLOW_DEMO_MODE") == "enabled"):
+        @app.post("/demo/batch/inspect")
+        def inspect_synthetic_batch(request: DemoBatchCreate,
+                                    principal: Principal = Depends(require_roles("processor"))):
+            """Bounded, ephemeral review data; no artifact, release or export."""
+            return analyze_batch(request.model_dump())
+
         @app.post("/demo/inspect", response_model=DemoInspectView)
         def inspect_synthetic_demo(request: DemoInspectCreate,
                                    principal: Principal = Depends(require_roles("processor"))):
