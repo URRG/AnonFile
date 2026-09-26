@@ -44,16 +44,26 @@ remains unchanged. These corrections do not teach the detector to recognize
 unseen values. The backend accepts that label basis only for the exact
 built-in files and labels; changing the sample invalidates it.
 
-You may instead select two or three synthetic TXT, CSV, JSON, JSONL, or
-text-based PDF files (100 KB each, 300 KB combined). A PDF contributes
-extracted text to the side-by-side review; **the PDF itself is not modified**.
-Scanned PDFs and images are rejected because this demo has no OCR or visual
-residual check. PDF extraction may lose layout, embedded images, annotations,
-and metadata. Without complete reference labels, precision and recall remain
-**not measured**. The bounded detector can miss prose names and other sensitive
-information. CSV review is limited to one-line cells, and ambiguous or
-unsupported structured values are rejected. Replacements are proposals for
-human review only.
+You may instead select two or three synthetic TXT, CSV, JSON, JSONL, PDF,
+PNG, or JPEG files (100 KB each, 300 KB combined). The demo rasterizes up to
+two PDF pages per file and OCRs each raster page or image. The entire batch is
+limited to three million media pixels. Detected spans are applied to the OCR
+lines on a new pixel image, with side-by-side source and candidate page views.
+The PDF candidate is reconstructed as an image-only PDF in memory; its digest
+and page count, but **not a downloadable PDF**, are returned. Metadata and
+original PDF objects are not copied into that candidate. Unreadable, oversized,
+or ambiguous media are rejected.
+
+This is a visual *review candidate*, not safe redaction certification. OCR can
+miss or misread visible sensitive content; no detection outside recognized
+lines is assured. The candidate is rechecked only by the same OCR engine, so
+zero residual matches is not independent assurance. The page rasterization
+also loses selectable text and can change fidelity. Never use this demo for
+real supplier data or treat the candidate preview as releasable. Without
+complete reference labels, precision and recall remain **not measured**. The
+bounded detector can miss prose names and other sensitive information. CSV
+review is limited to one-line cells, and ambiguous or unsupported structured
+values are rejected. Replacements are proposals for human review only.
 
 For a different synthetic batch, the Detection review page can attach a
 separate reference-label JSON file. It is not counted as one of the source
@@ -71,14 +81,14 @@ files named `a.txt` and
 ```
 
 `start` and `end` are half-open Unicode code-point offsets in the original
-text. For a PDF they refer to the extracted text displayed by the workbench,
-not page coordinates. The reviewer must establish that the labels cover all
+text. For PDF/image input they refer to the OCR transcript displayed by the
+workbench, not page coordinates or hidden source text. The reviewer must establish that the labels cover all
 relevant spans; the application cannot verify that assertion. The resulting
 precision/recall show both the **automatic baseline** and the **reviewed
 candidate** (including manual corrections) against the supplied labels.
 They are neither an independent
 holdout benchmark nor a test of residual disclosure, re-identification risk,
-utility, PDF layout, or release eligibility.
+utility, pixel-level disclosure, PDF layout, or release eligibility.
 
 The previous one-file inspector and metadata-only control-plane workbench are
 still available at `http://127.0.0.1:5173/?mode=advanced` for development.

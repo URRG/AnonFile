@@ -206,7 +206,7 @@ def test_batch_rejects_invalid_or_unattested_requests(demo_client, change):
     assert "riya@example.test" not in response.text
 
 
-def test_batch_pdf_is_text_only_not_rewritten(demo_client):
+def test_batch_pdf_is_rasterized_into_new_image_only_candidate_preview(demo_client):
     reportlab = pytest.importorskip("reportlab.pdfgen.canvas")
     stream = BytesIO()
     canvas = reportlab.Canvas(stream)
@@ -219,9 +219,80 @@ def test_batch_pdf_is_text_only_not_rewritten(demo_client):
     assert response.status_code == 200, response.text
     document = response.json()["documents"][0]
     assert document["kind"] == "pdf"
-    assert document["preview_fidelity"] == "extracted_text_only"
+    assert document["preview_fidelity"] == "raster_ocr_review"
     assert "Riya" not in document["candidate_text"]
+    media = document["media_preview"]
+    assert len(media["pages"]) == 1
+    assert media["pages"][0]["source_png_base64"] != media["pages"][0]["candidate_png_base64"]
+    assert base64.b64decode(media["pages"][0]["candidate_png_base64"]).startswith(b"\x89PNG\r\n\x1a\n")
+    assert media["pdf_raster_evidence"]["pages"] == 1
+    assert media["pdf_raster_evidence"]["source_objects_copied"] is False
+    assert media["self_ocr_residual_sources"] == 0
     assert response.json()["export_available"] is False
+
+
+def test_image_ocr_preview_reencodes_pixels_without_source_metadata(demo_client):
+    from PIL import Image, ImageDraw, ImageFont, PngImagePlugin
+    from pathlib import Path
+    import reportlab
+
+    image = Image.new("RGB", (900, 230), "white")
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.truetype(str(Path(reportlab.__file__).parent / "fonts" / "Vera.ttf"), 30)
+    draw.text((40, 35), "From: Riya <riya@example.test>", font=font, fill="black")
+    draw.text((40, 90), "To: Sita <sita@example.test>", font=font, fill="black")
+    metadata = PngImagePlugin.PngInfo()
+    metadata.add_text("Secret", "DO_NOT_COPY_SOURCE_METADATA")
+    stream = BytesIO()
+    image.save(stream, format="PNG", pnginfo=metadata)
+    request = payload()
+    request["files"][0] = file("email", "thread.png", stream.getvalue())
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    document = response.json()["documents"][0]
+    assert document["kind"] == "image" and document["preview_fidelity"] == "raster_ocr_review"
+    assert "Riya" not in document["candidate_text"]
+    media = document["media_preview"]
+    candidate = base64.b64decode(media["pages"][0]["candidate_png_base64"])
+    assert b"DO_NOT_COPY_SOURCE_METADATA" not in candidate
+    candidate_image = Image.open(BytesIO(candidate))
+    assert candidate_image.size == (900, 230)
+    from app.media_preview import _ocr_lines
+    candidate_text = " ".join(line["text"] for line in _ocr_lines(candidate_image))
+    assert "Riya" not in candidate_text and "Sita" not in candidate_text
+    assert "Gita" in candidate_text
+    assert media["pdf_raster_evidence"] is None
+    assert media["self_ocr_residual_sources"] == 0
+    assert response.json()["release_authorized"] is False
+
+
+def test_media_rejects_oversized_pixels_before_ocr(demo_client):
+    from PIL import Image
+
+    stream = BytesIO()
+    Image.new("RGB", (2000, 2000), "white").save(stream, format="PNG")
+    request = payload()
+    request["files"][0] = file("email", "large.png", stream.getvalue())
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 422
+    assert "riya@example.test" not in response.text
+
+
+def test_batch_rejects_excess_total_media_pixels_before_candidate(monkeypatch):
+    from PIL import Image
+    from app import demo_batch
+    from app.contracts import PayloadError
+
+    def fake_read(item):
+        return {"id": item["id"], "name": item["name"], "kind": "image", "text": "Riya",
+                "size_bytes": 100, "preview_fidelity": "raster_ocr_review",
+                "_media_pages": [{"image": Image.new("RGB", (1600, 1000)), "lines": []}]}
+
+    monkeypatch.setattr(demo_batch, "_read_file", fake_read)
+    with pytest.raises(PayloadError, match="three-million-pixel"):
+        demo_batch.analyze_batch({"synthetic_only": True, "files": [
+            {"id": "one", "name": "one.png"}, {"id": "two", "name": "two.png"},
+        ]})
 
 
 def test_batch_route_is_not_registered_without_demo_opt_in(client):
