@@ -263,7 +263,9 @@ def test_postgres_orphan_global_collision_replay_terminal_and_immutable(postgres
                 "(tenant_ref,source_dataset_ref,generation,state,event_ref) "
                 "VALUES (%s,%s,1,'QUARANTINED',%s)",
                 (item.tenant_ref, item.source_dataset_ref, opaque("sourcesnapshotfence:v1:")))
-        with pytest.raises(psycopg.errors.CheckViolation):
+        # The parent-locking transition trigger rejects a second terminal
+        # before PostgreSQL evaluates the row-local generation CHECK.
+        with pytest.raises(psycopg.errors.RaiseException):
             connection.execute(
                 "INSERT INTO anonflow_source_dataset_snapshot_fences "
                 "(tenant_ref,source_dataset_ref,generation,state,event_ref) "
