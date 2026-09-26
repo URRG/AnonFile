@@ -2,22 +2,48 @@ import React, { useEffect, useRef, useState } from 'react'
 import { ArrowDown, ArrowLeft, ArrowRight, Check, ChevronRight, CircleAlert, FileCode2, FileText,
   Files, Fingerprint, FlaskConical, Link2, LockKeyhole, Plus, RefreshCw, Search, ShieldCheck,
   Sparkles, UploadCloud, X } from 'lucide-react'
-import { inspectSyntheticBatch, readBatchFile, type BatchDocument, type BatchEntity, type BatchInspection,
-  type BatchUpload, DemoInspectionFailure } from './api'
+import { inspectSyntheticBatch, readBatchFile, readBatchReferenceManifest, type BatchDocument, type BatchInspection,
+  type BatchReferenceManifest, type BatchReferenceSpan, type BatchUpload, DemoInspectionFailure } from './api'
 import './batch.css'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 type Step = 'upload' | 'detect' | 'results'
 type ResultTab = 'documents' | 'relationships' | 'verification'
 
-const SAMPLES = [
-  new File(['From: Riya <riya@example.test>\nTo: Sita <sita@example.test>\nSubject: Flight change\n\nHi Sita, Riya can review the itinerary. Please call +1 415 555 0134.'], '01-email-thread.txt', { type: 'text/plain' }),
-  new File(['full_name,email,passport_number,date_of_birth,booking_reference\nRiya,riya@example.test,DEMO123456,1990-01-01,DEMO-4821\nSita,sita@example.test,DEMO654321,1992-02-02,DEMO-4822\n'], '02-passenger-list.csv', { type: 'text/csv' }),
-  new File(['{"client_name":"Sita","account_owner":"Riya","note":"Riya emailed Sita about DEMO-4822."}'], '03-support-record.json', { type: 'application/json' }),
-]
+const SAMPLE_DOCUMENTS = [
+  { name: '01-email-thread.txt', type: 'text/plain', text: 'From: Riya <riya@example.test>\nTo: Sita <sita@example.test>\nSubject: Flight change\n\nHi Sita, Riya can review the itinerary. Please call +1 415 555 0134.' },
+  { name: '02-passenger-list.csv', type: 'text/csv', text: 'full_name,email,passport_number,date_of_birth,booking_reference\nRiya,riya@example.test,DEMO123456,1990-01-01,DEMO-4821\nSita,sita@example.test,DEMO654321,1992-02-02,DEMO-4822\n' },
+  { name: '03-support-record.json', type: 'application/json', text: '{"client_name":"Sita","account_owner":"Riya","note":"Riya emailed Sita about DEMO-4822."}' },
+] as const
+const SAMPLES = SAMPLE_DOCUMENTS.map(item => new File([item.text], item.name, { type: item.type }))
+
+function sampleSpans(text: string, values: [string, string][]): BatchReferenceSpan[] {
+  const spans: BatchReferenceSpan[] = []
+  for (const [value, entity_type] of values) {
+    let from = 0
+    while (true) {
+      const start = text.indexOf(value, from)
+      if (start === -1) break
+      spans.push({ start, end: start + value.length, entity_type })
+      from = start + value.length
+    }
+  }
+  return spans.sort((a, b) => a.start - b.start)
+}
+const SAMPLE_REFERENCE: BatchReferenceManifest = { basis: 'CURATED_SYNTHETIC_SAMPLE', documents: [
+  { name: SAMPLE_DOCUMENTS[0].name, annotations: sampleSpans(SAMPLE_DOCUMENTS[0].text, [
+    ['Riya', 'PERSON_NAME'], ['Sita', 'PERSON_NAME'], ['riya@example.test', 'EMAIL'], ['sita@example.test', 'EMAIL'], ['+1 415 555 0134', 'PHONE']]) },
+  { name: SAMPLE_DOCUMENTS[1].name, annotations: sampleSpans(SAMPLE_DOCUMENTS[1].text, [
+    ['Riya', 'PERSON_NAME'], ['Sita', 'PERSON_NAME'], ['riya@example.test', 'EMAIL'], ['sita@example.test', 'EMAIL'],
+    ['DEMO123456', 'GOVERNMENT_ID'], ['DEMO654321', 'GOVERNMENT_ID'], ['1990-01-01', 'DATE_OF_BIRTH'],
+    ['1992-02-02', 'DATE_OF_BIRTH'], ['DEMO-4821', 'OTHER_SENSITIVE'], ['DEMO-4822', 'OTHER_SENSITIVE']]) },
+  { name: SAMPLE_DOCUMENTS[2].name, annotations: sampleSpans(SAMPLE_DOCUMENTS[2].text, [
+    ['Riya', 'PERSON_NAME'], ['Sita', 'PERSON_NAME'], ['DEMO-4822', 'OTHER_SENSITIVE']]) },
+] }
 
 function shortType(kind: string) { return kind === 'PERSON_NAME' ? 'Person' : kind.replaceAll('_', ' ').toLowerCase().replace(/^./, c => c.toUpperCase()) }
 function fileIcon(name: string) { return name.toLowerCase().endsWith('.json') || name.toLowerCase().endsWith('.jsonl') ? <FileCode2 size={21} /> : <FileText size={21} /> }
+function percent(numerator: number, denominator: number) { return denominator ? `${Math.round(100 * numerator / denominator)}%` : '—' }
 
 function HighlightedSource({ document }: { document: BatchDocument }) {
   const chunks: React.ReactNode[] = []
@@ -42,6 +68,8 @@ export default function BatchDemo() {
   const [dragging, setDragging] = useState(false)
   const [error, setError] = useState('')
   const [inspection, setInspection] = useState<BatchInspection | null>(null)
+  const [referenceManifest, setReferenceManifest] = useState<BatchReferenceManifest | null>(null)
+  const [referenceAttested, setReferenceAttested] = useState(false)
   const [manualNames, setManualNames] = useState<string[]>([])
   const [manualInput, setManualInput] = useState('')
   const [aliasOverrides, setAliasOverrides] = useState<Record<string, string>>({})
@@ -52,10 +80,10 @@ export default function BatchDemo() {
 
   useEffect(() => () => { request.current?.abort(); intakeEpoch.current += 1 }, [])
 
-  function resetReview() { setInspection(null); setManualNames([]); setAliasOverrides({}); setStep('upload'); setError('') }
+  function resetReview() { setInspection(null); setReferenceManifest(null); setReferenceAttested(false); setManualNames([]); setAliasOverrides({}); setStep('upload'); setError('') }
 
   async function addFiles(selected: File[], replace = false) {
-    if (!selected.length) return
+    if (!selected.length) return false
     const epoch = ++intakeEpoch.current
     setReading(true)
     setError('')
@@ -63,12 +91,15 @@ export default function BatchDemo() {
       const existing = replace ? [] : files
       if (selected.length > 3 || existing.length + selected.length > 3) throw new DemoInspectionFailure('A demo batch holds two or three files. Remove a file before adding more.')
       const added = await Promise.all(selected.map(file => readBatchFile(file, `file_${++sequence.current}`)))
-      if (epoch !== intakeEpoch.current) return
+      if (epoch !== intakeEpoch.current) return false
       if (new Set([...existing, ...added].map(item => item.name.toLowerCase())).size !== existing.length + added.length) throw new DemoInspectionFailure('Each file in the batch needs a distinct filename.')
       if ([...existing, ...added].reduce((sum, item) => sum + item.size, 0) > 300_000) throw new DemoInspectionFailure('The entire synthetic batch must be 300 KB or less.')
       setFiles(current => [...(replace ? [] : current), ...added])
       setInspection(null)
-    } catch (cause) { if (epoch === intakeEpoch.current) setError(cause instanceof Error ? cause.message : 'Could not read the selected files.') }
+      setReferenceManifest(null)
+      setReferenceAttested(false)
+      return true
+    } catch (cause) { if (epoch === intakeEpoch.current) setError(cause instanceof Error ? cause.message : 'Could not read the selected files.'); return false }
     finally { if (epoch === intakeEpoch.current) setReading(false) }
   }
 
@@ -76,17 +107,31 @@ export default function BatchDemo() {
     ++intakeEpoch.current
     setFiles([])
     resetReview()
-    await addFiles(SAMPLES, true)
+    if (await addFiles(SAMPLES, true)) setReferenceManifest(SAMPLE_REFERENCE)
+  }
+
+  async function loadReference(file: File) {
+    const epoch = intakeEpoch.current
+    setError('')
+    try {
+      const manifest = await readBatchReferenceManifest(file, files)
+      if (epoch === intakeEpoch.current) { setReferenceManifest(manifest); setReferenceAttested(false) }
+    } catch (cause) { if (epoch === intakeEpoch.current) setError(cause instanceof Error ? cause.message : 'Could not read reference labels.') }
   }
 
   async function inspect(nextNames = manualNames, nextAliases = aliasOverrides, nextStep: Step = 'detect') {
     if (busy || !acknowledged || !token.trim()) { setError('Enter a processor token and confirm the batch is synthetic.'); return }
+    if (nextStep === 'results' && referenceManifest?.basis === 'REVIEWER_ATTESTED_EXHAUSTIVE' && !referenceAttested) {
+      setError('Confirm that the uploaded reference labels are complete before measuring agreement.'); return
+    }
     const controller = new AbortController()
     request.current = controller
     setBusy(true)
     setError('')
     try {
-      const value = await inspectSyntheticBatch({ apiBase: API_BASE, token, files, manualNames: nextNames, aliasOverrides: nextAliases, signal: controller.signal })
+      const value = await inspectSyntheticBatch({ apiBase: API_BASE, token, files, manualNames: nextNames, aliasOverrides: nextAliases,
+        referenceManifest: referenceManifest?.basis === 'CURATED_SYNTHETIC_SAMPLE' || referenceAttested ? referenceManifest : null,
+        signal: controller.signal })
       if (request.current !== controller || controller.signal.aborted) return
       setInspection(value)
       setManualNames(nextNames)
@@ -155,6 +200,12 @@ export default function BatchDemo() {
           <div className="metrics-grid"><div className="metric-card"><span>Documents inspected</span><strong>{inspection.summary.files}</strong><small>One connected batch</small></div><div className="metric-card"><span>Detected mentions</span><strong>{inspection.summary.detectedMentions}</strong><small>Proposed transformations</small></div><div className="metric-card"><span>Unique signals</span><strong>{visibleEntities.length}</strong><small>Across all documents</small></div><div className="metric-card"><span>Explicit links</span><strong>{inspection.summary.explicitRelationships}</strong><small>Email headers only</small></div></div>
           <div className="review-grid"><section className="batch-card entity-review"><div className="card-header"><div><p className="overline">ENTITY REGISTER</p><h2>Detected identities & signals</h2></div><span className="quiet-tag">{visibleEntities.length} entities</span></div><div className="table-scroll"><table><thead><tr><th>Source value</th><th>Type</th><th>Mentions</th><th>Proposed replacement</th></tr></thead><tbody>{visibleEntities.map(entity => <tr key={entity.id}><td className="source-cell">{entity.source}</td><td><span className="type-pill">{shortType(entity.kind)}</span></td><td>{entity.mentions}</td><td>{entity.kind === 'PERSON_NAME' ? <input className="alias-input" aria-label={`Replacement for ${entity.source}`} value={aliasOverrides[entity.id] ?? entity.alias} maxLength={entity.source.length} onChange={event => setAliasOverrides(current => ({ ...current, [entity.id]: event.target.value }))} /> : <code>{entity.alias}</code>}</td></tr>)}</tbody></table></div>{visibleEntities.length === 0 && <p className="empty-note">No rule matches were found. That does not establish that the files contain no sensitive information.</p>}<div className="card-footnote"><CircleAlert size={16} /> Names are found in structured name fields, mail headers, or names you add. Arbitrary prose may be missed.</div></section>
             <aside className="batch-card review-side"><p className="overline">HUMAN-IN-THE-LOOP</p><h2>Found a missed name?</h2><p>Add the exact person name. We’ll rescan all documents and keep the replacement consistent across files.</p><div className="inline-form"><label htmlFor="manual-name">Person name</label><input id="manual-name" value={manualInput} onChange={event => setManualInput(event.target.value)} placeholder="e.g. Tara" onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); void addManualName() } }} /><button type="button" className="secondary-button" onClick={() => void addManualName()} disabled={busy || !manualInput.trim()}><Plus size={16} /> Add & rescan</button></div>{manualNames.length > 0 && <div className="manual-list">Added: {manualNames.join(', ')}</div>}<div className="review-hint"><ShieldCheck size={19} /><span>Equal-character-length aliases are proposed for names. This does not establish PDF layout fidelity or anonymity.</span></div></aside></div>
+          <section className="batch-card reference-card" aria-labelledby="reference-heading"><div className="card-header"><div><p className="overline">OPTIONAL MEASUREMENT</p><h2 id="reference-heading">Reference labels</h2></div><span className="quiet-tag">{referenceManifest ? 'Attached' : 'Not supplied'}</span></div>
+            <p>To measure exact-span agreement, attach a complete annotation manifest for all staged files. The built-in sample includes demo-authored labels. Uploaded labels are reviewer-attested, not independently verified.</p>
+            <div className="reference-actions"><label className="file-button">Attach labels JSON<input type="file" accept=".json" onChange={event => { const file = event.target.files?.[0]; if (file) void loadReference(file); event.target.value = '' }} /></label>{referenceManifest && <button type="button" className="text-button" onClick={() => { setReferenceManifest(null); setReferenceAttested(false) }}>Remove labels</button>}</div>
+            {referenceManifest?.basis === 'REVIEWER_ATTESTED_EXHAUSTIVE' && <label className="check-label reference-attestation"><input type="checkbox" checked={referenceAttested} onChange={event => setReferenceAttested(event.target.checked)} /><span>I reviewed the synthetic batch and attest that these labels cover every relevant sensitive span for this measurement.</span></label>}
+            <details><summary>Annotation file format</summary><pre>{'{"schema_version":"batch-reference-v1","documents":[{"name":"file.txt","annotations":[{"start":0,"end":4,"entity_type":"PERSON_NAME"}]}]}'}</pre><small>List every staged filename once, including files with zero labels. Offsets are half-open Unicode character positions in source text; for PDFs, they refer to extracted text shown here.</small></details>
+          </section>
           <section className="batch-card document-coverage"><div className="card-header"><div><p className="overline">FILE COVERAGE</p><h2>What the detector reviewed</h2></div></div><div className="coverage-list">{inspection.documents.map(document => <div key={document.id}><span className="file-type-icon">{fileIcon(document.name)}</span><div><strong>{document.name}</strong><span>{document.kind === 'pdf' ? 'Selectable PDF text extracted; original PDF not rewritten' : 'Source text reviewed'}</span></div><strong>{document.matches.length} matches</strong></div>)}</div></section>
           <div className="page-actions"><button type="button" className="back-button" onClick={() => setStep('upload')}><ArrowLeft size={17} /> Edit batch</button><button type="button" className="primary-button" disabled={busy} onClick={() => void inspect(manualNames, aliasOverrides, 'results')}>{busy ? 'Applying changes…' : hasPendingAliases ? 'Apply & review candidate' : 'Review candidate'} <ArrowRight size={18} /></button></div>
         </>}
@@ -166,7 +217,14 @@ export default function BatchDemo() {
           <div className="result-tabs" role="tablist" aria-label="Batch result views">{([['documents', 'Documents', Files], ['relationships', 'Entities & relationships', Link2], ['verification', 'Verification scorecard', ShieldCheck]] as const).map(([key, label, Icon]) => <button key={key} type="button" role="tab" aria-selected={resultTab === key} className={resultTab === key ? 'selected' : ''} onClick={() => setResultTab(key)}><Icon size={17} /> {label}</button>)}</div>
           {resultTab === 'documents' && selected && <section className="batch-card result-panel"><div className="card-header"><div><p className="overline">DOCUMENT COMPARISON</p><h2>Before & after, side by side</h2></div><span className="quiet-tag">{selected.matches.length} matches in this file</span></div><div className="doc-selector" role="tablist" aria-label="Documents">{inspection.documents.map(document => <button type="button" role="tab" aria-selected={selected.id === document.id} className={selected.id === document.id ? 'selected' : ''} key={document.id} onClick={() => setSelectedDoc(document.id)}>{fileIcon(document.name)}<span>{document.name}</span><small>{document.matches.length}</small></button>)}</div>{selected.kind === 'pdf' && <div className="pdf-note"><CircleAlert size={16} /> This is extracted text, not an edited PDF. Page layout, annotations, embedded images, and metadata have not been checked.</div>}<div className="comparison"><div><div className="pane-heading"><span>ORIGINAL · SYNTHETIC INPUT</span><span>{selected.matches.length} highlighted matches</span></div><div className="document-pane"><HighlightedSource document={selected} /></div></div><div className="compare-divider"><ArrowDown size={17} /></div><div><div className="pane-heading"><span>PROPOSED TEXT CANDIDATE</span><span>Not exportable</span></div><div className="document-pane candidate"><pre>{selected.candidateText}</pre></div></div></div><div className="card-footnote"><CircleAlert size={16} /> Highlighting shows detected spans only. Unmarked content has not been certified safe.</div></section>}
           {resultTab === 'relationships' && <section className="batch-card result-panel"><div className="card-header"><div><p className="overline">CROSS-DOCUMENT CONTEXT</p><h2>Entities & relationships</h2></div><span className="quiet-tag">Explicit evidence only</span></div><p className="panel-intro">Surrogate names are used here. A link appears only when a From/To/Cc header explicitly connected two people.</p><div className="relationship-list">{inspection.relationships.length ? inspection.relationships.map((relationship, index) => { const source = byId.get(relationship.sourceId), target = byId.get(relationship.targetId); return <div className="relationship-row" key={`${relationship.documentId}-${index}`}><div className="relation-person"><span className="avatar">{source?.alias.slice(0, 1).toUpperCase()}</span><div><strong>{source?.alias}</strong><small>Sender</small></div></div><div className="relation-verb"><span>EMAILED <ArrowRight size={16} /></span><small>{inspection.documents.find(doc => doc.id === relationship.documentId)?.name}</small></div><div className="relation-person"><span className="avatar purple">{target?.alias.slice(0, 1).toUpperCase()}</span><div><strong>{target?.alias}</strong><small>Recipient</small></div></div></div> }) : <div className="empty-note">No explicit mail-header relationship was found. No relationship is inferred from proximity alone.</div>}</div><div className="entity-chips">{visibleEntities.filter(entity => entity.kind === 'PERSON_NAME').map(entity => <span key={entity.id}><Fingerprint size={15} /> {entity.alias} <small>· {entity.mentions} mentions</small></span>)}</div></section>}
-          {resultTab === 'verification' && <section className="batch-card result-panel"><div className="card-header"><div><p className="overline">EVIDENCE, NOT A VANITY SCORE</p><h2>Verification scorecard</h2></div><span className="status-pill">REVIEW REQUIRED</span></div><p className="panel-intro">This measures observable checks for this run. Precision and recall require labelled ground truth; a clean rule scan does not prove complete PII removal.</p><div className="scorecard-list">{inspection.verification.checks.map((check, index) => <div key={`${check.name}-${index}`}><span className={`check-status status-${check.status.toLowerCase()}`}>{check.status === 'PASS' ? <Check size={15} /> : <CircleAlert size={15} />}{check.status.replaceAll('_', ' ')}</span><div><strong>{check.name}</strong><p>{check.detail}</p></div></div>)}</div><div className="limitations-panel"><h3>What remains unproven</h3><ul>{inspection.limitations.map((item, index) => <li key={index}>{item}</li>)}</ul></div></section>}
+          {resultTab === 'verification' && <section className="batch-card result-panel"><div className="card-header"><div><p className="overline">EVIDENCE, NOT A VANITY SCORE</p><h2>Verification scorecard</h2></div><span className="status-pill">REVIEW REQUIRED</span></div>
+            <p className="panel-intro">These are observable checks for this run. Reference-label agreement appears only when complete synthetic labels were supplied; it does not measure anonymity or performance on other datasets.</p>
+            {inspection.verification.annotationScore ? (() => { const score = inspection.verification.annotationScore; return <div className="annotation-panel"><div className="annotation-heading"><div><span className="overline">EXACT-SPAN AGREEMENT</span><h3>Reviewed candidate vs reference labels</h3></div><span className="quiet-tag">{score.basis === 'CURATED_SYNTHETIC_SAMPLE' ? 'Demo-authored sample' : 'Reviewer-attested labels'}</span></div>
+              <div className="annotation-metrics"><div><span>Precision on these labels</span><strong>{percent(score.exact.truePositives, score.exact.truePositives + score.exact.falsePositives)}</strong><small>{score.exact.falsePositives} unmatched predictions</small></div><div><span>Recall on these labels</span><strong>{percent(score.exact.truePositives, score.exact.truePositives + score.exact.falseNegatives)}</strong><small>{score.exact.falseNegatives} missed reference spans</small></div><div><span>Labelled spans</span><strong>{score.goldAnnotations}</strong><small>Across {score.labelledDocuments} documents</small></div></div>
+              <div className="table-scroll"><table><thead><tr><th>Reference category</th><th>Matched</th><th>False positives</th><th>Missed</th></tr></thead><tbody>{Object.entries(score.perType).sort(([a], [b]) => a.localeCompare(b)).map(([kind, counts]) => <tr key={kind}><td>{shortType(kind)}</td><td>{counts.truePositives}</td><td>{counts.falsePositives}</td><td>{counts.falseNegatives}</td></tr>)}{Object.keys(score.perType).length === 0 && <tr><td colSpan={4}>No labelled or predicted spans. Precision and recall are undefined.</td></tr>}</tbody></table></div>
+              <p className="annotation-caveat">Counts include manual corrections made before this review. They depend on the supplied labels being complete and are not an independent holdout test, a residual-disclosure test, or release approval.</p>
+            </div> })() : <div className="unmeasured-panel"><strong>Precision and recall not measured</strong><span>No complete reference-label set was attached. Return to Detection review to add one; zero residual rule matches cannot substitute for labelled ground truth.</span></div>}
+            <div className="scorecard-list">{inspection.verification.checks.map((check, index) => <div key={`${check.name}-${index}`}><span className={`check-status status-${check.status.toLowerCase()}`}>{check.status === 'PASS' ? <Check size={15} /> : <CircleAlert size={15} />}{check.status.replaceAll('_', ' ')}</span><div><strong>{check.name}</strong><p>{check.detail}</p></div></div>)}</div><div className="limitations-panel"><h3>What remains unproven</h3><ul>{inspection.limitations.map((item, index) => <li key={index}>{item}</li>)}</ul></div></section>}
           <div className="page-actions"><button type="button" className="back-button" onClick={() => { setStep('detect'); setResultTab('documents') }}><ArrowLeft size={17} /> Back to detection</button><span className="no-export"><LockKeyhole size={16} /> Export disabled for this development preview</span></div>
         </>}
         {error && <div className="batch-error" role="alert"><CircleAlert size={19} /><span>{error}</span><button type="button" aria-label="Dismiss error" onClick={() => setError('')}><X size={17} /></button></div>}

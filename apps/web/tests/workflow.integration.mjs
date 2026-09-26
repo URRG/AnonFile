@@ -48,10 +48,15 @@ test('real HTTP intake, withholding, independent review and isolation', { timeou
     assert.ok(demoInspection.transformedPreview.includes('[REDACTED_EMAIL]'))
     assert.ok(!demoInspection.transformedPreview.includes('alex@example.test'))
     assert.ok(demoInspection.findings.some(f => f.entityType === 'EMAIL'))
+    const mailText = 'From: Riya <riya@example.test>\nTo: Sita <sita@example.test>\nHi Sita!'
+    const recordText = '{"full_name":"Riya","email":"riya@example.test"}'
     const batch = await inspectSyntheticBatch({ apiBase: base, token: processor, files: [
-      { id: 'mail', name: 'mail.txt', size: 90, contentBase64: Buffer.from('From: Riya <riya@example.test>\nTo: Sita <sita@example.test>\nHi Sita!').toString('base64') },
-      { id: 'record', name: 'record.json', size: 60, contentBase64: Buffer.from('{"full_name":"Riya","email":"riya@example.test"}').toString('base64') },
-    ], manualNames: [], aliasOverrides: {} })
+      { id: 'mail', name: 'mail.txt', size: Buffer.byteLength(mailText), contentBase64: Buffer.from(mailText).toString('base64') },
+      { id: 'record', name: 'record.json', size: Buffer.byteLength(recordText), contentBase64: Buffer.from(recordText).toString('base64') },
+    ], manualNames: [], aliasOverrides: {}, referenceManifest: { basis: 'REVIEWER_ATTESTED_EXHAUSTIVE', documents: [
+      { name: 'mail.txt', annotations: [{ start: mailText.indexOf('Riya'), end: mailText.indexOf('Riya') + 4, entity_type: 'PERSON_NAME' }] },
+      { name: 'record.json', annotations: [{ start: recordText.indexOf('Riya'), end: recordText.indexOf('Riya') + 4, entity_type: 'PERSON_NAME' }] },
+    ] } })
     assert.equal(batch.releaseAuthorized, false)
     assert.equal(batch.exportAvailable, false)
     assert.equal(batch.documents.length, 2)
@@ -60,6 +65,8 @@ test('real HTTP intake, withholding, independent review and isolation', { timeou
     assert.equal(person.alias.length, 4)
     assert.ok(batch.documents.every(document => document.candidateText.includes(person.alias)))
     assert.equal(batch.verification.status, 'REVIEW_REQUIRED')
+    assert.equal(batch.verification.annotationScore.goldAnnotations, 2)
+    assert.equal(batch.verification.annotationScore.exact.truePositives, 2)
     const content = 'Synthetic contact alex@example.com'
     const release = await requestRelease({ apiBase: base, token: processor, content, mode: 'external_anonymized', recipient: 'synthetic-buyer' })
     assert.equal(release.eligibility, 'REVIEW_REQUIRED')

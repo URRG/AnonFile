@@ -5,7 +5,7 @@ import ts from 'typescript'
 
 const source = readFileSync(new URL('../src/api.ts', import.meta.url), 'utf8')
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText
-const { readBatchFile, inspectSyntheticBatch } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
+const { readBatchFile, readBatchReferenceManifest, inspectSyntheticBatch } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
 const files = [
   { id: 'f1', name: 'a.txt', size: 12, contentBase64: Buffer.from('Riya').toString('base64') },
   { id: 'f2', name: 'b.txt', size: 12, contentBase64: Buffer.from('note').toString('base64') },
@@ -40,6 +40,19 @@ test('batch client sends one synthetic-only request and validates candidate', as
   assert.equal(mock.mock.calls[0].arguments[1].headers.Authorization, 'Bearer synthetic-token')
 })
 
+test('Python code-point spans render correctly after an astral Unicode character', async t => {
+  const response = valid()
+  response.documents[0].text = '😀Riya'
+  response.documents[0].candidate_text = '😀Gita'
+  response.documents[0].matches[0].start = 1
+  response.documents[0].matches[0].end = 5
+  t.mock.method(globalThis, 'fetch', async () => Response.json(response))
+  const result = await inspectSyntheticBatch(request)
+  assert.equal(result.documents[0].matches[0].start, 2)
+  assert.equal(result.documents[0].matches[0].end, 6)
+  assert.equal(result.documents[0].candidateText, '😀Gita')
+})
+
 test('batch client rejects fabricated approval, mismatched content and counts', async t => {
   for (const change of [
     value => { value.release_authorized = true },
@@ -61,4 +74,49 @@ test('batch client rejects invalid intake and never sends data', async t => {
   await assert.rejects(inspectSyntheticBatch({ ...request, token: '' }), /required/)
   await assert.rejects(inspectSyntheticBatch({ ...request, files: files.slice(0, 1) }), /required/)
   assert.equal(mock.mock.calls.length, 0)
+})
+
+test('reference-label JSON must cover every staged file and contain only bounded span metadata', async () => {
+  const makeFile = value => ({ name: 'labels.json', size: 400, text: async () => JSON.stringify(value) })
+  const good = { schema_version: 'batch-reference-v1', documents: [
+    { name: 'a.txt', annotations: [{ start: 0, end: 4, entity_type: 'PERSON_NAME' }] },
+    { name: 'b.txt', annotations: [] },
+  ] }
+  const parsed = await readBatchReferenceManifest(makeFile(good), files)
+  assert.equal(parsed.basis, 'REVIEWER_ATTESTED_EXHAUSTIVE')
+  assert.equal(parsed.documents[0].annotations[0].end, 4)
+  await assert.rejects(readBatchReferenceManifest(makeFile({ ...good, text: 'Riya' }), files), /every staged document/)
+  await assert.rejects(readBatchReferenceManifest(makeFile({ ...good, documents: [good.documents[0], good.documents[0]] }), files), /every staged document/)
+  await assert.rejects(readBatchReferenceManifest(makeFile({ ...good, documents: [
+    { name: 'a.txt', annotations: [{ start: 0, end: 4, entity_type: 'UNKNOWN' }] }, good.documents[1],
+  ] }), files), /invalid span/)
+})
+
+test('batch client binds annotation-score counts to submitted labels and detector matches', async t => {
+  const referenceManifest = { basis: 'REVIEWER_ATTESTED_EXHAUSTIVE', documents: [
+    { name: 'a.txt', annotations: [{ start: 0, end: 4, entity_type: 'PERSON_NAME' }] },
+    { name: 'b.txt', annotations: [{ start: 0, end: 4, entity_type: 'OTHER_SENSITIVE' }] },
+  ] }
+  const response = valid()
+  response.verification.annotation_score = { basis: 'REVIEWER_ATTESTED_EXHAUSTIVE', status: 'OBSERVATIONAL_ONLY',
+    labelled_documents: 2, gold_annotations: 2,
+    exact: { true_positives: 1, false_positives: 0, false_negatives: 1 },
+    per_type: { PERSON_NAME: { true_positives: 1, false_positives: 0, false_negatives: 0 },
+      OTHER_SENSITIVE: { true_positives: 0, false_positives: 0, false_negatives: 1 } } }
+  const mock = t.mock.method(globalThis, 'fetch', async () => Response.json(response))
+  const result = await inspectSyntheticBatch({ ...request, referenceManifest })
+  assert.equal(result.verification.annotationScore.exact.falseNegatives, 1)
+  const sent = JSON.parse(mock.mock.calls[0].arguments[1].body)
+  assert.deepEqual(sent.reference_annotations.documents.map(item => item.id), ['f1', 'f2'])
+  t.mock.restoreAll()
+  for (const change of [
+    value => { value.verification.annotation_score.exact.false_negatives = 0 },
+    value => { value.verification.annotation_score.status = 'QUALIFIED' },
+    value => { value.verification.annotation_score.per_type.OTHER_SENSITIVE.false_negatives = 0 },
+  ]) {
+    const tampered = structuredClone(response); change(tampered)
+    t.mock.method(globalThis, 'fetch', async () => Response.json(tampered))
+    await assert.rejects(inspectSyntheticBatch({ ...request, referenceManifest }), /invalid review result/)
+    t.mock.restoreAll()
+  }
 })
