@@ -219,6 +219,16 @@ def test_create_rejects_parent_expiry_overrun():
             expected_policy_generation=0)
 
 
+def test_create_rejects_forged_policy_snapshot_digest():
+    source_item, policy_item = source(), policy()
+    item = lineage(source_item, policy_item, policy_method_snapshot_digest=digest())
+    with pytest.raises(PostgresProcessingRunLineageError):
+        authority(Connection(source_item, policy_item)).create(
+            item, application_tenant=APP, source=source_item, policy=policy_item,
+            expected_tenant_generation=0, expected_source_generation=0,
+            expected_policy_generation=0)
+
+
 def test_lock_active_and_terminal_fail_closed():
     source_item, policy_item = source(), policy()
     connection = Connection(source_item, policy_item)
@@ -277,6 +287,18 @@ def test_live_sql_rejects_orphans_bad_copy_and_invalid_fences(live):
                                 item.source_dataset_ref, item.source_content_digest, item.provenance_digest,
                                 item.policy_method_snapshot_digest, item.policy_method_ref, item.policy_digest,
                                 item.output_schema_digest, item.expires_at, item.lineage_digest))
+        expired = lineage(source_item, policy_item, tenant_ref=tenant_ref,
+                          expires_at=now - timedelta(seconds=1))
+        with pytest.raises(psycopg.errors.RaiseException):
+            connection.execute("INSERT INTO anonflow_processing_run_lineages "
+                               "(tenant_ref,processing_run_ref,source_snapshot_digest,source_dataset_ref,source_content_digest,provenance_digest,policy_method_snapshot_digest,policy_method_ref,policy_digest,output_schema_digest,expires_at,lineage_digest) "
+                               "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                               (expired.tenant_ref, expired.processing_run_ref,
+                                expired.source_snapshot_digest, expired.source_dataset_ref,
+                                expired.source_content_digest, expired.provenance_digest,
+                                expired.policy_method_snapshot_digest, expired.policy_method_ref,
+                                expired.policy_digest, expired.output_schema_digest,
+                                expired.expires_at, expired.lineage_digest))
         with pytest.raises(psycopg.errors.RaiseException):
             connection.execute("INSERT INTO anonflow_processing_run_lineages "
                                "(tenant_ref,processing_run_ref,source_snapshot_digest,source_dataset_ref,source_content_digest,provenance_digest,policy_method_snapshot_digest,policy_method_ref,policy_digest,output_schema_digest,expires_at,lineage_digest) "

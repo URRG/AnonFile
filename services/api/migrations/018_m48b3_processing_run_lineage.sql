@@ -95,6 +95,7 @@ BEGIN
        OR NEW.provenance_digest <> source_row.provenance_digest
        OR NEW.policy_digest <> policy_row.policy_digest
        OR NEW.output_schema_digest <> policy_row.output_schema_digest
+       OR NEW.expires_at <= date_trunc('second', clock_timestamp())
        OR NEW.expires_at > source_row.expires_at
        OR NEW.expires_at > policy_row.expires_at THEN
         RAISE EXCEPTION 'processing run lineage does not exactly bind live parents';
