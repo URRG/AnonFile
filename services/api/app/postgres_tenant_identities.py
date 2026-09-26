@@ -75,6 +75,15 @@ def _require_read_committed(cursor: Any) -> None:
         _fail()
 
 
+def _require_active_transaction(cursor: Any) -> None:
+    """Reject a cursor whose row lock would end with its SELECT statement."""
+    connection = getattr(cursor, "connection", None)
+    info = getattr(connection, "info", None)
+    status = getattr(info, "transaction_status", None)
+    if getattr(status, "name", None) != "INTRANS":
+        _fail()
+
+
 @dataclass(frozen=True, slots=True)
 class TenantIdentity:
     application_tenant: str
@@ -205,6 +214,7 @@ class PostgresTenantIdentityAuthority:
         _text(tenant_ref, _TENANT)
         _generation(expected_generation)
         try:
+            _require_active_transaction(cursor)
             _require_read_committed(cursor)
             identity = self._lock_identity(cursor, application_tenant)
             fence = None if identity is None else self._latest(cursor, identity)

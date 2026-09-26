@@ -9,6 +9,7 @@ from pathlib import Path
 from queue import Empty, Queue
 import secrets
 import time
+from types import SimpleNamespace
 import pytest
 
 from app.postgres_tenant_identities import (PostgresTenantIdentityAuthority,
@@ -35,15 +36,17 @@ class Connection:
         self.fences = copy.deepcopy(database.fences)
         self.autocommit = True
         self.closed = False
+        self.info = SimpleNamespace(transaction_status=SimpleNamespace(name="IDLE"))
 
     def cursor(self):
         return Cursor(self)
 
     def commit(self):
         self.database.identities, self.database.fences = self.identities, self.fences
+        self.info.transaction_status = SimpleNamespace(name="IDLE")
 
     def rollback(self):
-        pass
+        self.info.transaction_status = SimpleNamespace(name="IDLE")
 
     def close(self):
         self.closed = True
@@ -52,7 +55,10 @@ class Cursor:
     def fetchone(self): return self._row
     def execute(self, sql, params=()):
         q=" ".join(sql.split()); self._row=None; self.rowcount=-1
-        if q in {"BEGIN","COMMIT","ROLLBACK"}: return
+        if q=="BEGIN":
+            self.connection.info.transaction_status=SimpleNamespace(name="INTRANS")
+            return
+        if q in {"COMMIT","ROLLBACK"}: return
         if q=="SHOW transaction_isolation": self._row=(self.isolation,); return
         if q=="SELECT date_trunc('second', clock_timestamp())": self._row=(self.connection.database.now,); return
         if q.startswith("INSERT INTO anonflow_tenant_identities"):
@@ -92,8 +98,20 @@ def test_terminal_fence_is_monotonic_and_read_committed_only():
     assert authority.terminal(application_tenant="tenant-a",tenant_ref=TENANT,expected_generation=0,state="DISABLED",event_ref=event).generation==1
     assert authority.terminal(application_tenant="tenant-a",tenant_ref=TENANT,expected_generation=0,state="DISABLED",event_ref=event).state=="DISABLED"
     with pytest.raises(PostgresTenantIdentityError): authority.fence(application_tenant="tenant-a",tenant_ref=TENANT,expected_generation=0)
-    cursor=Connection(db).cursor(); cursor.isolation="repeatable read"
+    cursor=Connection(db).cursor(); cursor.execute("BEGIN"); cursor.isolation="repeatable read"
     with pytest.raises(PostgresTenantIdentityError): authority.lock_active(cursor,application_tenant="tenant-a",tenant_ref=TENANT,expected_generation=0)
+
+
+def test_lock_active_rejects_idle_or_unknown_transaction_state():
+    db=Database(); authority,_=adapter(db); authority.create(identity())
+    cursor=Connection(db).cursor()
+    with pytest.raises(PostgresTenantIdentityError):
+        authority.lock_active(cursor,application_tenant="tenant-a",tenant_ref=TENANT,expected_generation=0)
+    cursor.execute("BEGIN")
+    assert authority.lock_active(cursor,application_tenant="tenant-a",tenant_ref=TENANT,expected_generation=0).state=="ACTIVE"
+    cursor.connection.info.transaction_status=SimpleNamespace(name="UNKNOWN")
+    with pytest.raises(PostgresTenantIdentityError):
+        authority.lock_active(cursor,application_tenant="tenant-a",tenant_ref=TENANT,expected_generation=0)
 
 @pytest.fixture
 def postgres_authority():
@@ -109,6 +127,15 @@ def test_postgres_cross_tenant_and_terminal_fence(postgres_authority):
     authority = PostgresTenantIdentityAuthority(lambda: psycopg.connect(dsn, autocommit=True))
     item = identity(app="tenant-live-" + secrets.token_hex(8), tenant=opaque("tenantref:v1:"))
     authority.create(item)
+    with psycopg.connect(dsn, autocommit=True) as connection:
+        cursor = connection.cursor()
+        with pytest.raises(PostgresTenantIdentityError):
+            authority.lock_active(cursor, application_tenant=item.application_tenant,
+                                  tenant_ref=item.tenant_ref, expected_generation=0)
+        cursor.execute("BEGIN")
+        assert authority.lock_active(cursor, application_tenant=item.application_tenant,
+                                     tenant_ref=item.tenant_ref, expected_generation=0).state == "ACTIVE"
+        cursor.execute("ROLLBACK")
     with pytest.raises(PostgresTenantIdentityError):
         authority.create(identity(app="tenant-other-" + secrets.token_hex(8),
                                   tenant=item.tenant_ref))
