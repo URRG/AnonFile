@@ -158,6 +158,42 @@ def test_email_without_explicit_owner_uses_generic_surrogate(demo_client):
     assert all(alias in doc["candidate_text"] for doc in body["documents"])
 
 
+def test_format_aware_demo_surrogates_are_non_issuable_and_batch_consistent(demo_client):
+    request = {"synthetic_only": True, "files": [
+        file("mail", "thread.txt", "Riya: SSN: 123-45-6789; PAN ABCPD1234F; call +1 415 555 0134."),
+        file("rows", "people.csv", "full_name,pan,ssn,phone,drivers_license\n"
+             "Riya,ABCPD1234F,123-45-6789,+1 415 555 0134,123456789\n"),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    by_source = {entity["source"]: entity for entity in body["entities"]}
+    assert by_source["ABCPD1234F"]["kind"] == "PAN"
+    assert by_source["ABCPD1234F"]["strategy"] == "PAN_INVALID_TEST"
+    assert by_source["ABCPD1234F"]["alias"] == "TSTZA0001A"
+    assert by_source["123-45-6789"]["strategy"] == "US_SSN_INVALID"
+    assert by_source["123-45-6789"]["alias"] == "000-01-0001"
+    assert by_source["+1 415 555 0134"]["strategy"] == "NANP_FICTIONAL"
+    assert by_source["+1 415 555 0134"]["alias"] == "+1 202 555 0100"
+    assert by_source["123456789"]["strategy"] == "OPAQUE_REDACTION"
+    assert all("ABCPD1234F" not in doc["candidate_text"] for doc in body["documents"])
+    assert all("123-45-6789" not in doc["candidate_text"] for doc in body["documents"])
+    assert body["verification"]["source_value_residuals"] == 0
+    assert body["release_authorized"] is False
+
+
+def test_unlabelled_nine_digit_value_and_other_region_phone_stay_opaque(demo_client):
+    request = {"synthetic_only": True, "files": [
+        file("one", "contact.txt", "Call +91 98765 43210"),
+        file("two", "record.json", '{"drivers_license":"123456789","phone":"+91 98765 43210"}'),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    by_source = {entity["source"]: entity for entity in response.json()["entities"]}
+    assert by_source["123456789"]["strategy"] == "OPAQUE_REDACTION"
+    assert by_source["+91 98765 43210"]["strategy"] == "OPAQUE_REDACTION"
+
+
 def test_conflicting_email_owner_evidence_is_rejected(demo_client):
     request = {"synthetic_only": True, "files": [
         file("mail", "thread.txt", "From: Riya <shared@example.test>\nTo: Sita <sita@example.test>"),
@@ -285,6 +321,22 @@ def test_batch_pdf_is_rasterized_into_new_image_only_candidate_preview(demo_clie
     assert media["pdf_raster_evidence"]["source_objects_copied"] is False
     assert media["self_ocr_residual_sources"] == 0
     assert response.json()["export_available"] is False
+
+
+def test_pdf_text_layer_sensitive_value_missing_from_ocr_rejects_candidate(demo_client, monkeypatch):
+    reportlab = pytest.importorskip("reportlab.pdfgen.canvas")
+    from app import media_preview
+    stream = BytesIO()
+    canvas = reportlab.Canvas(stream)
+    canvas.drawString(72, 720, "Contact riya@example.test")
+    canvas.save()
+    monkeypatch.setattr(media_preview, "_ocr_lines", lambda _: [
+        {"text": "Contact", "box": (20, 20, 100, 50), "confidence": 1.0}])
+    request = payload()
+    request["files"][0] = file("email", "thread.pdf", stream.getvalue())
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 422
+    assert "riya@example.test" not in response.text
 
 
 def test_curated_mixed_media_demo_fixture_is_reviewable_as_one_batch(demo_client):

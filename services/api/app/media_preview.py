@@ -18,6 +18,7 @@ from threading import Lock
 from typing import Any
 
 from app.contracts import PayloadError
+from app.processing import detect_text
 
 MAX_MEDIA_PAGES = 2
 MAX_PAGE_PIXELS = 2_000_000
@@ -27,6 +28,7 @@ MAX_OCR_CHARS = 30_000
 MAX_PNG_BYTES = 2_500_000
 PDF_SCALE = 1.5
 _OCR_LOCK = Lock()
+_PDFIUM_LOCK = Lock()  # PDFium is not thread-safe, even across separate documents.
 
 
 @lru_cache(maxsize=1)
@@ -84,7 +86,12 @@ def _image_pages(raw: bytes, extension: str) -> list[Any]:
         raise PayloadError("The image is unsupported or exceeds the synthetic demo pixel limit.") from None
 
 
-def _pdf_pages(raw: bytes) -> list[Any]:
+def _pdf_pages(raw: bytes) -> tuple[list[Any], list[str]]:
+    with _PDFIUM_LOCK:
+        return _pdf_pages_locked(raw)
+
+
+def _pdf_pages_locked(raw: bytes) -> tuple[list[Any], list[str]]:
     from pypdf import PdfReader
     import pypdfium2 as pdfium
 
@@ -99,6 +106,7 @@ def _pdf_pages(raw: bytes) -> list[Any]:
             if len(pdf) != len(reader.pages):
                 raise ValueError
             pages = []
+            native_texts = []
             total_pixels = 0
             for index in range(len(pdf)):
                 page = pdf[index]
@@ -108,6 +116,13 @@ def _pdf_pages(raw: bytes) -> list[Any]:
                     total_pixels += width * height
                     if width < 16 or height < 16 or width * height > MAX_PAGE_PIXELS or total_pixels > MAX_TOTAL_PIXELS:
                         raise ValueError
+                    textpage = page.get_textpage()
+                    try:
+                        if textpage.count_chars() > MAX_OCR_CHARS:
+                            raise ValueError
+                        native_texts.append(textpage.get_text_bounded())
+                    finally:
+                        textpage.close()
                     bitmap = page.render(scale=PDF_SCALE, draw_annots=True, rev_byteorder=True)
                     try:
                         pages.append(bitmap.to_pil().convert("RGB").copy())
@@ -117,7 +132,7 @@ def _pdf_pages(raw: bytes) -> list[Any]:
                     page.close()
         finally:
             pdf.close()
-        return pages
+        return pages, native_texts
     except Exception:
         raise PayloadError("The PDF is unsupported for bounded raster review (two pages maximum).") from None
 
@@ -126,17 +141,19 @@ def extract_media(raw: bytes, extension: str) -> tuple[str, list[dict[str, Any]]
     """Return OCR text and private page objects; no output is authorized."""
     if extension in {".png", ".jpg", ".jpeg"}:
         images = _image_pages(raw, extension)
+        native_texts = [""] * len(images)
     elif extension == ".pdf":
-        images = _pdf_pages(raw)
+        images, native_texts = _pdf_pages(raw)
     else:
         raise PayloadError("Unsupported synthetic media type.")
     pages = []
     text_parts = []
     offset = 0
-    for number, image in enumerate(images, 1):
+    for number, (image, native_text) in enumerate(zip(images, native_texts), 1):
         lines = _ocr_lines(image)
         if not lines:
             raise PayloadError("No readable OCR text was found in a media page.")
+        _verify_pdf_text_layer(native_text, lines)
         for line in lines:
             if text_parts:
                 offset += 1
@@ -149,6 +166,27 @@ def extract_media(raw: bytes, extension: str) -> tuple[str, list[dict[str, Any]]
     if len(text) > MAX_OCR_CHARS or len(text.encode("utf-8")) > 100_000:
         raise PayloadError("Extracted media text exceeds the synthetic demo limit.")
     return text, pages
+
+
+def _verify_pdf_text_layer(native_text: str, lines: list[dict[str, Any]]) -> None:
+    """Reject an OCR transcript that omits a recognized born-digital signal.
+
+    This is a partial cross-check, not a scanned-page or pixel coverage proof.
+    """
+    if not native_text:
+        return
+    ocr_values = [line["text"].casefold() for line in lines]
+    for span in detect_text(native_text):
+        if span.entity_type not in {"EMAIL", "PAN", "PHONE", "IP_ADDRESS", "AADHAAR", "CARD"}:
+            continue
+        source = native_text[span.start:span.end].casefold()
+        if span.entity_type in {"PHONE", "AADHAAR", "CARD"}:
+            digits = "".join(char for char in source if char.isdigit())
+            present = any(digits in "".join(char for char in line if char.isdigit()) for line in ocr_values)
+        else:
+            present = any(source in line for line in ocr_values)
+        if not present:
+            raise PayloadError("PDF text-layer and OCR disagree on a sensitive value; inspect the source manually.")
 
 
 def _png_bytes(image: Any) -> bytes:

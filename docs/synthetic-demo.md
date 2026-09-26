@@ -84,6 +84,15 @@ bounded detector can miss prose names and other sensitive information. CSV
 review is limited to one-line cells, and ambiguous or unsupported structured
 values are rejected. Replacements are proposals for human review only.
 
+The entity register also shows the replacement strategy. PAN-shaped values,
+explicitly identified US SSNs, and explicit `+1` North American phones get
+non-issuable or fictional examples with the same basic syntax. Other
+government IDs, driving licences, regional phone numbers, and unsupported
+values remain opaque rather than being replaced with plausible live numbers.
+For a born-digital PDF, a text-layer/OCR disagreement on a recognized
+sensitive signal now rejects the candidate; this does not validate scanned
+pixels. See the [format-aware replacement policy](format-aware-pseudonyms.md).
+
 For a different synthetic batch, the Detection review page can attach a
 separate reference-label JSON file. It is not counted as one of the source
 documents. The manifest must list every staged filename exactly once, even
