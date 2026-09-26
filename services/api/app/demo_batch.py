@@ -36,6 +36,8 @@ SAFE_ALIAS = re.compile(r"^[A-Za-z][A-Za-z '-]{1,79}$")
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,48}$")
 NAME_POOL = ("Gita", "Maya", "Mira", "Nina", "Arun", "Noah", "Asha", "Anika", "Kiran", "Leela", "Ava", "Ira", "Miriam", "Rohan", "Nora", "Elena")
 MAX_REFERENCE_LABELS_PER_FILE = 200
+REVIEW_EXCLUSION_REASON = "FALSE_POSITIVE_CONFIRMED"
+SUPPRESSIBLE_KINDS = frozenset({"PERSON_NAME", "EMAIL", "PHONE", "IP_ADDRESS"})
 SAMPLE_TEXT_DIGESTS = {
     "01-email-thread.txt": "ef136ed6bb9c2931a07915d8ae22a487c5899cab825d211472cd63cd8f54f8ef",
     "02-passenger-list.csv": "09887d08254054222a6549ae76cbc8ec4f5f78ef2d6c599932f24e408a5610ca",
@@ -101,7 +103,7 @@ def _score_reference_annotations(value: object, documents: list[dict[str, Any]])
             _verify_curated_sample(labelled, documents)
         predictions = parse_predictions([{"id": document["id"], "annotations": [
             {"start": match["start"], "end": match["end"], "entity_type": match["kind"]}
-            for match in document["matches"]]} for document in documents], gold)
+            for match in document["matches"] if match["applied"]]} for document in documents], gold)
         report = evaluate(gold, predictions)
     except EvaluationError:
         raise PayloadError("Invalid synthetic reference annotations.") from None
@@ -329,6 +331,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
         raise PayloadError("Duplicate file identities or batch size over 300 KB.")
     phrases = payload.get("manual_names", [])
     overrides = payload.get("alias_overrides", {})
+    exclusions = payload.get("review_exclusions", {})
     if not isinstance(phrases, list) or len(phrases) > 20 or not all(isinstance(v, str) and SAFE_NAME.fullmatch(v) for v in phrases):
         raise PayloadError("Manual names must be at most 20 short person names.")
     if any(not any(re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", doc["text"], re.I)
@@ -336,6 +339,9 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
         raise PayloadError("A manually added name must occur in at least one file.")
     if not isinstance(overrides, dict) or len(overrides) > 100 or not all(isinstance(k, str) and isinstance(v, str) for k, v in overrides.items()):
         raise PayloadError("Invalid alias overrides.")
+    if (not isinstance(exclusions, dict) or len(exclusions) > 100
+            or any(not isinstance(key, str) or reason != REVIEW_EXCLUSION_REASON for key, reason in exclusions.items())):
+        raise PayloadError("Invalid reviewer exclusions.")
 
     for document in documents:
         document["_fields"] = _structured_fields(document)
@@ -364,6 +370,11 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
     id_by_key = {key: f"E{index + 1}" for index, key in enumerate(keys)}
     if set(overrides) - set(id_by_key.values()):
         raise PayloadError("An alias override refers to an unknown entity.")
+    if set(exclusions) - set(id_by_key.values()) or any(
+            kind not in SUPPRESSIBLE_KINDS for (kind, _), entity_id in id_by_key.items() if entity_id in exclusions):
+        raise PayloadError("Only supported noncritical findings can be excluded after reviewer confirmation.")
+    if set(overrides).intersection(exclusions):
+        raise PayloadError("An excluded entity cannot also have an alias override.")
     reserved_aliases = {value.casefold() for value in overrides.values()}
     if len(reserved_aliases) != len(overrides) or reserved_aliases.intersection(names_by_key):
         raise PayloadError("Person aliases must be unique and must not be another source name.")
@@ -395,10 +406,11 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
             if entity_id in overrides:
                 raise PayloadError("Only person-name aliases can be changed in this demo.")
             alias = f"[{kind}_{entity_id}]"
-        entities.append({"id": entity_id, "kind": kind, "source": display, "alias": alias, "mentions": 0})
+        entities.append({"id": entity_id, "kind": kind, "source": display, "alias": alias,
+                         "mentions": 0, "excluded": entity_id in exclusions})
     entities_by_id = {entity["id"]: entity for entity in entities}
 
-    total_mentions = 0
+    total_mentions = transformed_mentions = 0
     for doc in documents:
         text = doc["text"]
         spans: list[tuple[int, int, str, int]] = []
@@ -422,11 +434,13 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
         matches = []
         for start, end, entity_id in selected:
             entity = entities_by_id[entity_id]
-            candidate_parts.extend((text[offset:start], entity["alias"]))
+            applied = not entity["excluded"]
+            candidate_parts.extend((text[offset:start], entity["alias"] if applied else text[start:end]))
             matches.append({"start": start, "end": end, "source": text[start:end], "entity_id": entity_id,
-                            "kind": entity["kind"], "replacement": entity["alias"]})
+                            "kind": entity["kind"], "replacement": entity["alias"], "applied": applied})
             entity["mentions"] += 1
             total_mentions += 1
+            transformed_mentions += applied
             offset = end
         candidate_parts.append(text[offset:])
         candidate = "".join(candidate_parts)
@@ -453,24 +467,29 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
             relationships.append({"source_id": source_id, "target_id": target_id, "type": "EMAILED",
                                   "document_id": document_id, "basis": "explicit From/To or Cc header"})
     residual = sum(len(detect_text(doc["candidate_text"])) for doc in documents)
+    if any(entity["excluded"] and not entity["mentions"] for entity in entities):
+        raise PayloadError("A reviewer exclusion must refer to a detected mention.")
     structure_failures = sum(doc["structure_check"] == "fail" for doc in documents)
     annotation_score = _score_reference_annotations(payload.get("reference_annotations"), documents)
     return {
         "posture": "SYNTHETIC_DEMO_ONLY", "release_authorized": False, "export_available": False,
         "documents": documents, "entities": entities, "relationships": relationships,
         "summary": {"files": len(documents), "detected_mentions": total_mentions,
-                    "transformed_mentions": total_mentions, "linked_entities": sum(e["mentions"] > 0 for e in entities),
+                    "transformed_mentions": transformed_mentions, "suppressed_mentions": total_mentions - transformed_mentions,
+                    "linked_entities": sum(e["mentions"] > 0 for e in entities),
                     "explicit_relationships": len(relationships)},
         "verification": {
             "status": "REVIEW_REQUIRED", "known_rule_residual_matches": residual,
             "structure_failures": structure_failures, "annotation_score": annotation_score,
             "checks": [
-                {"name": "Detected-span application", "status": "PASS" if total_mentions else "REVIEW",
-                 "detail": "Every selected detector match received its proposed replacement; this does not measure missed PII."},
+                {"name": "Detected-span application", "status": "PASS" if total_mentions and transformed_mentions == total_mentions else "REVIEW",
+                 "detail": f"{transformed_mentions} of {total_mentions} selected matches received a proposed replacement. Reviewer exclusions retain source values and require further review."},
+                {"name": "Reviewer exclusions", "status": "REVIEW" if exclusions else "NOT_APPLICABLE",
+                 "detail": f"{total_mentions - transformed_mentions} matches were retained after explicit false-positive review. No exclusion authorizes release."},
                 {"name": "Structured syntax", "status": "FAIL" if structure_failures else "PASS",
                  "detail": "CSV/JSON/JSONL candidates were reparsed where applicable."},
-                {"name": "Residual known-rule scan", "status": "REVIEW" if residual else "PASS",
-                 "detail": f"{residual} detector matches remain in candidate text. Zero matches would not prove anonymity."},
+                {"name": "Residual known-rule scan", "status": "REVIEW" if residual or exclusions else "PASS",
+                 "detail": f"{residual} bounded-rule matches remain in candidate text. Reviewer-excluded names may not be covered by this scan; zero matches do not prove anonymity."},
                 {"name": "PDF layout and image OCR", "status": "NOT_TESTED",
                  "detail": "PDFs are extracted-text previews only. No PDF output or image OCR is produced."},
                 {"name": "Reference-label agreement", "status": "REVIEW" if annotation_score else "NOT_MEASURED",

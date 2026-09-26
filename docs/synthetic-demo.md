@@ -24,6 +24,12 @@ proposed replacements. You can add a missed exact person name or change a
 person alias (the alias must have the same character length); then review the
 candidate. The final screen has document comparisons, explicit mail-header
 relationships, and a verification scorecard. It deliberately has no export.
+If a name, email, phone, or IP address is a confirmed false positive in this
+synthetic batch, Detection review can exclude that signal across every file
+after a separate acknowledgment. Excluded values remain visible in the
+candidate, are counted separately, and keep the result review-required.
+Credentials, payment secrets, government IDs, birth dates, and other
+unsupported categories cannot be excluded through this demo control.
 The built-in batch also carries a fixed set of demo-authored reference spans.
 Its scorecard shows exact matched, false-positive, and missed spans for this
 fictional example. The backend accepts that label basis only for the exact

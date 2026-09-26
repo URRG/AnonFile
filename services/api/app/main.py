@@ -229,6 +229,7 @@ class DemoBatchCreate(StrictModel):
     synthetic_only: Literal[True]
     manual_names: list[str] = Field(default_factory=list, max_length=20)
     alias_overrides: dict[str, str] = Field(default_factory=dict)
+    review_exclusions: dict[str, Literal["FALSE_POSITIVE_CONFIRMED"]] = Field(default_factory=dict, max_length=100)
     reference_annotations: DemoBatchReferenceAnnotations | None = None
 
 class DatasetCreate(DatasetMetadata):

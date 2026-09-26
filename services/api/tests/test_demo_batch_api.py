@@ -65,6 +65,42 @@ def test_one_alias_edit_does_not_change_another_persons_alias(demo_client):
     assert next(e for e in second.json()["entities"] if e["source"] == "Sita")["alias"] == sita["alias"]
 
 
+def test_reviewer_can_exclude_a_noncritical_false_positive_without_hiding_the_decision(demo_client):
+    first = demo_client.post("/demo/batch/inspect", headers=auth(), json=payload()).json()
+    riya = next(entity for entity in first["entities"] if entity["source"] == "Riya")
+    request = payload()
+    request["review_exclusions"] = {riya["id"]: "FALSE_POSITIVE_CONFIRMED"}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert next(entity for entity in body["entities"] if entity["id"] == riya["id"])["excluded"] is True
+    assert body["summary"]["suppressed_mentions"] == riya["mentions"]
+    assert body["summary"]["detected_mentions"] == body["summary"]["transformed_mentions"] + riya["mentions"]
+    assert all(not match["applied"] for doc in body["documents"] for match in doc["matches"] if match["entity_id"] == riya["id"])
+    assert "Riya" in body["documents"][0]["candidate_text"]
+    assert next(check for check in body["verification"]["checks"] if check["name"] == "Reviewer exclusions")["status"] == "REVIEW"
+    assert next(check for check in body["verification"]["checks"] if check["name"] == "Residual known-rule scan")["status"] == "REVIEW"
+    assert body["release_authorized"] is False and body["export_available"] is False
+
+
+def test_reviewer_exclusion_rejects_unknown_critical_or_conflicting_entities(demo_client):
+    first = demo_client.post("/demo/batch/inspect", headers=auth(), json=payload()).json()
+    riya = next(entity for entity in first["entities"] if entity["source"] == "Riya")
+    for excluded, override in [({"E999": "FALSE_POSITIVE_CONFIRMED"}, {}),
+                               ({riya["id"]: "TRUST_ME"}, {}),
+                               ({riya["id"]: "FALSE_POSITIVE_CONFIRMED"}, {riya["id"]: "Nina"})]:
+        request = payload()
+        request["review_exclusions"] = excluded
+        request["alias_overrides"] = override
+        assert demo_client.post("/demo/batch/inspect", headers=auth(), json=request).status_code == 422
+    request = payload()
+    request["files"][1] = file("record", "record.csv", "passport_number\nDEMO123456\n")
+    first = demo_client.post("/demo/batch/inspect", headers=auth(), json=request).json()
+    passport = next(entity for entity in first["entities"] if entity["kind"] == "GOVERNMENT_ID")
+    request["review_exclusions"] = {passport["id"]: "FALSE_POSITIVE_CONFIRMED"}
+    assert demo_client.post("/demo/batch/inspect", headers=auth(), json=request).status_code == 422
+
+
 def test_two_mail_messages_do_not_create_cartesian_relationships(demo_client):
     request = payload()
     request["files"][0] = file("email", "thread.txt", "From: Riya <riya@example.test>\nTo: Sita <sita@example.test>\n\nReply\nFrom: Tara <tara@example.test>\nTo: Riya <riya@example.test>")
