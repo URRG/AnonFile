@@ -16,7 +16,7 @@ available.
 
 The newer batch workbench extends this to two or three synthetic files,
 including selectable-text PDFs as extracted text only. It shows consistent
-aliases, explicit mail-header relationships, and a non-exportable side-by-side
+aliases, explicit mail-header and same-record role relationships, and a non-exportable side-by-side
 candidate. A complete synthetic reference-label manifest can now produce
 exact-span agreement counts; the built-in example has fixed labels. Those
 numbers describe only the labelled case and include manual corrections. They

@@ -22,8 +22,11 @@ list with names, email addresses, fictional passport numbers and birth dates,
 and a JSON support record. The next screen lists detected values and
 proposed replacements. You can add a missed exact person name or change a
 person alias (the alias must have the same character length); then review the
-candidate. The final screen has document comparisons, explicit mail-header
-relationships, and a verification scorecard. It deliberately has no export.
+candidate. The final screen has document comparisons, explicit mail-header and
+same-record account-owner/client links, and a verification scorecard. It
+deliberately has no export. Structured role links require `account_owner` and
+`client_name` in the same parsed CSV, JSON, or JSONL record; the workbench does
+not infer roles from nearby prose or combine unrelated rows.
 If a name, email, phone, or IP address is a confirmed false positive in this
 synthetic batch, Detection review can exclude that signal across every file
 after a separate acknowledgment. Excluded values remain visible in the

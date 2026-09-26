@@ -111,6 +111,35 @@ def test_two_mail_messages_do_not_create_cartesian_relationships(demo_client):
     assert edges == {(entities["Riya"], entities["Sita"]), (entities["Tara"], entities["Riya"])}
 
 
+def test_structured_account_owner_link_requires_both_names_in_one_record(demo_client):
+    request = payload()
+    request["files"][1] = file("record", "clients.json", '[{"account_owner":"Riya","client_name":"Sita"},{"account_owner":"Tara"},{"client_name":"Maya"}]')
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    ids = {entity["source"]: entity["id"] for entity in body["entities"]}
+    assert {"Riya", "Sita", "Tara", "Maya"}.issubset(ids)
+    role_edges = [edge for edge in body["relationships"] if edge["type"] == "ACCOUNT_OWNER_OF"]
+    assert role_edges == [{"source_id": ids["Riya"], "target_id": ids["Sita"],
+                           "type": "ACCOUNT_OWNER_OF", "document_id": "record",
+                           "basis": "same JSON record account_owner/client_name"}]
+    assert body["summary"]["explicit_relationships"] == 2  # plus the separate mail-header edge
+    assert "Riya" not in body["documents"][1]["candidate_text"]
+
+
+def test_csv_role_links_do_not_cross_rows(demo_client):
+    request = payload()
+    request["files"][1] = file("record", "clients.csv", "account_owner,client_name\nRiya,Sita\nTara,Maya\n")
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    ids = {entity["source"]: entity["id"] for entity in body["entities"]}
+    role_edges = {(edge["source_id"], edge["target_id"], edge["basis"])
+                  for edge in body["relationships"] if edge["type"] == "ACCOUNT_OWNER_OF"}
+    assert role_edges == {(ids["Riya"], ids["Sita"], "same CSV record account_owner/client_name"),
+                          (ids["Tara"], ids["Maya"], "same CSV record account_owner/client_name")}
+
+
 @pytest.mark.parametrize(("filename", "content", "expected"), [
     ("record.json", '[{"full_name":"Riya","passport_number":"DEMO123456","date_of_birth":"1990-01-01"}]',
      {"PERSON_NAME", "GOVERNMENT_ID", "DATE_OF_BIRTH"}),
