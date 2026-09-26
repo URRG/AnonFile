@@ -216,7 +216,9 @@ def postgres_authority():
 def test_postgres_wrong_tenant_replay_and_terminal_race_fail_closed(postgres_authority):
     dsn, psycopg, authority = postgres_authority
     item = subject()
-    assert authority.create(item).generation == 0
+    baseline = authority.create(item)
+    assert baseline.generation == 0
+    assert baseline.changed_at.microsecond == 0
     assert authority.create(item).generation == 0
     with pytest.raises(PostgresNegativePrivacyFenceError):
         authority.fence_none(tenant_ref=OTHER, subject_ref=item.subject_ref,
@@ -269,3 +271,14 @@ def test_postgres_wrong_tenant_replay_and_terminal_race_fail_closed(postgres_aut
             cursor.execute("COMMIT")
             with pytest.raises(PostgresNegativePrivacyFenceError):
                 future.result(timeout=5)
+
+    terminal_subject = subject()
+    terminal_baseline = authority.create(terminal_subject)
+    terminal = authority.terminal(
+        tenant_ref=terminal_subject.tenant_ref,
+        subject_ref=terminal_subject.subject_ref,
+        expected_generation=terminal_baseline.generation,
+        state="QUARANTINED",
+        event_ref=opaque("privacyfence:v1:"),
+    )
+    assert terminal.changed_at.microsecond == 0

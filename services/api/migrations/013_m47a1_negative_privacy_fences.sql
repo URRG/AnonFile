@@ -13,12 +13,16 @@ CREATE TABLE IF NOT EXISTS anonflow_negative_privacy_fences (
     generation BIGINT NOT NULL CHECK (generation >= 0),
     state TEXT NOT NULL CHECK (state IN ('NONE','OPT_OUT','WITHDRAWN','QUARANTINED')),
     event_ref TEXT UNIQUE CHECK (event_ref IS NULL OR event_ref ~ '^privacyfence:v1:[A-Za-z0-9_-]{43}$'),
-    changed_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    changed_at TIMESTAMPTZ NOT NULL DEFAULT date_trunc('second', clock_timestamp()),
     PRIMARY KEY (tenant_ref, subject_ref, generation),
     FOREIGN KEY (tenant_ref, subject_ref) REFERENCES anonflow_privacy_subjects (tenant_ref, subject_ref) ON DELETE RESTRICT ON UPDATE RESTRICT,
     CHECK ((generation = 0 AND state = 'NONE' AND event_ref IS NULL) OR
            (generation > 0 AND state IN ('OPT_OUT','WITHDRAWN','QUARANTINED') AND event_ref IS NOT NULL))
 );
+-- Keep retries safe even if an interrupted earlier deployment created the
+-- table with a non-canonical timestamp default.
+ALTER TABLE anonflow_negative_privacy_fences
+ALTER COLUMN changed_at SET DEFAULT date_trunc('second', clock_timestamp());
 CREATE OR REPLACE FUNCTION anonflow_reject_privacy_subject_mutation()
 RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'privacy subjects are immutable'; END; $$;
 DROP TRIGGER IF EXISTS anonflow_privacy_subjects_immutable ON anonflow_privacy_subjects;
