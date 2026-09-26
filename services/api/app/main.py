@@ -209,7 +209,7 @@ class DemoInspectView(BaseModel):
 class DemoBatchFile(StrictModel):
     id: str = Field(min_length=1, max_length=48)
     name: str = Field(min_length=1, max_length=160)
-    content_base64: str = Field(min_length=1, max_length=140_000)
+    content_base64: str = Field(min_length=1, max_length=670_000)
 
 class DemoBatchReferenceSpan(StrictModel):
     start: int = Field(ge=0)
