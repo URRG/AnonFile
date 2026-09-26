@@ -16,8 +16,10 @@ available.
 
 The newer batch workbench extends this to two or three synthetic files,
 including bounded raster OCR for PDFs and PNG/JPEG images. It shows consistent
-aliases, explicit mail-header and same-record role relationships, and a non-exportable side-by-side
-candidate. A complete synthetic reference-label manifest can now produce
+aliases, an explicit-evidence person/organization/project graph, and a
+side-by-side candidate. The reviewer can save an unqualified local synthetic
+review copy after acknowledging the limitation; production release remains
+closed. A complete synthetic reference-label manifest can now produce
 exact-span agreement counts; the built-in example has fixed labels. The
 scorecard now breaks counts down by file, lists unmatched reference spans,
 and links each file to its before/after comparison. Reviewers can add exact
@@ -36,7 +38,8 @@ The candidate PDF is rebuilt from new raster pages in memory, without copying
 source PDF objects. This demonstrates actual pixel rewriting, but not safe
 redaction: content missed by OCR can remain visible, the same OCR recheck is
 not independent, and untrusted media parsing is not isolated in a hardened
-production worker. No candidate download or release path is enabled.
+production worker. A digest-checked local synthetic copy can be downloaded,
+but no production release path is enabled.
 The workbench now uses documented non-issuable examples for a narrow set of
 PAN, explicit US SSN, and `+1` NANP phone shapes, retaining opaque markers
 otherwise. Born-digital PDF text-layer signals are cross-checked against OCR,
@@ -83,4 +86,6 @@ The synthetic preview is a presentation aid, not a shortcut through any of
 these gates or authorization to upload actual company data.
 
 The current fail-closed status and concrete exit tests are tracked in the
-[production readiness gate](production-readiness-gate.md).
+[production readiness gate](production-readiness-gate.md). The maintained,
+checkable [product gap tracker](pending-product-gaps.md) lists the remaining
+demo, research, operational and external acceptance work.
