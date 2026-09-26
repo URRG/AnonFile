@@ -1,0 +1,3 @@
+full_name,email,phone,passport_number,date_of_birth,booking_reference,notes
+Alex Example,alex@example.test,+1 202 555 0142,DEMO-PASSPORT-001,1991-04-12,DEMO-BOOKING-001,Needs aisle seat
+Morgan Sample,morgan@example.test,+1 202 555 0199,DEMO-PASSPORT-002,1988-11-03,DEMO-BOOKING-002,Contact by email

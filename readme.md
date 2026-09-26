@@ -3,11 +3,11 @@
 Secure processing foundation for a future data-intermediary release-assurance product.
 The target workflow is enterprise source data → intermediary processing and qualification → explicitly approved buyer delivery.
 
-## Current status: M5, synthetic development only
+## Current status: synthetic demo and security foundations, not production-ready
 
-This is **not production-ready** and must not receive customer data. The current rules do not establish anonymity or data-sale rights. There is no approved release, candidate-output API, buyer download, signature assurance or invented privacy/utility score. All release output is withheld; approval requests fail closed.
+This is **not production-ready** and must not receive customer data. The current rules do not establish anonymity or data-sale rights. There is no approved release, production candidate-output API, or buyer download. Release output is withheld and approval requests fail closed. An explicitly opted-in development-only synthetic inspector can display an unqualified transformed preview; that preview is not an artifact, qualification, approval or export.
 
-Implemented: bounded typed text/JSON processing, Unicode-aware original-offset spans, sensitive-field suppression, explicit development authentication, tenant/role checks, independent-review restrictions, safe error responses, and a gold-label detection evaluation CLI. The browser displays metadata only and has no offline success fallback.
+Implemented: bounded typed text/JSON processing, Unicode-aware original-offset spans, sensitive-field suppression, explicit development authentication, tenant/role checks, independent-review restrictions, safe error responses, and a gold-label detection evaluation CLI. The advanced browser control plane displays metadata only and has no offline success fallback. The separately enabled synthetic inspector supports small UTF-8 text/CSV/JSON/JSONL previews and prominently disclaims incomplete detection.
 
 M2a adds strict text/CSV/JSON/JSONL intake with source accounting and record/line provenance, optional AES-GCM encrypted SQLite persistence, transactional deletion/review and authenticated audit history, and an offline RS256 JWT access-token verifier with server-bound roles/tenants. The workbench sends all formats through strict intake. Neither raw source nor candidate output is returned.
 
@@ -26,6 +26,10 @@ Default memory storage loses state on restart and is single-worker only. Optiona
 Use Python 3.12 and Node 22. Copy `.env.example` to an ignored `.env` and configure locally generated random tokens. No credentials are supplied. See the [base development guide](docs/development-m1.md), [M2a setup and limitations](docs/development-m2.md), [M2b control-plane guide](docs/development-m2b.md), [M3 private-candidate contract](docs/implementation-m3.md), [M4 evidence contract](docs/implementation-m4.md), [M5 pipeline contract](docs/implementation-m5.md), [M8 independent evidence foundations](docs/implementation-m8.md), and [M9 delivery-governance evidence](docs/implementation-m9-delivery-governance.md).
 
 With Docker Compose installed, `docker compose up --build` serves localhost ports 3000 (web) and 8000 (API). The default stack deliberately excludes the previous unintegrated database, storage and sleeping-worker scaffolding. No existing infrastructure volumes are deleted. Those capabilities remain future work.
+
+For a local, no-Docker synthetic upload and rules-preview walkthrough, see the
+[demo guide](docs/synthetic-demo.md). The complete set of remaining product
+gates is tracked in the [demo-to-product roadmap](docs/demo-to-product-roadmap.md).
 
 Without Docker, run the API and Vite as described in the development guide. The API does not automatically load `.env`; explicitly export its variables for non-Compose execution.
 

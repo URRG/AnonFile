@@ -6,6 +6,7 @@ services:
       context: ./services/api
     environment:
       ANONFLOW_ENV: ${ANONFLOW_ENV:-development}
+      ANONFLOW_DEMO_MODE: ${ANONFLOW_DEMO_MODE:-disabled}
       ANONFLOW_DEV_PRINCIPALS: ${ANONFLOW_DEV_PRINCIPALS:-}
       WEB_ORIGIN: http://localhost:3000
     ports:

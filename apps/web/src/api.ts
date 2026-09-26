@@ -1,5 +1,108 @@
 export type Mode = 'external_anonymized' | 'restricted_pseudonymized'
 export type SourceFormat = 'text' | 'json' | 'jsonl' | 'csv'
+export const DEMO_MAX_BYTES = 100_000
+
+export type DemoFinding = { entityType: string; severity: 'medium' | 'high' | 'critical'; count: number }
+export type DemoOperation = { entityType: string; action: 'REDACT' | 'PSEUDONYMIZE' | 'GENERALIZE' | 'SUPPRESS' | 'NULLIFY'; count: number }
+export type DemoInspection = {
+  posture: 'SYNTHETIC_DEMO_ONLY'
+  format: SourceFormat
+  findings: readonly DemoFinding[]
+  operations: readonly DemoOperation[]
+  transformedPreview: string
+  limitations: readonly string[]
+  releaseAuthorized: false
+}
+
+export class DemoInspectionFailure extends Error {
+  constructor(message: string) { super(message); this.name = 'DemoInspectionFailure' }
+}
+
+const DEMO_ENTITY = /^[A-Z][A-Z0-9_]{0,63}$/
+const DEMO_SEVERITIES = new Set(['medium', 'high', 'critical'])
+const DEMO_ACTIONS = new Set(['REDACT', 'PSEUDONYMIZE', 'GENERALIZE', 'SUPPRESS', 'NULLIFY'])
+
+function demoInvalid(): never { throw new DemoInspectionFailure('The demo service returned an invalid inspection result. Nothing was approved or exported.') }
+
+/** Decode only supported synthetic-demo files; no browser upload occurs here. */
+export function decodeDemoUpload(name: string, bytes: Uint8Array): { format: SourceFormat; content: string } {
+  const extension = name.trim().toLowerCase().match(/\.([a-z0-9]+)$/)?.[1]
+  const format = extension === 'txt' ? 'text' : extension
+  if (format !== 'text' && format !== 'csv' && format !== 'json' && format !== 'jsonl') {
+    throw new DemoInspectionFailure('Choose a .txt, .csv, .json, or .jsonl file.')
+  }
+  if (bytes.byteLength === 0 || bytes.byteLength > DEMO_MAX_BYTES) {
+    throw new DemoInspectionFailure('Demo files must be between 1 byte and 100 KB.')
+  }
+  let content: string
+  try { content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes) } catch {
+    throw new DemoInspectionFailure('The selected file is not valid UTF-8 text.')
+  }
+  if (!content.trim()) throw new DemoInspectionFailure('Demo files cannot be blank.')
+  return { format, content }
+}
+
+function demoInspection(value: unknown, expectedFormat: SourceFormat): DemoInspection {
+  if (!object(value) || Object.keys(value).length !== 7 || value.posture !== 'SYNTHETIC_DEMO_ONLY' || value.format !== expectedFormat ||
+      value.release_authorized !== false || typeof value.transformed_preview !== 'string' ||
+      new TextEncoder().encode(value.transformed_preview).byteLength > DEMO_MAX_BYTES ||
+      !Array.isArray(value.findings) || !Array.isArray(value.operations) || !Array.isArray(value.limitations)) demoInvalid()
+  const findings = value.findings.map(item => {
+    if (!object(item) || Object.keys(item).length !== 3 || typeof item.entity_type !== 'string' || !DEMO_ENTITY.test(item.entity_type) ||
+        typeof item.severity !== 'string' || !DEMO_SEVERITIES.has(item.severity) || !Number.isSafeInteger(item.count) || (item.count as number) < 1) demoInvalid()
+    return { entityType: item.entity_type, severity: item.severity as DemoFinding['severity'], count: item.count as number }
+  })
+  const operations = value.operations.map(item => {
+    if (!object(item) || Object.keys(item).length !== 3 || typeof item.entity_type !== 'string' || !DEMO_ENTITY.test(item.entity_type) ||
+        typeof item.action !== 'string' || !DEMO_ACTIONS.has(item.action) || !Number.isSafeInteger(item.count) || (item.count as number) < 1) demoInvalid()
+    return { entityType: item.entity_type, action: item.action as DemoOperation['action'], count: item.count as number }
+  })
+  if (!value.limitations.every(item => typeof item === 'string' && item.length > 0 && item.length <= 600 && !/[\r\n\u0000]/.test(item))) demoInvalid()
+  return { posture: 'SYNTHETIC_DEMO_ONLY', format: expectedFormat, findings, operations, transformedPreview: value.transformed_preview,
+    limitations: value.limitations as string[], releaseAuthorized: false }
+}
+
+export async function inspectSyntheticDemo(request: { apiBase: string; token: string; format: SourceFormat; content: string; signal?: AbortSignal }): Promise<DemoInspection> {
+  const token = request.token.trim()
+  if (!['text', 'json', 'jsonl', 'csv'].includes(request.format)) throw new DemoInspectionFailure('Unsupported demo source format.')
+  if (!token || !request.content.trim()) throw new DemoInspectionFailure('A processor token and non-empty synthetic demo input are required.')
+  if (new TextEncoder().encode(request.content).byteLength > DEMO_MAX_BYTES) throw new DemoInspectionFailure('Demo input exceeds the 100 KB limit.')
+  const controller = new AbortController()
+  let timedOut = false
+  const cancel = () => controller.abort()
+  request.signal?.addEventListener('abort', cancel, { once: true })
+  if (request.signal?.aborted) cancel()
+  const timer = setTimeout(() => { if (!controller.signal.aborted) { timedOut = true; controller.abort() } }, REQUEST_TIMEOUT_MS)
+  try {
+    return await abortable(async () => {
+      let response: Response
+      try {
+        response = await fetch(request.apiBase.replace(/\/$/, '') + '/demo/inspect', {
+          method: 'POST', credentials: 'omit', redirect: 'error', cache: 'no-store', signal: controller.signal,
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ format: request.format, content: request.content, synthetic_only: true }),
+        })
+      } catch {
+        throw new DemoInspectionFailure('Cannot reach the demo inspection service. No result was produced.')
+      }
+      if (!response.ok) {
+        const messages: Record<number, string> = { 401: 'Authentication required.', 403: 'Synthetic demo inspection is not enabled or permitted.', 413: 'Demo input exceeds the 100 KB limit.', 422: 'The demo input did not pass validation.', 503: 'Synthetic demo inspection is unavailable.' }
+        throw new DemoInspectionFailure((messages[response.status] || 'The demo inspection request failed.') + ' No result was approved or exported.')
+      }
+      try { return demoInspection(await response.json(), request.format) } catch (cause) {
+        if (cause instanceof DemoInspectionFailure) throw cause
+        throw new DemoInspectionFailure('The demo service returned an invalid inspection result. Nothing was approved or exported.')
+      }
+    }, controller.signal)
+  } catch (cause) {
+    if (controller.signal.aborted) throw new DemoInspectionFailure((timedOut ? 'Demo inspection timed out after 30 seconds.' : 'Demo inspection was cancelled.') + ' It does not undo data already received by the server.')
+    if (cause instanceof DemoInspectionFailure) throw cause
+    throw new DemoInspectionFailure('Cannot reach the demo inspection service. No result was produced.')
+  } finally {
+    clearTimeout(timer)
+    request.signal?.removeEventListener('abort', cancel)
+  }
+}
 export type ReleaseView = {
   id: string; dataset_id: string; status: string;
   eligibility: 'BLOCKED' | 'REVIEW_REQUIRED'; output: null;
