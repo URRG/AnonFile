@@ -147,6 +147,22 @@ def test_rejects_cross_publication_binding_and_plan_scope_drift():
     assert not verifier.verify(attestation=attestation, intent=changed_plan, binding=binding, at=NOW)
 
 
+def test_rejects_validly_signed_attestation_scope_drift_when_intent_and_binding_agree():
+    private = Ed25519PrivateKey.generate(); intent = _intent(); binding = _binding(intent)
+    other_tenant = "tenantref:v1:" + "J" * 43
+    public_key = private.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    verifier = PinnedPublicationAuthorizationVerifier({
+        (TENANT, "issuer-a"): public_key, (other_tenant, "issuer-a"): public_key,
+    })
+    for drift in (
+        {"tenant_ref": other_tenant},
+        {"publication_ref": "publicationref:v1:" + "K" * 43},
+        {"plan_digest": "sha256:" + "f" * 64},
+    ):
+        attestation = _signed(private, intent, binding, **drift)
+        assert not verifier.verify(attestation=attestation, intent=intent, binding=binding, at=NOW)
+
+
 def test_rejects_expired_future_and_untrusted_issuer():
     private = Ed25519PrivateKey.generate(); intent = _intent(); binding = _binding(intent)
     verifier = _verifier(private)

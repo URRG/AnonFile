@@ -222,9 +222,12 @@ class PinnedPublicationAuthorizationVerifier:
             key = self._keys.get((attestation.tenant_ref, attestation.issuer_key_id))
             if key is None:
                 return False
-            if (attestation.tenant_ref != intent.tenant_ref != binding.tenant_ref
-                    or attestation.publication_ref != intent.publication_ref != binding.publication_ref
-                    or attestation.plan_digest != _plan_digest(intent) != binding.plan_digest
+            if (attestation.tenant_ref != intent.tenant_ref
+                    or attestation.tenant_ref != binding.tenant_ref
+                    or attestation.publication_ref != intent.publication_ref
+                    or attestation.publication_ref != binding.publication_ref
+                    or attestation.plan_digest != _plan_digest(intent)
+                    or attestation.plan_digest != binding.plan_digest
                     or attestation.target_ref != intent.target_ref
                     or attestation.metadata_kind != intent.metadata_kind
                     or attestation.binding_digest != binding.binding_digest):
