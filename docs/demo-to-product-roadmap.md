@@ -76,3 +76,6 @@ production worker. No candidate download or release path is enabled.
 
 The synthetic preview is a presentation aid, not a shortcut through any of
 these gates or authorization to upload actual company data.
+
+The current fail-closed status and concrete exit tests are tracked in the
+[production readiness gate](production-readiness-gate.md).

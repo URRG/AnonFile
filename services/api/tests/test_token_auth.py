@@ -343,6 +343,7 @@ def test_production_requires_explicit_jwt_configuration(config, monkeypatch, pri
 
 def test_production_exposes_only_health_and_identity(config, monkeypatch, private_key):
     monkeypatch.setenv("ANONFLOW_ENV", "production")
+    monkeypatch.setenv("ANONFLOW_DEMO_MODE", "enabled")
     client = TestClient(create_app())
     authorization = {"Authorization": "Bearer " + token(private_key)}
     assert client.get("/health").json() == {
@@ -357,6 +358,7 @@ def test_production_exposes_only_health_and_identity(config, monkeypatch, privat
         ("/release-cases/missing/privacy-decisions", {}),
         ("/release-cases/missing/release-authorization-requests", {}),
         ("/release-authorization-requests/missing/approvals", {}),
+        ("/demo/batch/inspect", {"synthetic_only": True, "files": []}),
     ):
         response = client.post(path, headers=authorization, json=payload)
         assert response.status_code == 503
