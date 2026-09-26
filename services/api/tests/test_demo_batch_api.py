@@ -54,6 +54,37 @@ def test_manual_name_and_alias_override_rerender_without_persistence(demo_client
     assert request["alias_overrides"][tara["id"]] in second.json()["documents"][1]["candidate_text"]
 
 
+def test_manual_sensitive_phrase_corrects_same_value_across_files_without_release(demo_client):
+    request = payload()
+    request["files"][0] = file("email", "thread.txt", "Booking DEMO-4821 belongs to Riya.")
+    request["files"][1] = file("record", "note.json", '{"note":"Review DEMO-4821 before sharing."}')
+    request["manual_findings"] = [{"value": "DEMO-4821", "kind": "OTHER_SENSITIVE"}]
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    finding = next(entity for entity in body["entities"] if entity["source"] == "DEMO-4821")
+    assert finding["kind"] == "OTHER_SENSITIVE" and finding["mentions"] == 2
+    assert all(match["origin"] == "MANUAL" for document in body["documents"] for match in document["matches"]
+               if match["entity_id"] == finding["id"])
+    assert all("DEMO-4821" not in document["candidate_text"] for document in body["documents"])
+    assert body["release_authorized"] is False and body["export_available"] is False
+
+
+@pytest.mark.parametrize("findings", [
+    [{"value": "missing", "kind": "OTHER_SENSITIVE"}],
+    [{"value": "riya@example.test", "kind": "OTHER_SENSITIVE"}],
+    [{"value": "DEMO-4821", "kind": "EMAIL"}],
+    [{"value": "a\nb", "kind": "OTHER_SENSITIVE"}],
+    [{"value": ["DEMO-4821"], "kind": "OTHER_SENSITIVE"}],
+])
+def test_manual_sensitive_phrase_rejects_missing_overlap_and_unsafe_values(demo_client, findings):
+    request = payload()
+    request["manual_findings"] = findings
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 422
+    assert "riya@example.test" not in response.text
+
+
 def test_one_alias_edit_does_not_change_another_persons_alias(demo_client):
     first = demo_client.post("/demo/batch/inspect", headers=auth(), json=payload()).json()
     riya = next(e for e in first["entities"] if e["source"] == "Riya")
@@ -273,8 +304,17 @@ def test_curated_three_file_sample_has_scored_misses_and_cannot_be_forged(demo_c
     score = response.json()["verification"]["annotation_score"]
     assert score["basis"] == "CURATED_SYNTHETIC_SAMPLE"
     assert score["exact"]["false_negatives"] >= 3  # booking references are not in the bounded detector
+    assert score["automatic_exact"] == score["exact"]
     assert sum(item["exact"]["true_positives"] for item in score["per_document"]) == score["exact"]["true_positives"]
     assert any(span["entity_type"] == "OTHER_SENSITIVE" for item in score["per_document"] for span in item["missed"])
+    request["manual_findings"] = [{"value": "DEMO-4821", "kind": "OTHER_SENSITIVE"},
+                                  {"value": "DEMO-4822", "kind": "OTHER_SENSITIVE"}]
+    corrected = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert corrected.status_code == 200, corrected.text
+    corrected_score = corrected.json()["verification"]["annotation_score"]
+    assert corrected_score["automatic_exact"] == score["automatic_exact"]
+    assert corrected_score["exact"]["false_negatives"] == 0
+    request.pop("manual_findings")
     removed = request["reference_annotations"]["documents"][0]["annotations"].pop()
     assert demo_client.post("/demo/batch/inspect", headers=auth(), json=request).status_code == 422
     request["reference_annotations"]["documents"][0]["annotations"].append(removed)

@@ -107,7 +107,9 @@ export async function inspectSyntheticDemo(request: { apiBase: string; token: st
 // A separate, opt-in batch preview. It does not use the release/control-plane
 // endpoints and cannot return an exportable artifact or anonymity verdict.
 export type BatchUpload = { id: string; name: string; contentBase64: string; size: number }
-export type BatchMatch = { start: number; end: number; source: string; entityId: string; kind: string; replacement: string; applied: boolean }
+export type BatchManualFinding = { value: string; kind: 'OTHER_SENSITIVE' | 'BUSINESS_CONFIDENTIAL' | 'QUASI_IDENTIFIER' | 'GOVERNMENT_ID' | 'DATE_OF_BIRTH' }
+export type BatchMatch = { start: number; end: number; source: string; entityId: string; kind: string; replacement: string; applied: boolean;
+  origin: 'AUTOMATIC' | 'MANUAL' }
 export type BatchDocument = { id: string; name: string; kind: 'text' | 'csv' | 'json' | 'jsonl' | 'pdf';
   text: string; candidateText: string; sizeBytes: number; previewFidelity: 'source_text' | 'extracted_text_only';
   structureCheck: 'pass' | 'fail' | 'not_applicable'; matches: BatchMatch[] }
@@ -120,7 +122,8 @@ export type BatchReferenceManifest = { basis: 'REVIEWER_ATTESTED_EXHAUSTIVE' | '
 export type BatchAnnotationCounts = { truePositives: number; falsePositives: number; falseNegatives: number }
 export type BatchFileScore = { id: string; exact: BatchAnnotationCounts; missed: BatchReferenceSpan[] }
 export type BatchAnnotationScore = { basis: BatchReferenceManifest['basis']; status: 'OBSERVATIONAL_ONLY';
-  labelledDocuments: number; goldAnnotations: number; exact: BatchAnnotationCounts; perType: Record<string, BatchAnnotationCounts>;
+  labelledDocuments: number; goldAnnotations: number; exact: BatchAnnotationCounts; automaticExact: BatchAnnotationCounts;
+  perType: Record<string, BatchAnnotationCounts>;
   perDocument: BatchFileScore[] }
 export type BatchInspection = { posture: 'SYNTHETIC_DEMO_ONLY'; releaseAuthorized: false; exportAvailable: false;
   documents: BatchDocument[]; entities: BatchEntity[]; relationships: BatchRelationship[];
@@ -133,6 +136,7 @@ export type BatchInspection = { posture: 'SYNTHETIC_DEMO_ONLY'; releaseAuthorize
 const BATCH_EXTENSIONS = new Set(['txt', 'csv', 'json', 'jsonl', 'pdf'])
 const BATCH_KIND = new Set(['text', 'csv', 'json', 'jsonl', 'pdf'])
 const BATCH_CHECK = new Set(['PASS', 'FAIL', 'REVIEW', 'NOT_TESTED', 'NOT_APPLICABLE', 'NOT_MEASURED'])
+const MANUAL_FINDING_KINDS = new Set(['OTHER_SENSITIVE', 'BUSINESS_CONFIDENTIAL', 'QUASI_IDENTIFIER', 'GOVERNMENT_ID', 'DATE_OF_BIRTH'])
 const REFERENCE_TYPES = new Set(['CREDENTIAL', 'EMAIL', 'PHONE', 'AADHAAR', 'PAN', 'CARD', 'IP', 'PERSON', 'ADDRESS',
   'DATE', 'LOCATION', 'ORGANIZATION', 'PASSPORT', 'GOVERNMENT_ID', 'HEALTH', 'PAYMENT', 'BUSINESS_SECRET', 'USER_ID',
   'OTHER_SENSITIVE', 'IP_ADDRESS', 'SENSITIVE_NUMBER', 'PAYMENT_SECRET', 'PERSON_NAME', 'DATE_OF_BIRTH',
@@ -212,9 +216,9 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
           (match.end as number) > codePoints.length || !safeText(match.source, 100_000) ||
           codePoints.slice(match.start as number, match.end as number).join('') !== match.source ||
           !entityIds.has(String(match.entity_id)) || !safeText(match.kind, 64) || !safeText(match.replacement, 120) ||
-          typeof match.applied !== 'boolean') batchInvalid()
+          typeof match.applied !== 'boolean' || !['AUTOMATIC', 'MANUAL'].includes(String(match.origin))) batchInvalid()
       return { start: unitOffsets[match.start as number], end: unitOffsets[match.end as number], source: match.source, entityId: match.entity_id as string,
-        kind: match.kind, replacement: match.replacement, applied: match.applied }
+        kind: match.kind, replacement: match.replacement, applied: match.applied, origin: match.origin as BatchMatch['origin'] }
     })
     for (let i = 1; i < matches.length; i++) if (matches[i].start < matches[i - 1].end) batchInvalid()
     const rebuilt: string[] = []
@@ -271,6 +275,7 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
         rawScore.labelled_documents !== documents.length || !safeCount(rawScore.gold_annotations) ||
         !object(rawScore.per_type) || !Array.isArray(rawScore.per_document) || rawScore.per_document.length !== documents.length) batchInvalid()
     const exact = countTriple(rawScore.exact)
+    const automaticExact = countTriple(rawScore.automatic_exact)
     const perType: Record<string, BatchAnnotationCounts> = {}
     for (const [kind, counts] of Object.entries(rawScore.per_type)) {
       if (!REFERENCE_TYPES.has(kind)) batchInvalid()
@@ -281,6 +286,7 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
         Object.values(perType).reduce((sum, item) => sum + item.truePositives, 0) !== exact.truePositives ||
         Object.values(perType).reduce((sum, item) => sum + item.falsePositives, 0) !== exact.falsePositives ||
         Object.values(perType).reduce((sum, item) => sum + item.falseNegatives, 0) !== exact.falseNegatives) batchInvalid()
+    const automaticTotals: BatchAnnotationCounts = { truePositives: 0, falsePositives: 0, falseNegatives: 0 }
     const perDocument: BatchFileScore[] = rawScore.per_document.map((item, index) => {
       const doc = documents[index]
       const labels = reference!.documents.find(entry => entry.name === doc.name)?.annotations
@@ -296,6 +302,11 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
       }))
       if (expected.size !== labels.length) batchInvalid()
       const actual = new Set(doc.matches.filter(match => match.applied).map(match => key(match.start, match.end, match.kind)))
+      const automatic = new Set(doc.matches.filter(match => match.origin === 'AUTOMATIC').map(match => key(match.start, match.end, match.kind)))
+      const automaticMatched = [...expected].filter(entry => automatic.has(entry)).length
+      automaticTotals.truePositives += automaticMatched
+      automaticTotals.falsePositives += [...automatic].filter(entry => !expected.has(entry)).length
+      automaticTotals.falseNegatives += expected.size - automaticMatched
       const missedKeys = [...expected].filter(entry => !actual.has(entry))
       const missed: BatchReferenceSpan[] = item.missed.map(span => {
         if (!object(span) || !safeCount(span.start) || !safeCount(span.end) || span.end <= span.start ||
@@ -312,9 +323,13 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
     })
     if (perDocument.reduce((sum, item) => sum + item.exact.truePositives, 0) !== exact.truePositives ||
         perDocument.reduce((sum, item) => sum + item.exact.falsePositives, 0) !== exact.falsePositives ||
-        perDocument.reduce((sum, item) => sum + item.exact.falseNegatives, 0) !== exact.falseNegatives) batchInvalid()
+        perDocument.reduce((sum, item) => sum + item.exact.falseNegatives, 0) !== exact.falseNegatives ||
+        automaticTotals.truePositives !== automaticExact.truePositives ||
+        automaticTotals.falsePositives !== automaticExact.falsePositives ||
+        automaticTotals.falseNegatives !== automaticExact.falseNegatives) batchInvalid()
     annotationScore = { basis: rawScore.basis as BatchReferenceManifest['basis'], status: 'OBSERVATIONAL_ONLY',
-      labelledDocuments: documents.length, goldAnnotations: rawScore.gold_annotations as number, exact, perType, perDocument }
+      labelledDocuments: documents.length, goldAnnotations: rawScore.gold_annotations as number, exact, automaticExact,
+      perType, perDocument }
   }
   const checks: BatchCheck[] = verification.checks.map(raw => {
     if (!object(raw) || !safeText(raw.name, 100) || !BATCH_CHECK.has(String(raw.status)) || !safeText(raw.detail, 600)) batchInvalid()
@@ -330,6 +345,7 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
 }
 
 export async function inspectSyntheticBatch(request: { apiBase: string; token: string; files: BatchUpload[]; manualNames: string[];
+  manualFindings?: BatchManualFinding[];
   aliasOverrides: Record<string, string>; reviewExclusions?: Record<string, 'FALSE_POSITIVE_CONFIRMED'>;
   referenceManifest?: BatchReferenceManifest | null; signal?: AbortSignal }): Promise<BatchInspection> {
   if (!request.token.trim() || request.files.length < 2 || request.files.length > 3 ||
@@ -339,6 +355,12 @@ export async function inspectSyntheticBatch(request: { apiBase: string; token: s
   if (request.reviewExclusions && (Object.keys(request.reviewExclusions).length > 100 ||
       Object.entries(request.reviewExclusions).some(([id, reason]) => !/^E\d{1,4}$/.test(id) || reason !== 'FALSE_POSITIVE_CONFIRMED'))) {
     throw new DemoInspectionFailure('Invalid synthetic reviewer exclusions.')
+  }
+  if (request.manualFindings && (request.manualFindings.length > 20 ||
+      request.manualFindings.some(item => !item || typeof item.value !== 'string' || !MANUAL_FINDING_KINDS.has(item.kind) || item.value !== item.value.trim() ||
+        Array.from(item.value).length < 2 || Array.from(item.value).length > 80 || /[\p{C}\p{Zl}\p{Zp}]/u.test(item.value)) ||
+      new Set(request.manualFindings.map(item => `${item.kind}:${item.value.toLocaleLowerCase()}`)).size !== request.manualFindings.length)) {
+    throw new DemoInspectionFailure('Invalid manually reviewed sensitive findings.')
   }
   const controller = new AbortController()
   const reference = request.referenceManifest
@@ -360,7 +382,7 @@ export async function inspectSyntheticBatch(request: { apiBase: string; token: s
           method: 'POST', credentials: 'omit', redirect: 'error', cache: 'no-store', signal: controller.signal,
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${request.token.trim()}` },
           body: JSON.stringify({ synthetic_only: true, files: request.files.map(file => ({ id: file.id, name: file.name, content_base64: file.contentBase64 })),
-            manual_names: request.manualNames, alias_overrides: request.aliasOverrides,
+            manual_names: request.manualNames, manual_findings: request.manualFindings || [], alias_overrides: request.aliasOverrides,
             review_exclusions: request.reviewExclusions || {},
             ...(reference ? { reference_annotations: { basis: reference.basis, documents: reference.documents.map(document => ({
               id: request.files.find(file => file.name === document.name)!.id, annotations: document.annotations })) } } : {}) }),

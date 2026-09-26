@@ -38,6 +38,8 @@ NAME_POOL = ("Gita", "Maya", "Mira", "Nina", "Arun", "Noah", "Asha", "Anika", "K
 MAX_REFERENCE_LABELS_PER_FILE = 200
 REVIEW_EXCLUSION_REASON = "FALSE_POSITIVE_CONFIRMED"
 SUPPRESSIBLE_KINDS = frozenset({"PERSON_NAME", "EMAIL", "PHONE", "IP_ADDRESS"})
+MANUAL_FINDING_KINDS = frozenset({"OTHER_SENSITIVE", "BUSINESS_CONFIDENTIAL", "QUASI_IDENTIFIER", "GOVERNMENT_ID", "DATE_OF_BIRTH"})
+SAFE_MANUAL_VALUE = re.compile(r"^[^\x00-\x1f\x7f]{2,80}$")
 SAMPLE_TEXT_DIGESTS = {
     "01-email-thread.txt": "ef136ed6bb9c2931a07915d8ae22a487c5899cab825d211472cd63cd8f54f8ef",
     "02-passenger-list.csv": "09887d08254054222a6549ae76cbc8ec4f5f78ef2d6c599932f24e408a5610ca",
@@ -104,7 +106,11 @@ def _score_reference_annotations(value: object, documents: list[dict[str, Any]])
         predictions = parse_predictions([{"id": document["id"], "annotations": [
             {"start": match["start"], "end": match["end"], "entity_type": match["kind"]}
             for match in document["matches"] if match["applied"]]} for document in documents], gold)
+        automatic_predictions = parse_predictions([{"id": document["id"], "annotations": [
+            {"start": match["start"], "end": match["end"], "entity_type": match["kind"]}
+            for match in document["matches"] if match["origin"] == "AUTOMATIC"]} for document in documents], gold)
         report = evaluate(gold, predictions)
+        automatic_report = evaluate(gold, automatic_predictions)
     except EvaluationError:
         raise PayloadError("Invalid synthetic reference annotations.") from None
     exact = report["exact"]
@@ -125,6 +131,7 @@ def _score_reference_annotations(value: object, documents: list[dict[str, Any]])
     return {"basis": value["basis"], "status": "OBSERVATIONAL_ONLY",
             "labelled_documents": len(documents), "gold_annotations": exact["corpus"]["gold_annotations"],
             "exact": counts(exact["corpus"]),
+            "automatic_exact": counts(automatic_report["exact"]["corpus"]),
             "per_type": {kind: counts(item) for kind, item in exact["per_entity"].items()},
             "per_document": per_document}
 
@@ -356,6 +363,10 @@ def _choose_alias(name: str, used: set[str]) -> str:
     return candidate
 
 
+def _exact_phrase_matches(text: str, value: str) -> list[re.Match[str]]:
+    return list(re.finditer(r"(?<!\w)" + re.escape(value) + r"(?!\w)", text, re.I))
+
+
 def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
     """Return synthetic-only review data; never an anonymous or exportable artifact."""
     if payload.get("synthetic_only") is not True:
@@ -367,6 +378,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
     if len({doc["id"] for doc in documents}) != len(documents) or sum(doc["size_bytes"] for doc in documents) > MAX_TOTAL_BYTES:
         raise PayloadError("Duplicate file identities or batch size over 300 KB.")
     phrases = payload.get("manual_names", [])
+    manual_findings = payload.get("manual_findings", [])
     overrides = payload.get("alias_overrides", {})
     exclusions = payload.get("review_exclusions", {})
     if not isinstance(phrases, list) or len(phrases) > 20 or not all(isinstance(v, str) and SAFE_NAME.fullmatch(v) for v in phrases):
@@ -374,6 +386,17 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
     if any(not any(re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", doc["text"], re.I)
                    for doc in documents) for name in phrases):
         raise PayloadError("A manually added name must occur in at least one file.")
+    if (not isinstance(manual_findings, list) or len(manual_findings) > 20 or
+            any(not isinstance(item, dict) or set(item) != {"value", "kind"} or
+                not isinstance(item["value"], str) or not SAFE_MANUAL_VALUE.fullmatch(item["value"]) or
+                not all(char.isprintable() for char in item["value"]) or
+                item["value"] != item["value"].strip() or not isinstance(item["kind"], str) or
+                item["kind"] not in MANUAL_FINDING_KINDS
+                for item in manual_findings) or
+            len({(item["value"].casefold(), item["kind"]) for item in manual_findings}) != len(manual_findings)):
+        raise PayloadError("Invalid manually reviewed sensitive findings.")
+    if any(not any(_exact_phrase_matches(doc["text"], item["value"]) for doc in documents) for item in manual_findings):
+        raise PayloadError("A manual finding must occur in at least one file.")
     if not isinstance(overrides, dict) or len(overrides) > 100 or not all(isinstance(k, str) and isinstance(v, str) for k, v in overrides.items()):
         raise PayloadError("Invalid alias overrides.")
     if (not isinstance(exclusions, dict) or len(exclusions) > 100
@@ -384,12 +407,13 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
         document["_fields"] = _structured_fields(document)
     names, raw_edges = _names_and_headers(documents)
     role_edges = _structured_role_edges(documents)
-    names.update(phrases)
     for document in documents:
         for start, end, kind in document["_fields"]:
             value = document["text"][start:end]
             if kind == "PERSON_NAME" and SAFE_NAME.fullmatch(value):
                 names.add(value)
+    automatic_name_keys = {name.casefold() for name in names}
+    names.update(phrases)
     names_by_key = {name.casefold(): name for name in sorted(names, key=lambda value: (value.casefold(), value))}
     keys = [("PERSON_NAME", value) for value in names_by_key]
     source_by_key: dict[tuple[str, str], str] = {}
@@ -404,6 +428,8 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
             remember(span.entity_type, doc["text"][span.start:span.end])
         for start, end, kind in doc["_fields"]:
             remember(kind, doc["text"][start:end])
+    for item in manual_findings:
+        remember(item["kind"], item["value"])
     keys = sorted(set(keys))
     id_by_key = {key: f"E{index + 1}" for index, key in enumerate(keys)}
     if set(overrides) - set(id_by_key.values()):
@@ -451,31 +477,37 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
     total_mentions = transformed_mentions = 0
     for doc in documents:
         text = doc["text"]
-        spans: list[tuple[int, int, str, int]] = []
+        spans: list[tuple[int, int, str, int, str]] = []
         for start, end, kind in doc["_fields"]:
             entity_id = id_by_key[(kind, text[start:end].casefold())]
-            spans.append((start, end, entity_id, 3))
+            spans.append((start, end, entity_id, 3, "AUTOMATIC"))
         for span in detect_text(text):
             entity_id = id_by_key[(span.entity_type, text[span.start:span.end].casefold())]
-            spans.append((span.start, span.end, entity_id, 2))
+            spans.append((span.start, span.end, entity_id, 2, "AUTOMATIC"))
         for normalized in names_by_key:
             for match in re.finditer(r"(?<!\w)" + re.escape(normalized) + r"(?!\w)", text, re.I):
-                spans.append((match.start(), match.end(), id_by_key[("PERSON_NAME", normalized)], 1))
+                spans.append((match.start(), match.end(), id_by_key[("PERSON_NAME", normalized)], 1,
+                              "AUTOMATIC" if normalized in automatic_name_keys else "MANUAL"))
+        for item in manual_findings:
+            entity_id = id_by_key[(item["kind"], item["value"].casefold())]
+            for match in _exact_phrase_matches(text, item["value"]):
+                spans.append((match.start(), match.end(), entity_id, 1, "MANUAL"))
         spans.sort(key=lambda item: (-item[3], item[0], -(item[1] - item[0])))
-        selected: list[tuple[int, int, str]] = []
-        for start, end, entity_id, _ in spans:
-            if not any(start < right and end > left for left, right, _ in selected):
-                selected.append((start, end, entity_id))
+        selected: list[tuple[int, int, str, str]] = []
+        for start, end, entity_id, _, origin in spans:
+            if not any(start < right and end > left for left, right, _, _ in selected):
+                selected.append((start, end, entity_id, origin))
         selected.sort()
         candidate_parts: list[str] = []
         offset = 0
         matches = []
-        for start, end, entity_id in selected:
+        for start, end, entity_id, origin in selected:
             entity = entities_by_id[entity_id]
             applied = not entity["excluded"]
             candidate_parts.extend((text[offset:start], entity["alias"] if applied else text[start:end]))
             matches.append({"start": start, "end": end, "source": text[start:end], "entity_id": entity_id,
-                            "kind": entity["kind"], "replacement": entity["alias"], "applied": applied})
+                            "kind": entity["kind"], "replacement": entity["alias"], "applied": applied,
+                            "origin": origin})
             entity["mentions"] += 1
             total_mentions += 1
             transformed_mentions += applied
@@ -517,6 +549,9 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
     residual = sum(len(detect_text(doc["candidate_text"])) for doc in documents)
     if any(entity["excluded"] and not entity["mentions"] for entity in entities):
         raise PayloadError("A reviewer exclusion must refer to a detected mention.")
+    if any(not entities_by_id[id_by_key[(item["kind"], item["value"].casefold())]]["mentions"]
+           for item in manual_findings):
+        raise PayloadError("A manual finding cannot override an existing detected span.")
     structure_failures = sum(doc["structure_check"] == "fail" for doc in documents)
     annotation_score = _score_reference_annotations(payload.get("reference_annotations"), documents)
     return {
@@ -530,7 +565,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
             "status": "REVIEW_REQUIRED", "known_rule_residual_matches": residual,
             "structure_failures": structure_failures, "annotation_score": annotation_score,
             "checks": [
-                {"name": "Detected-span application", "status": "PASS" if total_mentions and transformed_mentions == total_mentions else "REVIEW",
+                {"name": "Selected-span application", "status": "PASS" if total_mentions and transformed_mentions == total_mentions else "REVIEW",
                  "detail": f"{transformed_mentions} of {total_mentions} selected matches received a proposed replacement. Reviewer exclusions retain source values and require further review."},
                 {"name": "Reviewer exclusions", "status": "REVIEW" if exclusions else "NOT_APPLICABLE",
                  "detail": f"{total_mentions - transformed_mentions} matches were retained after explicit false-positive review. No exclusion authorizes release."},
@@ -548,6 +583,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
         "limitations": [
             "This is a bounded, synthetic-only text review. It does not establish complete PII detection or anonymity.",
             "Person names are found from structured name fields, email headers, and manually added exact names; names in arbitrary prose can be missed.",
+            "Manually added sensitive phrases are exact bounded corrections, not automatic recognition of similar unseen values.",
             "Structured field recognition is bounded to supported JSON key/value syntax and one-line CSV cells; unsupported forms are rejected rather than silently passed through.",
             "Exact-name linking can merge different people who share a name; ambiguous identities need human resolution.",
             "PDFs are not rewritten; extracted text may lose page geometry, annotations, embedded images, and metadata.",

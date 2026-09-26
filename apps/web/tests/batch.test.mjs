@@ -14,7 +14,7 @@ const request = { apiBase: 'http://127.0.0.1:8000', token: 'synthetic-token', fi
 const valid = () => ({ posture: 'SYNTHETIC_DEMO_ONLY', release_authorized: false, export_available: false,
   documents: [
     { id: 'f1', name: 'a.txt', kind: 'text', text: 'Riya', candidate_text: 'Gita', size_bytes: 4, preview_fidelity: 'source_text', structure_check: 'not_applicable',
-      matches: [{ start: 0, end: 4, source: 'Riya', entity_id: 'E1', kind: 'PERSON_NAME', replacement: 'Gita', applied: true }] },
+      matches: [{ start: 0, end: 4, source: 'Riya', entity_id: 'E1', kind: 'PERSON_NAME', replacement: 'Gita', applied: true, origin: 'AUTOMATIC' }] },
     { id: 'f2', name: 'b.txt', kind: 'text', text: 'note', candidate_text: 'note', size_bytes: 4, preview_fidelity: 'source_text', structure_check: 'not_applicable', matches: [] },
   ], entities: [{ id: 'E1', kind: 'PERSON_NAME', source: 'Riya', alias: 'Gita', mentions: 1, excluded: false }], relationships: [],
   summary: { files: 2, detected_mentions: 1, transformed_mentions: 1, suppressed_mentions: 0, linked_entities: 1, explicit_relationships: 0 },
@@ -38,6 +38,16 @@ test('batch client sends one synthetic-only request and validates candidate', as
   assert.equal(body.synthetic_only, true)
   assert.equal(body.files.length, 2)
   assert.equal(mock.mock.calls[0].arguments[1].headers.Authorization, 'Bearer synthetic-token')
+})
+
+test('batch client sends bounded reviewer corrections and rejects invalid values before transport', async t => {
+  const mock = t.mock.method(globalThis, 'fetch', async () => Response.json(valid()))
+  await inspectSyntheticBatch({ ...request, manualFindings: [{ value: 'DEMO-4821', kind: 'OTHER_SENSITIVE' }] })
+  assert.deepEqual(JSON.parse(mock.mock.calls[0].arguments[1].body).manual_findings,
+    [{ value: 'DEMO-4821', kind: 'OTHER_SENSITIVE' }])
+  await assert.rejects(inspectSyntheticBatch({ ...request, manualFindings: [{ value: 'a\nb', kind: 'OTHER_SENSITIVE' }] }), /Invalid manually reviewed/)
+  await assert.rejects(inspectSyntheticBatch({ ...request, manualFindings: [{ value: 'DEMO-4821', kind: 'EMAIL' }] }), /Invalid manually reviewed/)
+  assert.equal(mock.mock.calls.length, 1)
 })
 
 test('Python code-point spans render correctly after an astral Unicode character', async t => {
@@ -64,6 +74,7 @@ test('batch client rejects fabricated approval, mismatched content and counts', 
     value => { value.summary.detected_mentions = 0 },
     value => { value.summary.suppressed_mentions = 1 },
     value => { value.documents[0].matches[0].applied = false },
+    value => { value.documents[0].matches[0].origin = 'UNVERIFIED' },
     value => { value.verification.status = 'APPROVED' },
   ]) {
     const item = valid(); change(item)
@@ -121,6 +132,7 @@ test('batch client binds annotation-score counts to submitted labels and detecto
   response.verification.annotation_score = { basis: 'REVIEWER_ATTESTED_EXHAUSTIVE', status: 'OBSERVATIONAL_ONLY',
     labelled_documents: 2, gold_annotations: 2,
     exact: { true_positives: 1, false_positives: 0, false_negatives: 1 },
+    automatic_exact: { true_positives: 1, false_positives: 0, false_negatives: 1 },
     per_type: { PERSON_NAME: { true_positives: 1, false_positives: 0, false_negatives: 0 },
       OTHER_SENSITIVE: { true_positives: 0, false_positives: 0, false_negatives: 1 } },
     per_document: [
@@ -131,6 +143,7 @@ test('batch client binds annotation-score counts to submitted labels and detecto
   const mock = t.mock.method(globalThis, 'fetch', async () => Response.json(response))
   const result = await inspectSyntheticBatch({ ...request, referenceManifest })
   assert.equal(result.verification.annotationScore.exact.falseNegatives, 1)
+  assert.equal(result.verification.annotationScore.automaticExact.falseNegatives, 1)
   assert.deepEqual(result.verification.annotationScore.perDocument[1].missed,
     [{ start: 0, end: 4, entity_type: 'OTHER_SENSITIVE' }])
   const sent = JSON.parse(mock.mock.calls[0].arguments[1].body)
@@ -143,6 +156,7 @@ test('batch client binds annotation-score counts to submitted labels and detecto
     value => { value.verification.annotation_score.per_document[1].missed = [] },
     value => { value.verification.annotation_score.per_document[1].missed[0].end = 3 },
     value => { value.verification.annotation_score.per_document[0].exact.true_positives = 0 },
+    value => { value.verification.annotation_score.automatic_exact.false_negatives = 0 },
   ]) {
     const tampered = structuredClone(response); change(tampered)
     t.mock.method(globalThis, 'fetch', async () => Response.json(tampered))

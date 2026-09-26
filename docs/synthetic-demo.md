@@ -20,8 +20,9 @@ choose **Use sample batch**, acknowledge that the data is fictional, and click
 **Analyze batch**. The sample has a fictional email thread, a CSV passenger
 list with names, email addresses, fictional passport numbers and birth dates,
 and a JSON support record. The next screen lists detected values and
-proposed replacements. You can add a missed exact person name or change a
-person alias (the alias must have the same character length); then review the
+proposed replacements. You can add a missed exact person name, add a bounded
+non-name sensitive phrase, or change a person alias (the alias must have the
+same character length); then review the
 candidate. The final screen has document comparisons, explicit mail-header and
 same-record account-owner/client links, and a verification scorecard. It
 deliberately has no export. Structured role links require `account_owner` and
@@ -35,7 +36,12 @@ Credentials, payment secrets, government IDs, birth dates, and other
 unsupported categories cannot be excluded through this demo control.
 The built-in batch also carries a fixed set of demo-authored reference spans.
 Its scorecard shows exact matched, false-positive, and missed spans for this
-fictional example. The backend accepts that label basis only for the exact
+fictional example. It separates the automatic baseline from the reviewed
+candidate score, breaks results down by file, and lets you promote a missed
+supported span into an exact manual correction. Try `DEMO-4821` and
+`DEMO-4822`: the reviewed sample recall rises, while the automatic baseline
+remains unchanged. These corrections do not teach the detector to recognize
+unseen values. The backend accepts that label basis only for the exact
 built-in files and labels; changing the sample invalidates it.
 
 You may instead select two or three synthetic TXT, CSV, JSON, JSONL, or
@@ -68,8 +74,9 @@ files named `a.txt` and
 text. For a PDF they refer to the extracted text displayed by the workbench,
 not page coordinates. The reviewer must establish that the labels cover all
 relevant spans; the application cannot verify that assertion. The resulting
-precision/recall measure agreement of the **reviewed candidate** (including
-manual corrections) with the supplied labels. They are neither an independent
+precision/recall show both the **automatic baseline** and the **reviewed
+candidate** (including manual corrections) against the supplied labels.
+They are neither an independent
 holdout benchmark nor a test of residual disclosure, re-identification risk,
 utility, PDF layout, or release eligibility.
 
