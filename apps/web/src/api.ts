@@ -150,18 +150,18 @@ export type BatchAnnotationScore = { basis: BatchReferenceManifest['basis']; sta
   labelledDocuments: number; goldAnnotations: number; exact: BatchAnnotationCounts; automaticExact: BatchAnnotationCounts;
   perType: Record<string, BatchAnnotationCounts>;
   perDocument: BatchFileScore[] }
+export type BatchFinalTextValidation = { status: 'INDEPENDENT_RULE_SCANNER_TEXT_ONLY'; boundArtifacts: number; assessedCategories: string[];
+  residualUnitsByCategory: Record<string, number>; abstainedArtifacts: number }
 export type BatchAggregateScorecard = { status: 'OBSERVATIONAL_ONLY'; classification: 'SYNTHETIC_INTERNAL_EVALUATION_ONLY';
   qualification: 'NOT_QUALIFIED'; automaticExact: BatchAnnotationCounts; reviewerCorrectedExact: BatchAnnotationCounts;
   finalArtifactValidation: { status: 'ABSTAINED'; reason: 'INDEPENDENT_ENGINE_UNAVAILABLE' | 'NO_EXECUTABLE_BOUND_INDEPENDENT_VALIDATOR' };
-  finalTextValidation: { status: 'INDEPENDENT_RULE_SCANNER_TEXT_ONLY'; boundArtifacts: number; assessedCategories: string[];
-    residualUnitsByCategory: Record<string, number>; abstainedArtifacts: number };
   relationshipReview: 'NO_GRAPH_GOLD_OR_REVIEW_STATE' }
 export type BatchInspection = { posture: 'SYNTHETIC_DEMO_ONLY'; releaseAuthorized: false; exportAvailable: false;
   documents: BatchDocument[]; entities: BatchEntity[]; relationships: BatchRelationship[]; entityGraph: EntityGraph;
   summary: { files: number; detectedMentions: number; transformedMentions: number; suppressedMentions: number;
     linkedEntities: number; explicitRelationships: number };
   verification: { status: 'REVIEW_REQUIRED'; knownRuleResidualMatches: number; sourceValueResiduals: number; structureFailures: number;
-    annotationScore: BatchAnnotationScore | null; aggregateScorecard: BatchAggregateScorecard | null; checks: BatchCheck[] };
+    annotationScore: BatchAnnotationScore | null; finalTextValidation: BatchFinalTextValidation; aggregateScorecard: BatchAggregateScorecard | null; checks: BatchCheck[] };
   limitations: string[] }
 
 const BATCH_EXTENSIONS = new Set(['txt', 'csv', 'json', 'jsonl', 'pdf', 'png', 'jpg', 'jpeg'])
@@ -642,6 +642,19 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
       labelledDocuments: documents.length, goldAnnotations: rawScore.gold_annotations as number, exact, automaticExact,
       perType, perDocument }
   }
+  const finalText = verification.final_text_validation
+  const expectedTextArtifacts = documents.filter(document => ['text', 'csv', 'json', 'jsonl'].includes(document.kind)).length
+  if (!object(finalText)) batchInvalid()
+  const residualUnits = finalText.residual_units_by_category
+  if (finalText.status !== 'INDEPENDENT_RULE_SCANNER_TEXT_ONLY' || !safeCount(finalText.bound_artifacts) ||
+      finalText.bound_artifacts !== expectedTextArtifacts || !safeCount(finalText.abstained_artifacts) ||
+      finalText.abstained_artifacts > finalText.bound_artifacts ||
+      JSON.stringify(finalText.assessed_categories) !== JSON.stringify(['CREDENTIAL', 'PAYMENT', 'PII']) ||
+      !object(residualUnits) || Object.keys(residualUnits).sort().join(',') !== 'CREDENTIAL,PAYMENT,PII' ||
+      !['CREDENTIAL', 'PAYMENT', 'PII'].every(key => safeCount(residualUnits[key]))) batchInvalid()
+  const finalTextValidation: BatchFinalTextValidation = { status: 'INDEPENDENT_RULE_SCANNER_TEXT_ONLY',
+    boundArtifacts: finalText.bound_artifacts as number, assessedCategories: finalText.assessed_categories as string[],
+    residualUnitsByCategory: residualUnits as Record<string, number>, abstainedArtifacts: finalText.abstained_artifacts as number }
   let aggregateScorecard: BatchAggregateScorecard | null = null
   if (object(rawAggregate)) {
     const countTriple = (raw: unknown): BatchAnnotationCounts => {
@@ -655,20 +668,11 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
         !['INDEPENDENT_ENGINE_UNAVAILABLE', 'NO_EXECUTABLE_BOUND_INDEPENDENT_VALIDATOR'].includes(String(rawAggregate.final_artifact_validation.reason))) batchInvalid()
     const automaticExact = countTriple(rawAggregate.automatic_exact)
     const reviewerCorrectedExact = countTriple(rawAggregate.reviewer_corrected_exact)
-    const finalText = rawAggregate.final_text_validation
-    if (!object(finalText)) batchInvalid()
-    const residualUnits = finalText.residual_units_by_category
-    if (finalText.status !== 'INDEPENDENT_RULE_SCANNER_TEXT_ONLY' || !safeCount(finalText.bound_artifacts) ||
-        !safeCount(finalText.abstained_artifacts) || JSON.stringify(finalText.assessed_categories) !== JSON.stringify(['CREDENTIAL', 'PAYMENT', 'PII']) ||
-        !object(residualUnits) || Object.keys(residualUnits).sort().join(',') !== 'CREDENTIAL,PAYMENT,PII' ||
-        !['CREDENTIAL', 'PAYMENT', 'PII'].every(key => safeCount(residualUnits[key]))) batchInvalid()
     if (JSON.stringify(automaticExact) !== JSON.stringify(annotationScore.automaticExact) ||
         JSON.stringify(reviewerCorrectedExact) !== JSON.stringify(annotationScore.exact)) batchInvalid()
     aggregateScorecard = { status: 'OBSERVATIONAL_ONLY', classification: 'SYNTHETIC_INTERNAL_EVALUATION_ONLY', qualification: 'NOT_QUALIFIED',
       automaticExact, reviewerCorrectedExact,
       finalArtifactValidation: { status: 'ABSTAINED', reason: rawAggregate.final_artifact_validation.reason as BatchAggregateScorecard['finalArtifactValidation']['reason'] },
-      finalTextValidation: { status: 'INDEPENDENT_RULE_SCANNER_TEXT_ONLY', boundArtifacts: finalText.bound_artifacts as number,
-        assessedCategories: finalText.assessed_categories as string[], residualUnitsByCategory: residualUnits as Record<string, number>, abstainedArtifacts: finalText.abstained_artifacts as number },
       relationshipReview: 'NO_GRAPH_GOLD_OR_REVIEW_STATE' }
   }
   const checks: BatchCheck[] = verification.checks.map(raw => {
@@ -682,7 +686,7 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
       linkedEntities: summary.linked_entities as number, explicitRelationships: summary.explicit_relationships as number },
     verification: { status: 'REVIEW_REQUIRED', knownRuleResidualMatches: verification.known_rule_residual_matches as number,
       sourceValueResiduals: verification.source_value_residuals as number,
-      structureFailures: verification.structure_failures as number, annotationScore, aggregateScorecard, checks }, limitations: value.limitations as string[] }
+      structureFailures: verification.structure_failures as number, annotationScore, finalTextValidation, aggregateScorecard, checks }, limitations: value.limitations as string[] }
 }
 
 export async function inspectSyntheticBatch(request: { apiBase: string; token: string; files: BatchUpload[]; manualNames: string[];

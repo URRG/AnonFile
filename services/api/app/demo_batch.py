@@ -206,7 +206,6 @@ def _score_reference_annotations(value: object, documents: list[dict[str, Any]])
         "automatic_exact": counts(aggregate["automatic"]["exact"]["corpus"]),
         "reviewer_corrected_exact": counts(aggregate["reviewer_corrected"]["exact"]["corpus"]),
         "final_artifact_validation": aggregate["final_artifact_validation"],
-        "final_text_validation": _scan_final_text_candidates(documents),
         "relationship_review": aggregate["graph"]["automatic"]["reason"],
     }
     return ({"basis": value["basis"], "status": "OBSERVATIONAL_ONLY",
@@ -1269,6 +1268,10 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
            for item in manual_findings):
         raise PayloadError("A manual finding cannot override an existing detected span.")
     structure_failures = sum(doc["structure_check"] == "fail" for doc in documents)
+    # This in-process scan is independent of the optional reference labels.
+    # It examines the exact generated candidate string held for each returned
+    # textual document, but does not create a durable byte attestation.
+    final_text_validation = _scan_final_text_candidates(documents)
     annotation_score, aggregate_scorecard = _score_reference_annotations(payload.get("reference_annotations"), documents)
     for doc in documents:
         doc.pop("_candidate_text_sha256", None)
@@ -1290,6 +1293,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
             "status": "REVIEW_REQUIRED", "known_rule_residual_matches": residual,
             "source_value_residuals": source_value_residuals,
             "structure_failures": structure_failures, "annotation_score": annotation_score,
+            "final_text_validation": final_text_validation,
             "aggregate_scorecard": aggregate_scorecard,
             "checks": [
                 {"name": "Selected-span application", "status": "PASS" if total_mentions and transformed_mentions == total_mentions else "REVIEW",

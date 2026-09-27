@@ -87,10 +87,11 @@ supplier data. `Blocked externally` is not the same as done.
   text with a different engine/annotated ground truth; separate automatic
   detector scores from reviewer corrections and measure graph/link quality.
   Exit: reproducible per-format/per-type false-negative report and abstention.
-  - [x] Exact generated TXT/CSV/JSON/JSONL candidate bytes are bound to a
-    separate bounded rule scanner. Its aggregate result is text-only—not OCR,
-    pixel validation, or anonymization certification—and media validation
-    remains abstained.
+  - [x] Every generated TXT/CSV/JSON/JSONL candidate is scanned in-process by
+    separate bounded rules, even without reference labels. The guard checks
+    the current candidate string only; it is not a durable byte attestation.
+    Its aggregate result is text-only—not OCR, pixel validation, or
+    anonymization certification—and media validation remains abstained.
   - [x] Aggregate-only synthetic evaluator separates automatic and
     reviewer-corrected exact-span errors by format and entity type. When
     complete synthetic labels are supplied, the demo displays bounded totals
