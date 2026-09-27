@@ -167,8 +167,11 @@ export type RecordedGraphSplitAssignment = { claimRef: string; endpoint: 'source
 export type RecordedGraphIdentitySplit = { action: 'SPLIT'; sourcePersonRef: string; replacementPersonRefs: string[]; endpointAssignments: RecordedGraphSplitAssignment[] }
 export type RecordedGraphIdentityAction = RecordedGraphIdentityMerge | RecordedGraphIdentitySplit
 export type RecordedGraphConflictGroup = { kind: 'POTENTIAL_MULTIPLE_WORKS_AT' | 'POTENTIAL_MULTIPLE_ASSIGNED_TO'; subjectRef: string; claimRefs: string[] }
+export type RecordedGraphConflictResolution = RecordedGraphConflictGroup & { status: 'UNRESOLVED' | 'RESOLVED' }
+export type RecordedGraphConflictResolutionAction = RecordedGraphConflictGroup & { disposition: 'RETAIN_ALL' }
 export type RecordedGraphReview = { snapshotRef: string; revision: number; decisions: RecordedGraphDecision[];
   identityActions: RecordedGraphIdentityAction[]; conflictGroups: RecordedGraphConflictGroup[];
+  conflictResolutions: RecordedGraphConflictResolution[]; conflictResolutionActions: RecordedGraphConflictResolutionAction[];
   posture: 'REVIEW_ONLY_NO_RELEASE_OR_DELIVERY' }
 
 /** Source-safe failure for the optional encrypted development review seam. */
@@ -1136,10 +1139,12 @@ function graphReviewPath(snapshotRef: string, suffix = ''): string {
 }
 
 function parseRecordedGraphReview(value: unknown, binding: BatchGraphReviewBinding, graph: EntityGraph): RecordedGraphReview {
-  if (!object(value) || Object.keys(value).length !== 9 || value.snapshot_ref !== binding.snapshotRef ||
+  if (!object(value) || ![9, 11].includes(Object.keys(value).length) || value.snapshot_ref !== binding.snapshotRef ||
       !Number.isSafeInteger(value.revision) || (value.revision as number) < 0 ||
       value.posture !== 'REVIEW_ONLY_NO_RELEASE_OR_DELIVERY' || !Array.isArray(value.nodes) ||
-      !Array.isArray(value.claims) || !Array.isArray(value.decisions) || !Array.isArray(value.identity_actions) || !Array.isArray(value.conflicts) || !Array.isArray(value.conflict_groups)) graphReviewInvalid()
+      !Array.isArray(value.claims) || !Array.isArray(value.decisions) || !Array.isArray(value.identity_actions) || !Array.isArray(value.conflicts) || !Array.isArray(value.conflict_groups) ||
+      (Object.keys(value).length === 11 && (!Array.isArray(value.conflict_resolutions) || !Array.isArray(value.conflict_resolution_actions)))) graphReviewInvalid()
+  if (Object.keys(value).length === 11 && JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(['claims', 'conflict_groups', 'conflict_resolution_actions', 'conflict_resolutions', 'conflicts', 'decisions', 'identity_actions', 'nodes', 'posture', 'revision', 'snapshot_ref'])) graphReviewInvalid()
   const nodeBindings = new Map(binding.nodes.map(item => [item.nodeRef, item.graphNodeId]))
   const claimBindings = new Map(binding.claims.map(item => [item.claimRef, item.graphEdgeId]))
   if (nodeBindings.size !== graph.nodes.length || claimBindings.size !== graph.edges.length) graphReviewInvalid()
@@ -1222,7 +1227,16 @@ function parseRecordedGraphReview(value: unknown, binding: BatchGraphReviewBindi
   // exactly the count of terminal decisions and identity overlay events.
   // Enforce the server's bounded event history before trusting a displayable
   // state, including the chronological action order above.
-  if (decisions.length + identityActions.length > 200 || value.revision !== decisions.length + identityActions.length) graphReviewInvalid()
+  const conflictResolutionActions: RecordedGraphConflictResolutionAction[] = []
+  for (const raw of ((value.conflict_resolution_actions ?? []) as unknown[])) {
+    if (!object(raw) || Object.keys(raw).length !== 4 || (raw.kind !== 'POTENTIAL_MULTIPLE_WORKS_AT' && raw.kind !== 'POTENTIAL_MULTIPLE_ASSIGNED_TO') ||
+        typeof raw.subject_ref !== 'string' || !boundPersonRef(binding, graph, raw.subject_ref) || !Array.isArray(raw.claim_refs) || raw.claim_refs.length < 2 ||
+        raw.claim_refs.some(ref => typeof ref !== 'string' || !boundClaimRef(binding, ref)) || new Set(raw.claim_refs).size !== raw.claim_refs.length ||
+        JSON.stringify([...raw.claim_refs].sort()) !== JSON.stringify(raw.claim_refs) || raw.disposition !== 'RETAIN_ALL') graphReviewInvalid()
+    conflictResolutionActions.push({ kind: raw.kind, subjectRef: raw.subject_ref, claimRefs: raw.claim_refs as string[], disposition: 'RETAIN_ALL' })
+  }
+  if (new Set(conflictResolutionActions.map(item => `${item.kind}:${item.subjectRef}:${item.claimRefs.join(':')}`)).size !== conflictResolutionActions.length ||
+      decisions.length + identityActions.length + conflictResolutionActions.length > 200 || value.revision !== decisions.length + identityActions.length + conflictResolutionActions.length) graphReviewInvalid()
   const conflicts: { kind: string; subjects: number; relationships: number }[] = []
   for (const raw of value.conflicts) {
     if (!object(raw) || Object.keys(raw).length !== 3 || !['POTENTIAL_MULTIPLE_WORKS_AT', 'POTENTIAL_MULTIPLE_ASSIGNED_TO'].includes(String(raw.kind)) ||
@@ -1267,7 +1281,18 @@ function parseRecordedGraphReview(value: unknown, binding: BatchGraphReviewBindi
     conflictGroups.push({ kind: raw.kind, subjectRef: raw.subject_ref, claimRefs: raw.claim_refs })
   }
   if (JSON.stringify(conflictGroups) !== JSON.stringify(expectedConflictGroups)) graphReviewInvalid()
-  return { snapshotRef: binding.snapshotRef, revision: value.revision as number, decisions, identityActions, conflictGroups, posture: 'REVIEW_ONLY_NO_RELEASE_OR_DELIVERY' }
+  const conflictResolutions: RecordedGraphConflictResolution[] = []
+  for (const raw of ((value.conflict_resolutions ?? []) as unknown[])) {
+    if (!object(raw) || Object.keys(raw).length !== 4 || (raw.kind !== 'POTENTIAL_MULTIPLE_WORKS_AT' && raw.kind !== 'POTENTIAL_MULTIPLE_ASSIGNED_TO') ||
+        typeof raw.subject_ref !== 'string' || !Array.isArray(raw.claim_refs) || (raw.status !== 'UNRESOLVED' && raw.status !== 'RESOLVED')) graphReviewInvalid()
+    const expected = conflictGroups.find(group => group.kind === raw.kind && group.subjectRef === raw.subject_ref)
+    if (!expected || JSON.stringify(raw.claim_refs) !== JSON.stringify(expected.claimRefs)) graphReviewInvalid()
+    const actionExists = conflictResolutionActions.some(item => item.kind === raw.kind && item.subjectRef === raw.subject_ref && JSON.stringify(item.claimRefs) === JSON.stringify(raw.claim_refs))
+    if ((raw.status === 'RESOLVED') !== actionExists) graphReviewInvalid()
+    conflictResolutions.push({ kind: raw.kind, subjectRef: raw.subject_ref, claimRefs: raw.claim_refs as string[], status: raw.status })
+  }
+  if (conflictResolutions.length && JSON.stringify(conflictResolutions.map(item => ({ kind: item.kind, subjectRef: item.subjectRef, claimRefs: item.claimRefs }))) !== JSON.stringify(conflictGroups)) graphReviewInvalid()
+  return { snapshotRef: binding.snapshotRef, revision: value.revision as number, decisions, identityActions, conflictGroups, conflictResolutions, conflictResolutionActions, posture: 'REVIEW_ONLY_NO_RELEASE_OR_DELIVERY' }
 }
 
 async function boundedGraphReviewJson(response: Response, signal: AbortSignal): Promise<unknown> {
@@ -1371,6 +1396,20 @@ export async function splitRecordedGraphIdentity(request: { apiBase: string; tok
     }, request.signal), request.binding, request.graph)
   } catch (cause) {
     if (cause instanceof GraphReviewFailure && cause.status === undefined) throw new GraphReviewFailure('Recorded identity outcome may be unverified. Reload the graph before retrying.')
+    throw cause
+  }
+}
+
+export async function resolveRecordedGraphConflict(request: { apiBase: string; token: string; binding: BatchGraphReviewBinding; graph: EntityGraph; group: RecordedGraphConflictGroup; expectedRevision: number; signal?: AbortSignal }): Promise<RecordedGraphReview> {
+  const group = request.group
+  if (!Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 || !boundPersonRef(request.binding, request.graph, group.subjectRef) ||
+      group.claimRefs.length < 2 || new Set(group.claimRefs).size !== group.claimRefs.length || group.claimRefs.some(ref => !boundClaimRef(request.binding, ref))) graphReviewInvalid()
+  try {
+    return parseRecordedGraphReview(await graphReviewRequest(request.apiBase, graphReviewPath(request.binding.snapshotRef, '/conflict-resolutions'), request.token, 'POST', {
+      kind: group.kind, subject_ref: group.subjectRef, claim_refs: group.claimRefs, disposition: 'RETAIN_ALL', expected_revision: request.expectedRevision,
+    }, request.signal), request.binding, request.graph)
+  } catch (cause) {
+    if (cause instanceof GraphReviewFailure && cause.status === undefined) throw new GraphReviewFailure('Recorded conflict-resolution outcome may be unverified. Reload the graph before retrying.')
     throw cause
   }
 }

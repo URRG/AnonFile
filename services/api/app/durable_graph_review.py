@@ -15,9 +15,9 @@ from fastapi import HTTPException
 from app.durable_repository import DurableStore
 from app.repository import detached, unavailable
 from app.revisioned_graph_review import (GraphClaimSnapshot, GraphIdentityMerge,
-    GraphIdentitySplit, GraphNodeSnapshot, GraphReviewConflict, GraphReviewError,
+    GraphIdentitySplit, GraphNodeSnapshot, GraphConflictResolution, GraphReviewConflict, GraphReviewError,
     GraphSnapshot, GraphSplitEndpointAssignment, RevisionedGraphReviewStore)
-from app.revisioned_graph_review import conflict_groups
+from app.revisioned_graph_review import conflict_group_statuses, conflict_groups
 
 
 DEMO_BATCH_SNAPSHOT_CAP = 8
@@ -98,6 +98,14 @@ class DurableGraphReviewAdapter:
                                    "assignments": [{"claim": item.claim_ref, "endpoint": item.endpoint,
                                                     "replacement": item.replacement_person_ref}
                                                    for item in split.endpoint_assignments]})
+
+    def resolve_conflict(self, *, tenant_ref: str, snapshot_ref: str, resolution: GraphConflictResolution,
+                         expected_revision: int, reviewer_ref: str) -> dict[str, Any]:
+        return self._update(tenant_ref=tenant_ref, snapshot_ref=snapshot_ref,
+                            expected_revision=expected_revision, reviewer_ref=reviewer_ref,
+                            event={"type": "conflict_resolution", "kind": resolution.kind,
+                                   "subject": resolution.subject_ref, "claims": list(resolution.claim_refs),
+                                   "disposition": resolution.disposition})
 
     def _update(self, *, tenant_ref: str, snapshot_ref: str, expected_revision: int,
                 reviewer_ref: str, event: dict[str, Any]) -> dict[str, Any]:
@@ -193,6 +201,14 @@ def _apply(engine: RevisionedGraphReviewStore, event: dict[str, Any], *, tenant_
                               split=GraphIdentitySplit(action["source"], tuple(replacements), tuple(parsed)),
                               expected_revision=expected_revision, reviewer_ref=reviewer_ref)
         return
+    if event["type"] == "conflict_resolution" and set(action) == {"type", "kind", "subject", "claims", "disposition"}:
+        claims = action["claims"]
+        if type(claims) is not list:
+            raise GraphReviewError()
+        engine.resolve_conflict(tenant_ref=tenant_ref, snapshot_ref=snapshot_ref,
+            resolution=GraphConflictResolution(action["kind"], action["subject"], tuple(claims), action["disposition"]),
+            expected_revision=expected_revision, reviewer_ref=reviewer_ref)
+        return
     raise GraphReviewError()
 
 
@@ -212,6 +228,10 @@ def _events(engine: RevisionedGraphReviewStore) -> list[dict[str, Any]]:
                                             "replacement": item.replacement_person_ref}
                                            for item in action.endpoint_assignments],
                            "revision": audit.revision, "reviewer": audit.reviewer_ref})
+    for action, audit in zip(state.conflict_resolutions, state.conflict_resolution_audit):
+        events.append({"type": "conflict_resolution", "kind": action.kind, "subject": action.subject_ref,
+                       "claims": list(action.claim_refs), "disposition": action.disposition,
+                       "revision": audit.revision, "reviewer": audit.reviewer_ref})
     return sorted(events, key=lambda item: item["revision"])
 
 def _public(engine: RevisionedGraphReviewStore) -> dict[str, Any]:
@@ -231,4 +251,12 @@ def _public(engine: RevisionedGraphReviewStore) -> dict[str, Any]:
             "conflicts": [{"kind": x[0], "subjects": x[1], "relationships": x[2]} for x in view.conflicts],
             "conflict_groups": [{"kind": kind, "subject_ref": subject, "claim_refs": list(claims)}
                                 for kind, subject, claims in conflict_groups(view)],
+            "conflict_resolutions": [{"kind": kind, "subject_ref": subject, "claim_refs": list(claims),
+                                      "status": status} for kind, subject, claims, status in conflict_group_statuses(view)],
+            # Historical, source-free action ledger. A resolved group can
+            # disappear after a later overlay, so clients use this list for
+            # revision accounting rather than inferring history from live UI.
+            "conflict_resolution_actions": [{"kind": item.kind, "subject_ref": item.subject_ref,
+                                             "claim_refs": list(item.claim_refs), "disposition": item.disposition}
+                                            for item in view.conflict_resolutions],
             "posture": "REVIEW_ONLY_NO_RELEASE_OR_DELIVERY"}

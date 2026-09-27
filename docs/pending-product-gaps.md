@@ -157,8 +157,14 @@ supplier data. `Blocked externally` is not the same as done.
     accepted claim references. The client revalidates them against the bound
     graph, renders generated aliases, and offers existing CAS accept/reject
     controls. This is a review prompt, not completed conflict adjudication.
-  - [ ] A conflict-resolution workflow, external audit anchoring, and
-    multi-host persistence remain unavailable. Recorded decisions are
+  - [x] The encrypted-SQLite development review can append a one-shot,
+    CAS-revisioned `RETAIN_ALL` disposition for one exact current source-free
+    conflict group. The append-only event replays after restart, reports each
+    live group as unresolved or resolved, and rejects fabricated, stale, or
+    cross-tenant group references. It cannot mutate source/evidence or grant
+    release, delivery, export, or real-world identity authority.
+  - [ ] External audit anchoring and multi-host persistence remain unavailable;
+    therefore D06 stays open. Recorded decisions and conflict dispositions are
     development-only and do not authorize release, delivery, export, or
     real-world identity resolution.
 - [ ] **D07 — Independent demo scorecard.** Evaluate untouched final pixels and

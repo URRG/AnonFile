@@ -635,7 +635,11 @@ class DevelopmentStore:
             if current["payload"].get("state") != "RUNNING":
                 raise HTTPException(409, "Processing run is not awaiting recovery")
             started_at = self._running_started_at(current["payload"])
-            if time.time() - started_at < self.RUN_LEASE_SECONDS:
+            # A zero-second lease is a supported deterministic test/operational
+            # override. Do not compare wall-clock readings in that case: the
+            # ISO timestamp can round marginally ahead of a subsequent clock
+            # read, which otherwise makes an already-expired zero lease flaky.
+            if self.RUN_LEASE_SECONDS > 0 and time.time() - started_at < self.RUN_LEASE_SECONDS:
                 raise HTTPException(409, "Processing run lease has not expired")
             revised = detached(current)
             payload = revised["payload"]

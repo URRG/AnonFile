@@ -129,6 +129,26 @@ class GraphIdentityAuditEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class GraphConflictResolution:
+    """One terminal, source-free disposition for an exact conflict group.
+
+    ``RETAIN_ALL`` is deliberately only a recorded review disposition.  It
+    cannot create a release, alter a source claim, or establish an identity.
+    """
+    kind: Literal["POTENTIAL_MULTIPLE_WORKS_AT", "POTENTIAL_MULTIPLE_ASSIGNED_TO"]
+    subject_ref: str
+    claim_refs: tuple[str, ...]
+    disposition: Literal["RETAIN_ALL"]
+
+
+@dataclass(frozen=True, slots=True)
+class GraphConflictResolutionAuditEvent:
+    sequence: int
+    revision: int
+    reviewer_ref: str
+
+
+@dataclass(frozen=True, slots=True)
 class _GraphReviewState:
     """Private store state. Evidence bindings must never leave this object."""
     snapshot: GraphSnapshot
@@ -137,6 +157,8 @@ class _GraphReviewState:
     audit: tuple[GraphReviewAuditEvent, ...]
     identity_actions: tuple[GraphIdentityMerge | GraphIdentitySplit, ...]
     identity_audit: tuple[GraphIdentityAuditEvent, ...]
+    conflict_resolutions: tuple[GraphConflictResolution, ...]
+    conflict_resolution_audit: tuple[GraphConflictResolutionAuditEvent, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +186,8 @@ class GraphReviewView:
     audit: tuple[GraphReviewAuditEvent, ...]
     identity_actions: tuple[GraphIdentityMerge | GraphIdentitySplit, ...]
     identity_audit: tuple[GraphIdentityAuditEvent, ...]
+    conflict_resolutions: tuple[GraphConflictResolution, ...]
+    conflict_resolution_audit: tuple[GraphConflictResolutionAuditEvent, ...]
     conflicts: tuple[tuple[str, int, int], ...]
 
 
@@ -192,6 +216,18 @@ def conflict_groups(view: GraphReviewView) -> tuple[tuple[str, str, tuple[str, .
     return tuple(result)
 
 
+def conflict_group_statuses(view: GraphReviewView) -> tuple[tuple[str, str, tuple[str, ...], str], ...]:
+    """Current groups with an explicit, replayed review status.
+
+    A historical resolution only applies when its opaque kind/subject/claim
+    tuple is still exactly the live group. New or changed groups stay
+    unresolved and require another bounded reviewer action.
+    """
+    resolved = {(x.kind, x.subject_ref, x.claim_refs): x.disposition for x in view.conflict_resolutions}
+    return tuple((kind, subject, claims, "RESOLVED" if (kind, subject, claims) in resolved else "UNRESOLVED")
+                 for kind, subject, claims in conflict_groups(view))
+
+
 def _view(state: _GraphReviewState) -> GraphReviewView:
     snapshot = state.snapshot
     return GraphReviewView(
@@ -200,6 +236,7 @@ def _view(state: _GraphReviewState) -> GraphReviewView:
                   for item in snapshot.claims)),
         revision=state.revision, decisions=state.decisions, audit=state.audit,
         identity_actions=state.identity_actions, identity_audit=state.identity_audit,
+        conflict_resolutions=state.conflict_resolutions, conflict_resolution_audit=state.conflict_resolution_audit,
         conflicts=_conflicts(state.snapshot, state.decisions, state.identity_actions))
 
 
@@ -364,7 +401,8 @@ class RevisionedGraphReviewStore:
             if key in self._states:
                 _fail()
             state = _GraphReviewState(snapshot=snapshot, revision=0, decisions=(), audit=(),
-                                      identity_actions=(), identity_audit=())
+                                      identity_actions=(), identity_audit=(), conflict_resolutions=(),
+                                      conflict_resolution_audit=())
             self._states[key] = state
             return _view(state)
 
@@ -393,14 +431,16 @@ class RevisionedGraphReviewStore:
                 _fail()
             if expected_revision != state.revision:
                 raise GraphReviewConflict()
-            if claim in dict(state.decisions) or len(state.audit) + len(state.identity_audit) >= _MAX_AUDIT_EVENTS:
+            if claim in dict(state.decisions) or _event_count(state) >= _MAX_AUDIT_EVENTS:
                 _fail()
             revision = state.revision + 1
-            event = GraphReviewAuditEvent(len(state.audit) + len(state.identity_audit) + 1,
+            event = GraphReviewAuditEvent(_event_count(state) + 1,
                                           revision, claim, decision, reviewer)
             result = _GraphReviewState(snapshot=state.snapshot, revision=revision,
                                        decisions=state.decisions + ((claim, decision),), audit=state.audit + (event,),
-                                       identity_actions=state.identity_actions, identity_audit=state.identity_audit)
+                                       identity_actions=state.identity_actions, identity_audit=state.identity_audit,
+                                       conflict_resolutions=state.conflict_resolutions,
+                                       conflict_resolution_audit=state.conflict_resolution_audit)
             self._states[(tenant, reference)] = result
             return _view(result)
 
@@ -418,13 +458,14 @@ class RevisionedGraphReviewStore:
                 _fail()
             if expected_revision != state.revision:
                 raise GraphReviewConflict()
-            if len(state.audit) + len(state.identity_audit) >= _MAX_AUDIT_EVENTS:
+            if _event_count(state) >= _MAX_AUDIT_EVENTS:
                 _fail()
             action = _validate_merge(merge, state.snapshot, state.decisions, state.identity_actions)
             revision = state.revision + 1
-            event = GraphIdentityAuditEvent(len(state.audit) + len(state.identity_audit) + 1, revision, "MERGE", reviewer)
+            event = GraphIdentityAuditEvent(_event_count(state) + 1, revision, "MERGE", reviewer)
             result = _GraphReviewState(state.snapshot, revision, state.decisions, state.audit,
-                                       state.identity_actions + (action,), state.identity_audit + (event,))
+                                       state.identity_actions + (action,), state.identity_audit + (event,),
+                                       state.conflict_resolutions, state.conflict_resolution_audit)
             self._states[(tenant, reference)] = result
             return _view(result)
 
@@ -442,12 +483,54 @@ class RevisionedGraphReviewStore:
                 _fail()
             if expected_revision != state.revision:
                 raise GraphReviewConflict()
-            if len(state.audit) + len(state.identity_audit) >= _MAX_AUDIT_EVENTS:
+            if _event_count(state) >= _MAX_AUDIT_EVENTS:
                 _fail()
             action = _validate_split(split, state.snapshot, state.decisions, state.identity_actions)
             revision = state.revision + 1
-            event = GraphIdentityAuditEvent(len(state.audit) + len(state.identity_audit) + 1, revision, "SPLIT", reviewer)
+            event = GraphIdentityAuditEvent(_event_count(state) + 1, revision, "SPLIT", reviewer)
             result = _GraphReviewState(state.snapshot, revision, state.decisions, state.audit,
-                                       state.identity_actions + (action,), state.identity_audit + (event,))
+                                       state.identity_actions + (action,), state.identity_audit + (event,),
+                                       state.conflict_resolutions, state.conflict_resolution_audit)
             self._states[(tenant, reference)] = result
             return _view(result)
+
+    def resolve_conflict(self, *, tenant_ref: object, snapshot_ref: object, resolution: object,
+                         expected_revision: object, reviewer_ref: object) -> GraphReviewView:
+        """Append one exact current-group disposition; no source state changes."""
+        tenant = _opaque(tenant_ref, _TENANT); reference = _opaque(snapshot_ref, _SNAPSHOT)
+        reviewer = _opaque(reviewer_ref, _REVIEWER)
+        if type(expected_revision) is not int or isinstance(expected_revision, bool) or expected_revision < 0:
+            _fail()
+        with self._lock:
+            state = self._states.get((tenant, reference))
+            if state is None: _fail()
+            if expected_revision != state.revision: raise GraphReviewConflict()
+            if _event_count(state) >= _MAX_AUDIT_EVENTS: _fail()
+            action = _validate_conflict_resolution(resolution, _view(state))
+            if action in state.conflict_resolutions: _fail()
+            revision = state.revision + 1
+            audit = GraphConflictResolutionAuditEvent(_event_count(state) + 1, revision, reviewer)
+            result = _GraphReviewState(state.snapshot, revision, state.decisions, state.audit,
+                state.identity_actions, state.identity_audit, state.conflict_resolutions + (action,),
+                state.conflict_resolution_audit + (audit,))
+            self._states[(tenant, reference)] = result
+            return _view(result)
+
+
+def _event_count(state: _GraphReviewState) -> int:
+    return len(state.audit) + len(state.identity_audit) + len(state.conflict_resolution_audit)
+
+
+def _validate_conflict_resolution(value: object, view: GraphReviewView) -> GraphConflictResolution:
+    if type(value) is not GraphConflictResolution:
+        _fail()
+    kind = value.kind; subject = _opaque(value.subject_ref, _NODE); claims = value.claim_refs
+    if (kind not in {"POTENTIAL_MULTIPLE_WORKS_AT", "POTENTIAL_MULTIPLE_ASSIGNED_TO"}
+            or value.disposition != "RETAIN_ALL" or type(claims) is not tuple or len(claims) < 2
+            or any(type(item) is not str for item in claims) or tuple(sorted(claims)) != claims
+            or len(set(claims)) != len(claims)):
+        _fail()
+    candidate = (kind, subject, claims)
+    if candidate not in conflict_groups(view):
+        _fail()
+    return value
