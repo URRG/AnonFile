@@ -52,6 +52,9 @@ test('recorded graph panel is opt-in, memory-only, and keeps durable decisions d
   assert.match(graphSource, /!recordedMode && <section className="relationship-identity-review"/)
   assert.match(graphSource, /\{!recordedMode && <EdgeReviewControls/)
   assert.match(graphSource, /Recorded decision outcome may be unverified\. Reload the graph before retrying\./)
+  assert.match(graphSource, /cause instanceof GraphReviewFailure && cause\.status !== undefined/)
+  assert.match(graphSource, /cause\.status === 404 \|\| cause\.status === 409/)
+  assert.match(graphSource, /setMessage\(cause\.message\)/)
 })
 
 test('three-document synthetic graph keeps review state ephemeral and cues only typed conflicts', () => {

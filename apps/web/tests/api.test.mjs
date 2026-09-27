@@ -45,6 +45,16 @@ test('recorded decision posts only bound claim and expected revision', async t =
   assert.deepEqual(received, { claim_ref: recordedBinding.claims[0].claimRef, decision: 'ACCEPT', expected_revision: 3 }); assert.deepEqual(view.decisions, [{ claimRef: recordedBinding.claims[0].claimRef, decision: 'ACCEPT' }])
 })
 
+test('recorded decision separates definite HTTP rejection from uncertain transport outcome', async t => {
+  for (const [status, expected] of [[401, 'Reviewer authentication is required.'], [403, 'This token is not permitted to review recorded graphs.'], [404, 'This recorded graph is unavailable or no longer belongs to this reviewer.'], [409, 'This graph changed. Reload it before submitting another decision.']]) {
+    t.mock.method(globalThis, 'fetch', async () => new Response('', { status }))
+    await assert.rejects(decideRecordedGraphClaim({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding: recordedBinding, graph: recordedGraph, claimRef: recordedBinding.claims[0].claimRef, decision: 'ACCEPT', expectedRevision: 0 }), error => error instanceof GraphReviewFailure && error.status === status && error.message === expected)
+    t.mock.restoreAll()
+  }
+  t.mock.method(globalThis, 'fetch', async () => { throw new Error('do-not-echo') })
+  await assert.rejects(decideRecordedGraphClaim({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding: recordedBinding, graph: recordedGraph, claimRef: recordedBinding.claims[0].claimRef, decision: 'ACCEPT', expectedRevision: 0 }), error => error instanceof GraphReviewFailure && error.status === undefined && /may be unverified/.test(error.message) && !error.message.includes('do-not-echo'))
+})
+
 test('recorded review fails closed on an unbound claim, changed endpoint, or unsafe response field', async t => {
   for (const mutate of [value => { value.claims[0].source = recordedBinding.nodes[1].nodeRef }, value => { value.claims[0].id = opaque('graphclaim').replace(/A$/, 'C') }, value => { value.evidence = 'source-text' }]) {
     const payload = structuredClone(recordedPayload(0)); mutate(payload)
