@@ -1,7 +1,8 @@
 import pytest
 
 from app.revisioned_graph_review import (GraphClaimSnapshot, GraphNodeSnapshot, GraphReviewConflict,
-    GraphReviewError, GraphSnapshot, RevisionedGraphReviewStore)
+    GraphReviewError, GraphIdentityMerge, GraphIdentitySplit, GraphSnapshot,
+    GraphSplitEndpointAssignment, RevisionedGraphReviewStore)
 
 
 def opaque(prefix, character):
@@ -82,7 +83,78 @@ def test_snapshot_rejects_source_values_and_badly_typed_or_reused_bindings():
         RevisionedGraphReviewStore().create_snapshot(duplicated)
 
 
-def test_identity_merge_and_split_are_not_part_of_the_d06_state_machine():
-    state = RevisionedGraphReviewStore().create_snapshot(snapshot())
-    assert not hasattr(state, "identity_actions")
-    assert "merge" not in str(state).lower() and "split" not in str(state).lower()
+def overlay_snapshot():
+    people = tuple(opaque("graphnode", character) for character in "efgh")
+    organizations = tuple(opaque("graphnode", character) for character in "ij")
+    project = opaque("graphnode", "k")
+    nodes = tuple(GraphNodeSnapshot(person, "person") for person in people) + tuple(
+        GraphNodeSnapshot(org, "organization") for org in organizations) + (GraphNodeSnapshot(project, "project"),)
+    claims = (
+        GraphClaimSnapshot(opaque("graphclaim", "l"), "works_at", people[0], organizations[0], opaque("graphevidence", "m")),
+        GraphClaimSnapshot(opaque("graphclaim", "n"), "works_at", people[1], organizations[1], opaque("graphevidence", "o")),
+        GraphClaimSnapshot(opaque("graphclaim", "p"), "assigned_to", project, people[2], opaque("graphevidence", "q")),
+        GraphClaimSnapshot(opaque("graphclaim", "r"), "assistant_to", people[2], people[3], opaque("graphevidence", "s")),
+    )
+    return GraphSnapshot(TENANT_A, SNAPSHOT, nodes, claims)
+
+
+def test_identity_merge_is_revisioned_recalculates_conflicts_and_keeps_three_document_claims_immutable():
+    store = RevisionedGraphReviewStore()
+    initial = store.create_snapshot(overlay_snapshot())
+    first, second = initial.snapshot.nodes[0].identifier, initial.snapshot.nodes[1].identifier
+    claims = initial.snapshot.claims
+    accepted = initial
+    for claim in claims[:2]:
+        accepted = store.decide(tenant_ref=TENANT_A, snapshot_ref=SNAPSHOT, claim_ref=claim.identifier,
+                                expected_revision=accepted.revision, decision="ACCEPT", reviewer_ref=REVIEWER)
+    merged = store.merge_identities(tenant_ref=TENANT_A, snapshot_ref=SNAPSHOT,
+                                    merge=GraphIdentityMerge(first, (first, second)),
+                                    expected_revision=accepted.revision, reviewer_ref=REVIEWER)
+    assert merged.revision == 3 and merged.identity_audit[0].action == "MERGE"
+    assert merged.conflicts == (("POTENTIAL_MULTIPLE_WORKS_AT", 1, 2),)
+    assert merged.snapshot.claims == initial.snapshot.claims
+    private_evidence = overlay_snapshot().claims[0].evidence_binding_ref
+    assert private_evidence not in str(merged)
+
+
+def test_merge_rejects_post_overlay_person_self_link_and_stale_update():
+    store = RevisionedGraphReviewStore(); state = store.create_snapshot(overlay_snapshot())
+    first, second = state.snapshot.nodes[0].identifier, state.snapshot.nodes[1].identifier
+    edge = GraphClaimSnapshot(opaque("graphclaim", "t"), "assistant_to", first, second, opaque("graphevidence", "u"))
+    snapshot_with_edge = GraphSnapshot(TENANT_A, opaque("graphsnap", "v"), overlay_snapshot().nodes,
+                                       overlay_snapshot().claims + (edge,))
+    store = RevisionedGraphReviewStore(); state = store.create_snapshot(snapshot_with_edge)
+    with pytest.raises(GraphReviewError):
+        store.merge_identities(tenant_ref=TENANT_A, snapshot_ref=snapshot_with_edge.snapshot_ref,
+                               merge=GraphIdentityMerge(first, (first, second)), expected_revision=0, reviewer_ref=REVIEWER)
+    clean = RevisionedGraphReviewStore(); state = clean.create_snapshot(overlay_snapshot())
+    clean.merge_identities(tenant_ref=TENANT_A, snapshot_ref=SNAPSHOT, merge=GraphIdentityMerge(first, (first, second)),
+                           expected_revision=0, reviewer_ref=REVIEWER)
+    with pytest.raises(GraphReviewConflict, match="^Stale graph review revision\\.$"):
+        clean.merge_identities(tenant_ref=TENANT_A, snapshot_ref=SNAPSHOT, merge=GraphIdentityMerge(first, (first, second)),
+                               expected_revision=0, reviewer_ref=REVIEWER)
+
+
+def test_split_requires_every_active_endpoint_exactly_once_and_redacts_evidence():
+    store = RevisionedGraphReviewStore(); initial = store.create_snapshot(overlay_snapshot())
+    child_one, child_two, source, peer = (node.identifier for node in initial.snapshot.nodes[:4])
+    assigned, person_edge = initial.snapshot.claims[2:]
+    incomplete = GraphIdentitySplit(source, (child_one, child_two),
+        (GraphSplitEndpointAssignment(assigned.identifier, "target", child_one),))
+    with pytest.raises(GraphReviewError):
+        store.split_identity(tenant_ref=TENANT_A, snapshot_ref=SNAPSHOT, split=incomplete,
+                             expected_revision=0, reviewer_ref=REVIEWER)
+    duplicated = GraphIdentitySplit(source, (child_one, child_two), (
+        GraphSplitEndpointAssignment(assigned.identifier, "target", child_one),
+        GraphSplitEndpointAssignment(assigned.identifier, "target", child_two),
+        GraphSplitEndpointAssignment(person_edge.identifier, "source", child_two),))
+    with pytest.raises(GraphReviewError):
+        store.split_identity(tenant_ref=TENANT_A, snapshot_ref=SNAPSHOT, split=duplicated,
+                             expected_revision=0, reviewer_ref=REVIEWER)
+    complete = GraphIdentitySplit(source, (child_one, child_two), (
+        GraphSplitEndpointAssignment(assigned.identifier, "target", child_one),
+        GraphSplitEndpointAssignment(person_edge.identifier, "source", child_two),))
+    split = store.split_identity(tenant_ref=TENANT_A, snapshot_ref=SNAPSHOT, split=complete,
+                                 expected_revision=0, reviewer_ref=REVIEWER)
+    assert split.revision == 1 and split.identity_audit[0].action == "SPLIT"
+    assert overlay_snapshot().claims[2].evidence_binding_ref not in str(split)
