@@ -153,6 +153,8 @@ test('batch client binds raster image previews to staged media and PNG dimension
     value => { value.documents[1].media_preview.pages[0].width = 17 },
     value => { value.documents[1].media_preview.pages[0].candidate_png_base64 = 'not-a-png' },
     value => { value.documents[1].media_preview.pages[0].candidate_png_sha256 = 'bad' },
+    value => { delete value.documents[1].media_preview.candidate_low_confidence_lines },
+    value => { value.documents[1].media_preview.candidate_low_confidence_lines = -1 },
     value => { value.documents[1].media_preview.pdf_raster_evidence = { sha256: '0'.repeat(64), bytes: 500, pages: 1, source_objects_copied: false } },
     value => { value.documents[1].media_preview.candidate_pdf_base64 = 'JVBERi0xLjQ=' },
     value => { value.documents[1].kind = 'pdf' },

@@ -473,6 +473,7 @@ def test_batch_pdf_is_rasterized_into_new_image_only_candidate_preview(demo_clie
     assert "gita@example.test" in document["candidate_text"]
     assert "[EMAIL_" not in document["candidate_text"]
     media = document["media_preview"]
+    assert isinstance(media["candidate_low_confidence_lines"], int)
     assert len(media["pages"]) == 1
     assert media["pages"][0]["source_png_base64"] != media["pages"][0]["candidate_png_base64"]
     assert base64.b64decode(media["pages"][0]["candidate_png_base64"]).startswith(b"\x89PNG\r\n\x1a\n")
