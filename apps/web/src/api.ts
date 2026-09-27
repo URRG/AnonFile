@@ -646,12 +646,14 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
   const expectedTextArtifacts = documents.filter(document => ['text', 'csv', 'json', 'jsonl'].includes(document.kind)).length
   if (!object(finalText)) batchInvalid()
   const residualUnits = finalText.residual_units_by_category
-  if (finalText.status !== 'INDEPENDENT_RULE_SCANNER_TEXT_ONLY' || !safeCount(finalText.bound_artifacts) ||
-      finalText.bound_artifacts !== expectedTextArtifacts || !safeCount(finalText.abstained_artifacts) ||
-      finalText.abstained_artifacts > finalText.bound_artifacts ||
+  const boundArtifacts = finalText.bound_artifacts
+  if (finalText.status !== 'INDEPENDENT_RULE_SCANNER_TEXT_ONLY' || !safeCount(boundArtifacts) ||
+      boundArtifacts !== expectedTextArtifacts || !safeCount(finalText.abstained_artifacts) ||
+      finalText.abstained_artifacts > boundArtifacts ||
       JSON.stringify(finalText.assessed_categories) !== JSON.stringify(['CREDENTIAL', 'PAYMENT', 'PII']) ||
       !object(residualUnits) || Object.keys(residualUnits).sort().join(',') !== 'CREDENTIAL,PAYMENT,PII' ||
-      !['CREDENTIAL', 'PAYMENT', 'PII'].every(key => safeCount(residualUnits[key]))) batchInvalid()
+      !['CREDENTIAL', 'PAYMENT', 'PII'].every(key => safeCount(residualUnits[key]) &&
+        (residualUnits[key] as number) <= boundArtifacts)) batchInvalid()
   const finalTextValidation: BatchFinalTextValidation = { status: 'INDEPENDENT_RULE_SCANNER_TEXT_ONLY',
     boundArtifacts: finalText.bound_artifacts as number, assessedCategories: finalText.assessed_categories as string[],
     residualUnitsByCategory: residualUnits as Record<string, number>, abstainedArtifacts: finalText.abstained_artifacts as number }

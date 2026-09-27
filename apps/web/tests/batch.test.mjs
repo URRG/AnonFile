@@ -452,6 +452,7 @@ test('batch client binds annotation-score counts to submitted labels and detecto
     value => { value.verification.aggregate_scorecard.relationship_review = 'SCORED' },
     value => { value.verification.final_text_validation.bound_artifacts = 3 },
     value => { value.verification.final_text_validation.abstained_artifacts = 3 },
+    value => { value.verification.final_text_validation.residual_units_by_category.PII = 3 },
   ]) {
     const tampered = structuredClone(response); change(tampered)
     t.mock.method(globalThis, 'fetch', async () => Response.json(tampered))
