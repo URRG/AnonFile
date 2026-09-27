@@ -162,7 +162,25 @@ def _assert_repaint_padding_is_source_free(source_gray: Any, line: dict[str, Any
     inner_y0, inner_y1 = max(y0, ink_y0), min(y1, ink_y1)
     if inner_x0 < inner_x1 and inner_y0 < inner_y1:
         padding[inner_y0 - y0:inner_y1 - y0, inner_x0 - x0:inner_x1 - x0] = False
-    if np.any(repaint_gray[padding] <= 245):
+    dark = repaint_gray <= 245
+    if not np.any(dark & padding):
+        return
+
+    # Rasterization can place one antialiased edge pixel just beyond a
+    # detector's half-open polygon. Permit only that one-pixel fringe when it
+    # is connected to dark source ink already inside the OCR claim. Anything
+    # farther away, or a disconnected glyph/dot in the fringe, remains an
+    # unrecognised source mark and causes abstention.
+    import cv2
+    _, labels, _, _ = cv2.connectedComponentsWithStats(dark.astype(np.uint8), connectivity=8)
+    claimed_labels = set(np.unique(labels[dark & ~padding]))
+    claimed_labels.discard(0)
+    fringe = np.zeros(repaint_gray.shape, dtype=bool)
+    fringe_x0, fringe_x1 = max(x0, ink_x0 - 1), min(x1, ink_x1 + 1)
+    fringe_y0, fringe_y1 = max(y0, ink_y0 - 1), min(y1, ink_y1 + 1)
+    fringe[fringe_y0 - y0:fringe_y1 - y0, fringe_x0 - x0:fringe_x1 - x0] = True
+    permitted = fringe & np.isin(labels, tuple(claimed_labels))
+    if np.any(dark & padding & ~permitted):
         raise PayloadError("A visual repaint padding region contains unrecognised source ink; no visual candidate was made.")
 
 

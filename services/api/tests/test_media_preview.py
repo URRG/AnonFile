@@ -416,6 +416,10 @@ def test_render_candidate_allows_blank_repaint_padding_and_grayscales_once(monke
     draw = ImageDraw.Draw(image)
     draw.text((30, 25), secret, fill="black")
     draw.text((30, 75), other, fill="black")
+    # This models a one-pixel antialiased descender just outside the detector's
+    # half-open polygon. It is connected to claimed source ink, not a second
+    # glyph in the repaint ring.
+    draw.line((70, 49, 70, 50), fill="black")
     page = {"number": 1, "image": image, "lines": [
         {"text": secret, "box": (10, 10, 150, 55), "ink_box": (15, 15, 145, 50),
          "start": 0, "end": len(secret)},

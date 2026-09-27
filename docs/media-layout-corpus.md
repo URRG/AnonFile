@@ -37,9 +37,11 @@ local edge alone cannot authorize repainting both regions. Separate islands in
 either horizontal or vertical bands and detached long thin rule-like connected
 components abstain. Before a repaint, the source pixels in the padded ring
 between an OCR line's tight ink box and its erased box must also be free of
-dark pixels (at most 245); an unseen dark glyph there abstains. These are local
-geometry guards, not proof that OCR geometry contains only the recognised
-text. A real OCR screenshot case also
+dark pixels (at most 245); an unseen dark glyph there abstains. The only
+exception is a one-pixel antialiased fringe connected to dark ink inside the
+claim, which accounts for half-open detector geometry rather than a second
+glyph. These are local geometry guards, not proof that OCR geometry contains
+only the recognised text. A real OCR screenshot case also
 repaints a fictional name and checks that pixels outside its OCR box are
 unchanged. This does **not** establish general table parsing, multi-column
 reading order, or general scan quality. The interactive AcroForm is required

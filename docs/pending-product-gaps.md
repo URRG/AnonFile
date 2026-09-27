@@ -69,7 +69,8 @@ supplier data. `Blocked externally` is not the same as done.
     claim.
   - [x] Before an applied redraw, the padded ring outside an OCR line's tight
     ink box is checked against the source raster. Any dark pixel (at most 245)
-    in that ring abstains, preventing a padded repaint from erasing an unseen
+    in that ring abstains, except a one-pixel antialiased fringe connected to
+    claimed source ink; this prevents a padded repaint from erasing an unseen
     local glyph. This narrow fail-closed guard is not OCR-coverage evidence.
   - [ ] General multi-column/table/form reading-order mapping, real OCR blur and
     coverage qualification, and visual utility thresholds remain open. These
