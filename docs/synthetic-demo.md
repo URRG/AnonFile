@@ -29,8 +29,10 @@ candidate. The final screen has document comparisons, an evidence-backed
 entity map, and a verification scorecard. The map separates people,
 organizations and projects; it supports typed role edges from explicit
 structured fields, labelled signatures or complete role statements, and
-mail-header delivery edges behind a separate toggle. Selecting an evidence
-reference opens the source document comparison. It does not infer employment
+mail-header delivery edges behind a separate toggle. Selecting text evidence
+opens and highlights a validated source span; media evidence opens the document
+with an explicit document-level-only label because no exact PDF page/box
+locator is established. It does not infer employment
 or client relationships from email domains, proximity or a mere conversation.
 See the [graph contract](entity-relationship-graph.md). The
 reproducible three-file [rich relationship batch](rich-relationship-demo-fixtures.md)
@@ -42,7 +44,8 @@ demo candidate** action saves only the unverified synthetic review copy; it is
 not a release or production export. The old same-record account-owner/client
 edge is retained for API compatibility, but the map uses its own typed,
 source-free graph payload. Identity resolution remains batch-local and may
-merge homonyms; the map is not a verified social or corporate directory.
+merge homonyms; accept/reject and merge/split decisions are not recorded in
+this stateless demo. The map is not a verified social or corporate directory.
 If a name, email, phone, or IP address is a confirmed false positive in this
 synthetic batch, Detection review can exclude that signal across every file
 after a separate acknowledgment. Excluded values remain visible in the

@@ -149,6 +149,11 @@ test('batch client binds raster image previews to staged media and PNG dimension
   const result = await inspectSyntheticBatch(mediaRequest)
   assert.equal(result.documents[1].mediaPreview.pages[0].width, 16)
   t.mock.restoreAll()
+  const fabricatedMediaLocator = structuredClone(response)
+  fabricatedMediaLocator.entity_graph = { nodes: [{ id: 'E1', kind: 'person', label: 'Gita', document_ids: ['f1'] }, { id: 'organization_1', kind: 'organization', label: 'Organization 1', document_ids: ['f2'] }], edges: [{ id: 'edge_0123456789abcdef', type: 'works_at', source_id: 'E1', target_id: 'organization_1', evidence: [{ document_id: 'f2', rule: 'explicit_structured_field_pair', field: 'company', locator: { status: 'SUPPORTED', kind: 'text_span', start: 0, end: 1, line_start: 1, line_end: 1 } }] }] }
+  t.mock.method(globalThis, 'fetch', async () => Response.json(fabricatedMediaLocator))
+  await assert.rejects(inspectSyntheticBatch(mediaRequest), /invalid review result/)
+  t.mock.restoreAll()
   for (const change of [
     value => { value.documents[1].media_preview.pages[0].width = 17 },
     value => { value.documents[1].media_preview.pages[0].candidate_png_base64 = 'not-a-png' },
@@ -210,7 +215,7 @@ test('coordinate corrections bind exact returned regions and source digests', as
 
 test('batch client accepts only a typed, non-source entity graph', async t => {
   const response = valid()
-  response.entity_graph = { nodes: [{ id: 'E1', kind: 'person', label: 'Gita', document_ids: ['f1'] }, { id: 'organization_1', kind: 'organization', label: 'Organization 1', document_ids: ['f2'] }], edges: [{ id: 'relationship_1', type: 'works_at', source_id: 'E1', target_id: 'organization_1', evidence: [{ document_id: 'f2', rule: 'explicit_structured_field_pair', field: 'company' }] }] }
+  response.entity_graph = { nodes: [{ id: 'E1', kind: 'person', label: 'Gita', document_ids: ['f1'] }, { id: 'organization_1', kind: 'organization', label: 'Organization 1', document_ids: ['f2'] }], edges: [{ id: 'edge_0123456789abcdef', type: 'works_at', source_id: 'E1', target_id: 'organization_1', evidence: [{ document_id: 'f2', rule: 'explicit_structured_field_pair', field: 'company', locator: { status: 'SUPPORTED', kind: 'text_span', start: 0, end: 4, line_start: 1, line_end: 1 } }] }] }
   t.mock.method(globalThis, 'fetch', async () => Response.json(response))
   assert.equal((await inspectSyntheticBatch(request)).entityGraph.edges[0].type, 'works_at')
   t.mock.restoreAll()
@@ -218,6 +223,27 @@ test('batch client accepts only a typed, non-source entity graph', async t => {
     const tampered = structuredClone(response); change(tampered)
     t.mock.method(globalThis, 'fetch', async () => Response.json(tampered))
     await assert.rejects(inspectSyntheticBatch(request), /invalid review result/)
+    t.mock.restoreAll()
+  }
+})
+
+test('graph locators are bounded, line-bound to source text, and preserve Unicode navigation offsets', async t => {
+  const response = valid()
+  response.documents[1].text = '😀\nnote'; response.documents[1].candidate_text = '😀\nnote'; response.documents[1].size_bytes = 9
+  response.entity_graph = { nodes: [{ id: 'E1', kind: 'person', label: 'Gita', document_ids: ['f1'] }, { id: 'organization_1', kind: 'organization', label: 'Organization 1', document_ids: ['f2'] }], edges: [{ id: 'edge_0123456789abcdef', type: 'works_at', source_id: 'E1', target_id: 'organization_1', evidence: [{ document_id: 'f2', rule: 'explicit_structured_field_pair', field: 'company', locator: { status: 'SUPPORTED', kind: 'text_span', start: 2, end: 6, line_start: 2, line_end: 2 } }] }] }
+  t.mock.method(globalThis, 'fetch', async () => Response.json(response))
+  const unicodeRequest = { ...request, files: [files[0], { ...files[1], size: 9, contentBase64: Buffer.from('😀\nnote').toString('base64') }] }
+  const result = await inspectSyntheticBatch(unicodeRequest)
+  assert.deepEqual(result.entityGraph.edges[0].evidence[0].locator, { status: 'SUPPORTED', kind: 'text_span', start: 3, end: 7, lineStart: 2, lineEnd: 2 })
+  t.mock.restoreAll()
+  for (const locator of [
+    { status: 'SUPPORTED', kind: 'text_span', start: 2, end: 6, line_start: 1, line_end: 1 },
+    { status: 'SUPPORTED', kind: 'text_span', start: 2, end: 99, line_start: 2, line_end: 2 },
+    { status: 'UNSUPPORTED', reason: 'untrusted' },
+  ]) {
+    const tampered = structuredClone(response); tampered.entity_graph.edges[0].evidence[0].locator = locator
+    t.mock.method(globalThis, 'fetch', async () => Response.json(tampered))
+    await assert.rejects(inspectSyntheticBatch(unicodeRequest), /invalid review result/)
     t.mock.restoreAll()
   }
 })
