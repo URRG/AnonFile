@@ -29,11 +29,12 @@ replacement is empty. This is evidence about the raster candidate only, not a
 claim that OCR coverage, entity detection, or anonymization is complete.
 
 The corpus verifies the present conservative geometry guards for overlapping
-OCR boxes, competing same-baseline two- and three-cell rows, and an actual
-padded repaint box that touches an otherwise unprocessed OCR neighbor. A real
-OCR screenshot case also repaints a fictional name and checks that pixels
-outside its OCR box are unchanged. This does **not** establish general table
-parsing, multi-column reading order, or general scan quality. The interactive
-AcroForm is required to abstain before OCR. The faint scan's low-confidence
-response is tested with a deterministic provider result because real OCR
-confidence is hardware/model dependent.
+OCR boxes, competing same-baseline two- and three-cell rows, repeated
+vertically staggered column bands, and an actual padded repaint box that
+touches an otherwise unprocessed OCR neighbor. A real OCR screenshot case also
+repaints a fictional name and checks that pixels outside its OCR box are
+unchanged. This does **not** establish general table parsing, multi-column
+reading order, or general scan quality. The interactive AcroForm is required
+to abstain before OCR. The faint scan's low-confidence response is tested with
+a deterministic provider result because real OCR confidence is
+hardware/model dependent.

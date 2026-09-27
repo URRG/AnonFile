@@ -51,8 +51,9 @@ supplier data. `Blocked externally` is not the same as done.
     table, static form and screenshot, plus AcroForm abstention, simulated
     low-confidence scan and EXIF rotation. This is not a layout benchmark.
   - [x] Conservative actual-repaint-box versus neighboring OCR ink check,
-    material OCR-ink overlap and same-baseline multi-cell ambiguity abstention;
-    whole-line unreadable fallback now abstains. No repaint box is cropped.
+    material OCR-ink overlap, same-baseline multi-cell and repeated
+    staggered-column ambiguity abstention; whole-line unreadable fallback now
+    abstains. No repaint box is cropped.
   - [x] The rich PDF/PDF/TXT batch remains usable with a single-column Slack
     transcript and labelled signature; a real-OCR screenshot replacement has
     an outside-mask pixel oracle. The focused D05 suite passed 102 tests.
