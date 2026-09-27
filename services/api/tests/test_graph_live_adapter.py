@@ -19,6 +19,13 @@ def test_adapts_actual_three_document_graph_shape_without_leaking_ids():
     assert "upload-a" not in str(report) and "edge_" not in str(report)
 
 
+def test_current_edge_decisions_map_to_transient_claims():
+    value = graph()
+    report = adapt_live_graph(entity_graph=value, batch_document_ids=frozenset({"upload-a", "upload-b", "upload-c"}),
+                              decisions=((value["edges"][0]["id"], "ACCEPT"), (value["edges"][1]["id"], "REJECT")))
+    assert report["decisions"] == {"accepted": 1, "rejected": 1, "pending": 1}
+
+
 @pytest.mark.parametrize("change", [lambda g: g["edges"][0].update(id="edge_bad"), lambda g: g["edges"][0]["evidence"][0].update(document_id="foreign"), lambda g: g["edges"][0]["evidence"][0].pop("locator")])
 def test_tampered_live_graph_fails_closed(change):
     value = graph(); change(value)

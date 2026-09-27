@@ -6,6 +6,7 @@ edge IDs.  Only the current batch's graph and document membership are accepted.
 from __future__ import annotations
 
 import re
+import hashlib
 from typing import Any
 
 from app.graph_adjudication import GraphAdjudicationError, GraphClaim, GraphNode, ReviewDecision, adjudicate
@@ -33,19 +34,26 @@ def adapt_live_graph(*, entity_graph: dict[str, Any], batch_document_ids: frozen
                       and all(isinstance(value, str) and value in batch_document_ids for value in item["document_ids"]))
         if len(nodes) != len(nodes_raw): raise ValueError
         node_ids = {node.identifier for node in nodes}
+        node_documents = {item["id"]: set(item["document_ids"]) for item in nodes_raw}
         claims = []
+        edge_ids: set[str] = set()
         for index, edge in enumerate(edges_raw, 1):
             if (type(edge) is not dict or set(edge) != {"id", "type", "source_id", "target_id", "evidence"}
                     or not isinstance(edge["id"], str) or not _EDGE_ID.fullmatch(edge["id"])
                     or edge["type"] not in _TYPES or edge["source_id"] not in node_ids or edge["target_id"] not in node_ids
                     or type(edge["evidence"]) is not list or not edge["evidence"]): raise ValueError
+            expected = "edge_" + hashlib.sha256(f"{edge['type']}\x1f{edge['source_id']}\x1f{edge['target_id']}".encode("utf-8")).hexdigest()[:16]
+            if edge["id"] != expected or edge["id"] in edge_ids: raise ValueError
+            edge_ids.add(edge["id"])
             evidence = edge["evidence"]
             if any(type(item) is not dict or set(item) != {"document_id", "rule", "field", "locator"}
                    or not isinstance(item.get("document_id"), str) or not isinstance(item.get("rule"), str)
                    or not isinstance(item.get("field"), str) or type(item.get("locator")) is not dict
-                   or item["document_id"] not in batch_document_ids for item in evidence): raise ValueError
+                   or item["document_id"] not in batch_document_ids
+                   or item["document_id"] not in node_documents[edge["source_id"]]
+                   or item["document_id"] not in node_documents[edge["target_id"]] for item in evidence): raise ValueError
             claims.append(GraphClaim(f"claim_{index}", edge["type"], edge["source_id"], edge["target_id"], f"doc_{index}"))
-        if type(decisions) is not tuple or any(type(item) is not tuple or len(item) != 2 or not isinstance(item[0], str)
+        if type(decisions) is not tuple or len(decisions) > len(edges_raw) or any(type(item) is not tuple or len(item) != 2 or not isinstance(item[0], str)
                                                or item[0] not in {edge["id"] for edge in edges_raw}
                                                or item[1] not in {"ACCEPT", "REJECT"} for item in decisions): raise ValueError
         if len({item[0] for item in decisions}) != len(decisions): raise ValueError
