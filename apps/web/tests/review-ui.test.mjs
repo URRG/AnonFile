@@ -42,6 +42,21 @@ test('review graph exposes accessible navigation, live updates, and evidence con
   }
 })
 
+test('recorded graph panel is opt-in, memory-only, and keeps durable decisions distinct from temporary review', () => {
+  for (const required of ['RecordedGraphReviewPanel', 'type="password"', 'autoComplete="off"', 'getRecordedGraphReview', 'decideRecordedGraphClaim', 'Recorded · revision', 'No merge or split editor is included', 'graphReview && apiBase']) {
+    assert.match(graphSource, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  }
+  assert.doesNotMatch(graphSource, /localStorage|sessionStorage|console\.log/)
+  assert.match(batchSource, /graphReview=\{inspection\.graphReview\} apiBase=\{API_BASE\}/)
+  assert.match(graphSource, /const recordedMode = Boolean\(graphReview && apiBase\)/)
+  assert.match(graphSource, /!recordedMode && <section className="relationship-identity-review"/)
+  assert.match(graphSource, /\{!recordedMode && <EdgeReviewControls/)
+  assert.match(graphSource, /Recorded decision outcome may be unverified\. Reload the graph before retrying\./)
+  assert.match(graphSource, /cause instanceof GraphReviewFailure && cause\.status !== undefined/)
+  assert.match(graphSource, /cause\.status === 404 \|\| cause\.status === 409/)
+  assert.match(graphSource, /setMessage\(cause\.message\)/)
+})
+
 test('three-document synthetic graph keeps review state ephemeral and cues only typed conflicts', () => {
   const edges = [
     { id: 'edge_a', type: 'works_at', sourceId: 'alias_person_01', targetId: 'alias_org_01', evidence: [{ documentId: 'document_01' }] },

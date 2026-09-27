@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import ts from 'typescript'
 const source = readFileSync(new URL('../src/api.ts', import.meta.url), 'utf8')
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText
-const { requestRelease, validateRelease, runControlPlane, ControlPlaneFailure, DEFAULT_POLICY_NOTICE, REQUEST_TIMEOUT_MS, decodeDemoUpload, inspectSyntheticDemo, DemoInspectionFailure, DEMO_MAX_BYTES } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
+const { requestRelease, validateRelease, runControlPlane, ControlPlaneFailure, DEFAULT_POLICY_NOTICE, REQUEST_TIMEOUT_MS, decodeDemoUpload, inspectSyntheticDemo, DemoInspectionFailure, DEMO_MAX_BYTES, getRecordedGraphReview, decideRecordedGraphClaim, GraphReviewFailure } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
 const request = { apiBase: 'http://localhost:8000', token: 'test-token', content: 'synthetic', recipient: 'buyer-test', mode: 'external_anonymized' }
 const safe = () => ({ id: 'release-1', dataset_id: 'dataset-1', status: 'evaluation_incomplete', eligibility: 'REVIEW_REQUIRED', output: null, card: { release_id: 'release-1', dataset_id: 'dataset-1', eligibility: 'REVIEW_REQUIRED', policy_version: 'external-release-v1', release_mode: 'external_anonymized', evidence_status: 'INSUFFICIENT_EVIDENCE', scores: null, findings: [], gates: ['EXPORT_DISABLED', 'QUALIFICATION_REQUIRED'], limitations: ['rules-only'] } })
 for (const status of [401, 403, 409, 413, 422, 429, 500, 503]) {
@@ -17,6 +17,71 @@ for (const status of [401, 403, 409, 413, 422, 429, 500, 503]) {
 test('network error has no fallback and does not expose cause', async t => {
   t.mock.method(globalThis, 'fetch', async () => { throw new Error('raw-secret') })
   await assert.rejects(requestRelease(request), /Cannot reach the API\. No local fallback/)
+})
+
+const opaque = prefix => `${prefix}:v1:${'A'.repeat(43)}`
+const recordedGraph = { nodes: [{ id: 'person_1', kind: 'person', label: 'Person A', documentIds: ['document_1'] }, { id: 'organization_1', kind: 'organization', label: 'Organization A', documentIds: ['document_1'] }], edges: [{ id: 'edge_1', type: 'works_at', sourceId: 'person_1', targetId: 'organization_1', evidence: [] }] }
+const recordedBinding = { snapshotRef: opaque('graphsnap'), nodes: [{ graphNodeId: 'person_1', nodeRef: opaque('graphnode') }, { graphNodeId: 'organization_1', nodeRef: `${opaque('graphnode').slice(0, -1)}B` }], claims: [{ graphEdgeId: 'edge_1', claimRef: opaque('graphclaim') }], posture: 'DEVELOPMENT_BINDING_ONLY_NO_ADJUDICATION_OR_RELEASE' }
+const recordedPayload = revision => ({ snapshot_ref: recordedBinding.snapshotRef, revision, nodes: [{ id: recordedBinding.nodes[0].nodeRef, kind: 'person' }, { id: recordedBinding.nodes[1].nodeRef, kind: 'organization' }], claims: [{ id: recordedBinding.claims[0].claimRef, relation: 'works_at', source: recordedBinding.nodes[0].nodeRef, target: recordedBinding.nodes[1].nodeRef }], decisions: [], identity_actions: [], conflicts: [], posture: 'REVIEW_ONLY_NO_RELEASE_OR_DELIVERY' })
+
+test('recorded graph review uses authenticated no-store GET and binds opaque objects to this graph only', async t => {
+  const mock = t.mock.method(globalThis, 'fetch', async (_url, options) => { assert.equal(options.method, 'GET'); assert.equal(options.headers.Authorization, 'Bearer reviewer-secret'); assert.equal(options.credentials, 'omit'); assert.equal(options.cache, 'no-store'); return Response.json(recordedPayload(0)) })
+  const view = await getRecordedGraphReview({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding: recordedBinding, graph: recordedGraph })
+  assert.equal(view.revision, 0); assert.equal(view.decisions.length, 0); assert.equal(mock.mock.calls.length, 1)
+})
+
+test('recorded review maps all authorization and revision errors to source-safe failures', async t => {
+  for (const status of [401, 403, 404, 409]) {
+    t.mock.method(globalThis, 'fetch', async () => new Response('do-not-echo-secret', { status }))
+    await assert.rejects(getRecordedGraphReview({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding: recordedBinding, graph: recordedGraph }), error => error instanceof GraphReviewFailure && !error.message.includes('do-not-echo-secret'))
+    t.mock.restoreAll()
+  }
+})
+
+test('recorded decision posts only bound claim and expected revision', async t => {
+  let received
+  t.mock.method(globalThis, 'fetch', async (_url, options) => { received = JSON.parse(options.body); return Response.json({ ...recordedPayload(4), decisions: [{ claim_ref: recordedBinding.claims[0].claimRef, decision: 'ACCEPT' }] }) })
+  const view = await decideRecordedGraphClaim({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding: recordedBinding, graph: recordedGraph, claimRef: recordedBinding.claims[0].claimRef, decision: 'ACCEPT', expectedRevision: 3 })
+  assert.deepEqual(received, { claim_ref: recordedBinding.claims[0].claimRef, decision: 'ACCEPT', expected_revision: 3 }); assert.deepEqual(view.decisions, [{ claimRef: recordedBinding.claims[0].claimRef, decision: 'ACCEPT' }])
+})
+
+test('recorded decision separates definite HTTP rejection from uncertain transport outcome', async t => {
+  for (const [status, expected] of [[401, 'Reviewer authentication is required.'], [403, 'This token is not permitted to review recorded graphs.'], [404, 'This recorded graph is unavailable or no longer belongs to this reviewer.'], [409, 'This graph changed. Reload it before submitting another decision.']]) {
+    t.mock.method(globalThis, 'fetch', async () => new Response('', { status }))
+    await assert.rejects(decideRecordedGraphClaim({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding: recordedBinding, graph: recordedGraph, claimRef: recordedBinding.claims[0].claimRef, decision: 'ACCEPT', expectedRevision: 0 }), error => error instanceof GraphReviewFailure && error.status === status && error.message === expected)
+    t.mock.restoreAll()
+  }
+  t.mock.method(globalThis, 'fetch', async () => { throw new Error('do-not-echo') })
+  await assert.rejects(decideRecordedGraphClaim({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding: recordedBinding, graph: recordedGraph, claimRef: recordedBinding.claims[0].claimRef, decision: 'ACCEPT', expectedRevision: 0 }), error => error instanceof GraphReviewFailure && error.status === undefined && /may be unverified/.test(error.message) && !error.message.includes('do-not-echo'))
+})
+
+test('recorded review fails closed on an unbound claim, changed endpoint, or unsafe response field', async t => {
+  for (const mutate of [value => { value.claims[0].source = recordedBinding.nodes[1].nodeRef }, value => { value.claims[0].id = opaque('graphclaim').replace(/A$/, 'C') }, value => { value.evidence = 'source-text' }]) {
+    const payload = structuredClone(recordedPayload(0)); mutate(payload)
+    t.mock.method(globalThis, 'fetch', async () => Response.json(payload))
+    await assert.rejects(getRecordedGraphReview({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding: recordedBinding, graph: recordedGraph }), GraphReviewFailure)
+    t.mock.restoreAll()
+  }
+})
+
+test('recorded review has one 30-second deadline and propagates caller cancellation', { timeout: 2000 }, async t => {
+  const original = globalThis.setTimeout; const delays = []
+  t.mock.method(globalThis, 'setTimeout', (callback, delay, ...args) => { delays.push(delay); return original(callback, 0, ...args) })
+  let transportSignal
+  t.mock.method(globalThis, 'fetch', async (_url, options) => { transportSignal = options.signal; return new Promise(() => {}) })
+  await assert.rejects(getRecordedGraphReview({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding: recordedBinding, graph: recordedGraph }), /Recorded review timed out after 30 seconds/)
+  assert.deepEqual(delays, [30000]); assert.equal(transportSignal.aborted, true)
+  const controller = new AbortController(); let secondSignal
+  t.mock.restoreAll(); t.mock.method(globalThis, 'fetch', async (_url, options) => { secondSignal = options.signal; return new Promise(() => {}) })
+  const pending = getRecordedGraphReview({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding: recordedBinding, graph: recordedGraph, signal: controller.signal })
+  await new Promise(resolve => setImmediate(resolve)); controller.abort()
+  await assert.rejects(pending, /request was cancelled/); assert.equal(secondSignal.aborted, true)
+})
+
+test('recorded review bounds a streamed response before JSON parsing', async t => {
+  const oversized = new Uint8Array(64_001)
+  t.mock.method(globalThis, 'fetch', async () => new Response(oversized, { status: 200, headers: { 'content-type': 'application/json' } }))
+  await assert.rejects(getRecordedGraphReview({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding: recordedBinding, graph: recordedGraph }), GraphReviewFailure)
 })
 test('authenticated metadata-only path binds recipient, dataset, mode and policy', async t => {
   let calls = 0
