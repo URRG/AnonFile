@@ -4,6 +4,11 @@ from app.graph_adjudication import GraphAdjudicationError
 from app.graph_live_adapter import adjudicate_private_ledger, build_private_graph_ledger
 
 
+def test_empty_public_graph_builds_private_no_adjudication_ledger():
+    ledger = build_private_graph_ledger({"nodes": [], "edges": []})
+    assert ledger.nodes == () and ledger.claims_by_edge == ()
+
+
 def graph():
     facts = [
         {"type":"works_at","source":"A","source_kind":"person","target":"O","target_kind":"organization","document_id":"upload-a","rule":"signature","field":"company","locator":{}},
