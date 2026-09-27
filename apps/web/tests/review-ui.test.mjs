@@ -50,6 +50,7 @@ test('every actionable relationship evidence and table control has a 44px target
     const rule = new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\{[^}]*min-width:44px[^}]*min-height:44px`)
     assert.match(graphCss, rule)
   }
+  assert.match(graphCss, /\.relationship-evidence-list button\{[^}]*flex-direction:column[^}]*align-items:flex-start/)
 })
 
 test('evidence navigation avoids smooth motion when reduced motion is requested', () => {
