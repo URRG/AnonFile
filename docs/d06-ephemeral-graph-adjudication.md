@@ -67,15 +67,20 @@ appear in the public view or overlay audit.
 
 ## Narrow durable reviewer route
 
-`app.durable_graph_review` persists the immutable snapshot and accept/reject
-events in an encrypted SQLite control record with a transaction-bound audit
-append. When that store is configured in development mode, authenticated
-reviewers can read a tenant-bound source-safe snapshot and submit one terminal
-decision against an expected revision. Stale revisions return 409; expired or
-cross-tenant snapshots cannot be updated. The original expiry is not renewed.
+`app.durable_graph_review` persists the immutable snapshot plus terminal
+decision, merge, and split events in an encrypted SQLite control record with a
+transaction-bound audit append. When that store is configured in development
+mode, authenticated reviewers can read a tenant-bound source-safe snapshot and
+submit an action against an expected revision. Actions are replayed through the
+same domain validation after restart; malformed replay state fails closed.
+Stale revisions return 409; expired or cross-tenant snapshots cannot be
+updated. The original expiry is not renewed and a failed action rolls its
+record and audit append back together.
 
 This is not a graph editor in the synthetic demo: only trusted server code can
 register a snapshot, and the existing UI has no durable snapshot binding or
-action. Merge/split overlays above remain in-process only, not route actions.
-The production route guard still blocks this API; no release authority follows
-from a reviewer decision.
+action. The reviewer-only `/merges` and `/splits` endpoints are a narrow local
+development control-plane seam, not UI wiring or a graph editor. The production
+route guard still blocks this API; no release authority follows from any graph
+review action. SQLite is not external audit anchoring, KMS custody, or
+multi-host persistence.
