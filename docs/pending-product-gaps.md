@@ -147,6 +147,11 @@ supplier data. `Blocked externally` is not the same as done.
     client validates replayed actions and aggregate conflicts, and requires a
     reload after stale or uncertain outcomes. No source evidence is exposed
     by this panel; memory-only demos still have no recorded route.
+  - [x] The development-only recorded review now projects source-free typed
+    multiple-affiliation and multiple-assignment conflict groups to exact
+    accepted claim references. The client revalidates them against the bound
+    graph, renders generated aliases, and offers existing CAS accept/reject
+    controls. This is a review prompt, not completed conflict adjudication.
   - [ ] A conflict-resolution workflow, external audit anchoring, and
     multi-host persistence remain unavailable. Recorded decisions are
     development-only and do not authorize release, delivery, export, or
