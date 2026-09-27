@@ -8,7 +8,7 @@ const navigationCompiled = ts.transpileModule(navigationSource, { compilerOption
 const { isDenseReviewGraph, moveReviewFocus, readableReviewZoom } = await import(`data:text/javascript;base64,${Buffer.from(navigationCompiled).toString('base64')}`)
 const reviewSource = readFileSync(new URL('../src/relationship-review.ts', import.meta.url), 'utf8')
 const reviewCompiled = ts.transpileModule(reviewSource, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText
-const { relationshipConflictCues, reviewStatusFor, selectionForGraph } = await import(`data:text/javascript;base64,${Buffer.from(reviewCompiled).toString('base64')}`)
+const { relationshipConflictCues, reviewStatusFor, selectionForGraph, validateMergeProposal } = await import(`data:text/javascript;base64,${Buffer.from(reviewCompiled).toString('base64')}`)
 const graphSource = readFileSync(new URL('../src/relationship-graph.tsx', import.meta.url), 'utf8')
 const graphCss = readFileSync(new URL('../src/relationship-graph.css', import.meta.url), 'utf8')
 const batchSource = readFileSync(new URL('../src/batch-demo.tsx', import.meta.url), 'utf8')
@@ -72,6 +72,21 @@ test('a changed graph clears selection even when response-local IDs recur', () =
   assert.deepEqual(selectionForGraph(replacement, oldSelection), { graph: replacement, nodeId: 'person_1', edgeId: null })
   assert.match(graphSource, /const selection = selectionForGraph\(graph, selectionState\)/)
   assert.doesNotMatch(graphSource, /aria-pressed=\{status === next\}/)
+})
+
+test('identity merge proposal requires two current people and rejects a collapsed direct link', () => {
+  const graph = { nodes: [{ id: 'E1', kind: 'person' }, { id: 'E2', kind: 'person' }, { id: 'E3', kind: 'person' },
+    { id: 'organization_1', kind: 'organization' }], edges: [
+    { id: 'edge_1', type: 'works_at', sourceId: 'E1', targetId: 'organization_1', evidence: [{ documentId: 'document_1' }] },
+    { id: 'edge_2', type: 'works_at', sourceId: 'E2', targetId: 'organization_1', evidence: [{ documentId: 'document_2' }] },
+    { id: 'edge_3', type: 'sent_to', sourceId: 'E1', targetId: 'E3', evidence: [{ documentId: 'document_3' }] },
+  ] }
+  assert.equal(validateMergeProposal(graph, 'E1', 'E2'), null)
+  assert.equal(validateMergeProposal(graph, 'E1', 'E1'), 'SAME_PERSON')
+  assert.equal(validateMergeProposal(graph, 'E1', 'E3'), 'SELF_LINK')
+  assert.equal(validateMergeProposal(graph, 'E1', 'organization_1'), 'MISSING_PERSON')
+  assert.match(graphSource, /mergeProposalState\.graph === graph \? mergeProposalState\.pair : null/)
+  assert.match(graphSource, /Identity split is not available in this preview/)
 })
 
 test('review graph preserves visible focus, touch-sized controls, responsive layout, and reduced-motion support', () => {

@@ -58,8 +58,10 @@ names, or raw evidence snippets.
    deliberately in-memory only and reset after reload or a changed graph; they
    are not adjudications, release decisions, or durable correction keys. The
    UI may flag narrowly typed multiple-affiliation or multiple-assignment cues
-   without resolving them. Identity merge/split remains unavailable until a
-   revisioned backend can validate and retain the action. The synthetic demo
+   without resolving them. A temporary two-person merge proposal may be shown
+   only when it would not collapse a direct person edge into a self-link; it
+   does not rewrite nodes or evidence. Actual identity merge/split remains
+   unavailable until a revisioned backend can validate and retain the action. The synthetic demo
    may display deterministic evidence but must not claim that cross-document
    identity resolution is complete.
 

@@ -19,6 +19,17 @@ export function selectionForGraph(graph: EntityGraph, state: GraphSelection): Gr
   return state.graph === graph ? state : { graph, nodeId: graph.nodes[0]?.id ?? null, edgeId: null }
 }
 
+export type MergeProposalIssue = 'MISSING_PERSON' | 'SAME_PERSON' | 'SELF_LINK'
+
+export function validateMergeProposal(graph: EntityGraph, firstId: string, secondId: string): MergeProposalIssue | null {
+  const people = new Set(graph.nodes.filter(node => node.kind === 'person').map(node => node.id))
+  if (!people.has(firstId) || !people.has(secondId)) return 'MISSING_PERSON'
+  if (firstId === secondId) return 'SAME_PERSON'
+  if (graph.edges.some(edge => (edge.type === 'sent_to' || edge.type === 'assistant_to') &&
+      ((edge.sourceId === firstId && edge.targetId === secondId) || (edge.sourceId === secondId && edge.targetId === firstId)))) return 'SELF_LINK'
+  return null
+}
+
 export function reviewStatusFor(edgeId: string, reviews: Readonly<Record<string, EphemeralEdgeReview>>): EphemeralEdgeReview {
   return reviews[edgeId] ?? 'pending'
 }
