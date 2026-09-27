@@ -76,6 +76,10 @@ supplier data. `Blocked externally` is not the same as done.
     page and at most four validated OCR lines navigates to approximate
     OCR-line boxes, bound to source bytes and page dimensions. Ambiguous,
     cross-page or stale maps abstain. These boxes are not glyph-precise proof.
+  - [x] The graph UI offers batch-local, alias-only pending/accepted/rejected
+    edge markers and narrowly typed multiple-affiliation/assignment cues. They
+    reset on reload or graph change and are not stored adjudications, release
+    decisions, or identity corrections.
   - [ ] Recorded reviewer accept/reject, identity merge/split and conflict
     adjudication remain unavailable in this stateless synthetic demo.
     Node/edge IDs are response-local, not durable correction keys.

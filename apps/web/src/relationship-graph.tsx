@@ -2,6 +2,7 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 're
 import { ChevronDown, ChevronUp, Focus, Minus, Plus } from 'lucide-react'
 import type { EntityGraph, EntityGraphEdge, EntityGraphEvidence, EntityGraphNode } from './api'
 import { isDenseReviewGraph, moveReviewFocus, readableReviewZoom } from './review-navigation'
+import { relationshipConflictCues, reviewStatusFor, selectionForGraph, type EphemeralEdgeReview, type GraphSelection, type RelationshipConflictCue } from './relationship-review'
 import './relationship-graph.css'
 
 const edgeLabel: Record<EntityGraphEdge['type'], string> = {
@@ -11,6 +12,11 @@ const kindLabel: Record<EntityGraphNode['kind'], string> = { person: 'Person', o
 const evidenceLabel: Record<string, string> = {
   explicit_mail_header: 'Mail header', explicit_structured_field_pair: 'Structured fields',
   explicit_signature_block: 'Named signature', explicit_signature_title: 'Signature role', explicit_role_statement: 'Explicit role statement',
+}
+const reviewLabel: Record<EphemeralEdgeReview, string> = { pending: 'Pending', accepted: 'Accepted', rejected: 'Rejected' }
+const conflictLabel: Record<RelationshipConflictCue['code'], string> = {
+  MULTIPLE_WORKS_AT: 'Multiple explicit affiliation claims need review.',
+  MULTIPLE_ASSIGNED_TO: 'Multiple explicit assignment claims need review.',
 }
 
 function layout(nodes: EntityGraphNode[]) {
@@ -33,13 +39,29 @@ function nodeDescription(node: EntityGraphNode, isSelected: boolean) {
   return `${kindLabel[node.kind]} ${node.label}. ${node.documentIds.length} supporting ${node.documentIds.length === 1 ? 'document' : 'documents'}.${isSelected ? ' Selected.' : ''} Use arrow keys to move between nodes.`
 }
 
+function EdgeReviewControls({ edge, sourceLabel, targetLabel, status, cue, onStatusChange }: { edge: EntityGraphEdge; sourceLabel: string; targetLabel: string; status: EphemeralEdgeReview; cue?: RelationshipConflictCue; onStatusChange: (status: EphemeralEdgeReview) => void }) {
+  return <div className="relationship-edge-review">
+    <span className={`relationship-review-status is-${status}`}>Review: {reviewLabel[status]}</span>
+    <select className="relationship-review-select" aria-label={`Temporary review: ${sourceLabel} ${edgeLabel[edge.type]} ${targetLabel}`} value={status} onChange={event => onStatusChange(event.target.value as EphemeralEdgeReview)}>
+      {(['pending', 'accepted', 'rejected'] as const).map(next => <option key={next} value={next}>{reviewLabel[next]}</option>)}
+    </select>
+    {cue && <p className="relationship-conflict-cue" role="status">{conflictLabel[cue.code]}</p>}
+  </div>
+}
+
 export function RelationshipGraph({ graph, documentNames, onInspectDocument }: { graph: EntityGraph; documentNames: Map<string, string>; onInspectDocument: (id: string, evidence: EntityGraphEvidence) => void }) {
-  const [selectedId, setSelectedId] = useState<string | null>(graph.nodes[0]?.id ?? null)
-  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null)
+  const [selectionState, setSelectionState] = useState<GraphSelection>({ graph, nodeId: graph.nodes[0]?.id ?? null, edgeId: null })
+  const selection = selectionForGraph(graph, selectionState)
+  const selectedId = selection.nodeId
+  const selectedEdgeId = selection.edgeId
   const [showCommunication, setShowCommunication] = useState(false)
   const [zoom, setZoom] = useState(1)
   const [tableOpen, setTableOpen] = useState(false)
   const [compact, setCompact] = useState(false)
+  const [reviewState, setReviewState] = useState<{ graph: EntityGraph; reviews: Record<string, EphemeralEdgeReview> }>({ graph, reviews: {} })
+  // Treat an incoming graph object as a new inspection immediately, before
+  // effects or paint. Response-local edge IDs may recur for unrelated data.
+  const edgeReviews = reviewState.graph === graph ? reviewState.reviews : {}
   const viewport = useRef<HTMLDivElement | null>(null)
   const nodeButtons = useRef(new Map<string, HTMLButtonElement>())
   const visibleEdges = useMemo(() => graph.edges.filter(edge => showCommunication || edge.type !== 'sent_to'), [graph.edges, showCommunication])
@@ -49,14 +71,17 @@ export function RelationshipGraph({ graph, documentNames, onInspectDocument }: {
     return graph.nodes.filter(node => connected.has(node.id))
   }, [graph.nodes, visibleEdges, showCommunication])
   const dense = isDenseReviewGraph(visibleNodes.length, visibleEdges.length)
+  const conflictCues = useMemo(() => relationshipConflictCues(visibleEdges, edgeReviews), [visibleEdges, edgeReviews])
   const { positions, width, height } = useMemo(() => layout(visibleNodes), [visibleNodes])
   const selected = visibleNodes.find(node => node.id === selectedId) ?? visibleNodes[0] ?? null
   const selectedEdges = selected ? visibleEdges.filter(edge => edge.sourceId === selected.id || edge.targetId === selected.id) : []
   const selectNode = (id: string, focus = false) => {
-    setSelectedId(id); setSelectedEdgeId(null)
+    setSelectionState({ graph, nodeId: id, edgeId: null })
     if (focus) requestAnimationFrame(() => nodeButtons.current.get(id)?.focus())
   }
-  const selectEdge = (edge: EntityGraphEdge) => { setSelectedId(edge.sourceId); setSelectedEdgeId(edge.id) }
+  const selectEdge = (edge: EntityGraphEdge) => setSelectionState({ graph, nodeId: edge.sourceId, edgeId: edge.id })
+  const setEdgeReview = (edgeId: string, status: EphemeralEdgeReview) => setReviewState(current => ({ graph,
+    reviews: { ...(current.graph === graph ? current.reviews : {}), [edgeId]: status } }))
   const focusGraph = () => {
     const bounds = viewport.current?.getBoundingClientRect()
     if (!bounds) return
@@ -78,8 +103,8 @@ export function RelationshipGraph({ graph, documentNames, onInspectDocument }: {
   useEffect(() => { if (dense || compact) setTableOpen(true) }, [dense, compact])
   useEffect(() => {
     if (selectedId && visibleNodes.some(node => node.id === selectedId)) return
-    setSelectedId(visibleNodes[0]?.id ?? null); setSelectedEdgeId(null)
-  }, [selectedId, visibleNodes])
+    setSelectionState({ graph, nodeId: visibleNodes[0]?.id ?? null, edgeId: null })
+  }, [graph, selectedId, visibleNodes])
 
   if (!graph.nodes.length) return <div className="relationship-graph-empty"><strong>No structured relationship map yet</strong><p>Only explicit fields can create a node or link; nothing is inferred from nearby text.</p></div>
   return <section className="relationship-map" aria-label="Entity relationship map">
@@ -107,11 +132,12 @@ export function RelationshipGraph({ graph, documentNames, onInspectDocument }: {
       </div>
       <aside className="relationship-map-detail" aria-live="polite" aria-atomic="true">
         {selected ? <><span className="relationship-detail-kind">{kindLabel[selected.kind]}</span><h3>{selected.label}</h3><p>{selected.documentIds.length} supporting {selected.documentIds.length === 1 ? 'document' : 'documents'}</p>
-          {selectedEdges.length ? <ul>{selectedEdges.map(edge => { const isSource = edge.sourceId === selected.id; const peer = graph.nodes.find(node => node.id === (isSource ? edge.targetId : edge.sourceId)); return <li key={edge.id}><button type="button" onClick={() => selectEdge(edge)}><strong>{isSource ? edgeLabel[edge.type] : `${edgeLabel[edge.type]} from`}</strong><span>{peer?.label ?? 'Unavailable node'}</span></button><div className="relationship-evidence-list">{edge.evidence.map((item, evidenceIndex) => <button type="button" key={`${item.documentId}-${evidenceIndex}`} aria-label={`${item.locator.status !== 'SUPPORTED' ? 'Open document-level evidence in' : item.locator.kind === 'text_span' ? 'Open exact text evidence in' : 'Open approximate OCR evidence in'} ${documentNames.get(item.documentId) ?? 'supporting document'}`} onClick={() => onInspectDocument(item.documentId, item)}><strong>{documentNames.get(item.documentId) ?? 'Supporting document'} · {evidenceLabel[item.rule] ?? 'Explicit evidence'}</strong><small>{evidenceLocation(item)}</small></button>)}</div></li> })}</ul> : <p>No visible explicit links for this node.</p>}</> : <p>Select a node to inspect its explicit relationships.</p>}
+          {selectedEdges.length ? <ul>{selectedEdges.map(edge => { const isSource = edge.sourceId === selected.id; const peer = graph.nodes.find(node => node.id === (isSource ? edge.targetId : edge.sourceId)); const status = reviewStatusFor(edge.id, edgeReviews); return <li key={edge.id}><button type="button" onClick={() => selectEdge(edge)}><strong>{isSource ? edgeLabel[edge.type] : `${edgeLabel[edge.type]} from`}</strong><span>{peer?.label ?? 'Unavailable node'}</span></button><EdgeReviewControls edge={edge} sourceLabel={graph.nodes.find(node => node.id === edge.sourceId)?.label ?? 'Unavailable source'} targetLabel={graph.nodes.find(node => node.id === edge.targetId)?.label ?? 'Unavailable target'} status={status} cue={conflictCues.get(edge.id)} onStatusChange={next => setEdgeReview(edge.id, next)} /><div className="relationship-evidence-list">{edge.evidence.map((item, evidenceIndex) => <button type="button" key={`${item.documentId}-${evidenceIndex}`} aria-label={`${item.locator.status !== 'SUPPORTED' ? 'Open document-level evidence in' : item.locator.kind === 'text_span' ? 'Open exact text evidence in' : 'Open approximate OCR evidence in'} ${documentNames.get(item.documentId) ?? 'supporting document'}`} onClick={() => onInspectDocument(item.documentId, item)}><strong>{documentNames.get(item.documentId) ?? 'Supporting document'} · {evidenceLabel[item.rule] ?? 'Explicit evidence'}</strong><small>{evidenceLocation(item)}</small></button>)}</div></li> })}</ul> : <p>No visible explicit links for this node.</p>}</> : <p>Select a node to inspect its explicit relationships.</p>}
       </aside>
     </div>
     <button type="button" className="relationship-fallback-toggle" aria-expanded={tableOpen} aria-controls="relationship-table" onClick={() => setTableOpen(open => !open)}>{tableOpen ? <ChevronUp aria-hidden="true" size={16} /> : <ChevronDown aria-hidden="true" size={16} />} Accessible relationship table{dense ? ' (recommended)' : ''}</button>
-    {tableOpen && <div id="relationship-table" className="relationship-table-scroll" tabIndex={0} aria-label="Scrollable relationship review table"><table className="relationship-fallback-table"><caption>Explicit directed relationships in this review batch. Select a source or target to inspect it, or open supporting evidence.</caption><thead><tr><th scope="col">Source</th><th scope="col">Relationship</th><th scope="col">Target</th><th scope="col">Evidence</th></tr></thead><tbody>{visibleEdges.map(edge => { const source = graph.nodes.find(node => node.id === edge.sourceId); const target = graph.nodes.find(node => node.id === edge.targetId); return <tr key={edge.id}><td><button type="button" onClick={() => selectNode(edge.sourceId)}>{source?.label ?? 'Unavailable node'}</button></td><td>{edgeLabel[edge.type]}</td><td><button type="button" onClick={() => selectNode(edge.targetId)}>{target?.label ?? 'Unavailable node'}</button></td><td><ul>{edge.evidence.map((item, evidenceIndex) => <li key={`${item.documentId}-${evidenceIndex}`}><button type="button" onClick={() => onInspectDocument(item.documentId, item)}>{documentNames.get(item.documentId) ?? 'Supporting document'}: {evidenceLocation(item)}</button></li>)}</ul></td></tr> })}{!visibleEdges.length && <tr><td colSpan={4}>No visible relationship edges in this batch.</td></tr>}</tbody></table></div>}
+    {tableOpen && <div id="relationship-table" className="relationship-table-scroll" tabIndex={0} aria-label="Scrollable relationship review table"><table className="relationship-fallback-table"><caption>Explicit directed relationships in this review batch. Select a source or target to inspect it, mark a temporary review state, or open supporting evidence.</caption><thead><tr><th scope="col">Source</th><th scope="col">Relationship</th><th scope="col">Target</th><th scope="col">Review</th><th scope="col">Evidence</th></tr></thead><tbody>{visibleEdges.map(edge => { const source = graph.nodes.find(node => node.id === edge.sourceId); const target = graph.nodes.find(node => node.id === edge.targetId); const status = reviewStatusFor(edge.id, edgeReviews); return <tr key={edge.id}><td><button type="button" onClick={() => selectNode(edge.sourceId)}>{source?.label ?? 'Unavailable node'}</button></td><td>{edgeLabel[edge.type]}</td><td><button type="button" onClick={() => selectNode(edge.targetId)}>{target?.label ?? 'Unavailable node'}</button></td><td><EdgeReviewControls edge={edge} sourceLabel={source?.label ?? 'Unavailable source'} targetLabel={target?.label ?? 'Unavailable target'} status={status} cue={conflictCues.get(edge.id)} onStatusChange={next => setEdgeReview(edge.id, next)} /></td><td><ul>{edge.evidence.map((item, evidenceIndex) => <li key={`${item.documentId}-${evidenceIndex}`}><button type="button" onClick={() => onInspectDocument(item.documentId, item)}>{documentNames.get(item.documentId) ?? 'Supporting document'}: {evidenceLocation(item)}</button></li>)}</ul></td></tr> })}{!visibleEdges.length && <tr><td colSpan={5}>No visible relationship edges in this batch.</td></tr>}</tbody></table></div>}
+    <p className="relationship-review-note">Review choices are local to this open synthetic batch and reset after reload or a changed graph. They are not stored adjudications, release decisions, or identity merges/splits.</p>
     <p className="relationship-map-note">Arrows represent only documented, typed facts. Where role links exist, mail-only people are hidden until mail links are shown. Labels and evidence use generated aliases and rule names—not source contact details.</p>
   </section>
 }

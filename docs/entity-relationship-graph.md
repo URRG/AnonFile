@@ -53,9 +53,15 @@ names, or raw evidence snippets.
    traffic only by opt-in toggle so a long thread does not bury the useful
    relationships. Provide zoom, pan, fit, keyboard-operable selection and a
    textual list equivalent.
-6. Support reviewer accept/reject/merge/split in a future adjudication step.
-   The current synthetic demo may display deterministic evidence but must not
-   claim that cross-document identity resolution is complete.
+6. The current UI may let a reviewer mark an edge pending, accepted, or
+   rejected for orientation within the open synthetic batch. Those choices are
+   deliberately in-memory only and reset after reload or a changed graph; they
+   are not adjudications, release decisions, or durable correction keys. The
+   UI may flag narrowly typed multiple-affiliation or multiple-assignment cues
+   without resolving them. Identity merge/split remains unavailable until a
+   revisioned backend can validate and retain the action. The synthetic demo
+   may display deterministic evidence but must not claim that cross-document
+   identity resolution is complete.
 
 The rule set and aliasing both need evaluation on an independently labelled
 holdout. Measure node linking precision/recall, relation precision/recall *by
