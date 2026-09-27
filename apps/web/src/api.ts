@@ -130,7 +130,12 @@ export type BatchEntity = { id: string; kind: string; source: string; alias: str
 export type BatchRelationship = { sourceId: string; targetId: string; type: 'EMAILED' | 'ACCOUNT_OWNER_OF'; documentId: string; basis: string }
 export type EntityGraphNode = { id: string; kind: 'person' | 'organization' | 'project'; label: string; documentIds: string[] }
 export type EntityGraphEdgeType = 'assistant_to' | 'assistant_for' | 'works_at' | 'client_of' | 'works_on' | 'assigned_to' | 'sent_to'
-export type EntityGraphEvidence = { documentId: string; rule: string; field?: string }
+// Locators deliberately identify review positions, never source values. Media
+// evidence abstains unless a parser can establish a stable text location.
+export type EntityGraphEvidenceLocator =
+  | { status: 'SUPPORTED'; kind: 'text_span'; start: number; end: number; lineStart: number; lineEnd: number }
+  | { status: 'UNSUPPORTED'; reason: 'NO_DEFENSIBLE_SOURCE_LOCATOR' }
+export type EntityGraphEvidence = { documentId: string; rule: string; field?: string; locator: EntityGraphEvidenceLocator }
 export type EntityGraphEdge = { id: string; type: EntityGraphEdgeType; sourceId: string; targetId: string; evidence: EntityGraphEvidence[] }
 export type EntityGraph = { nodes: EntityGraphNode[]; edges: EntityGraphEdge[] }
 export type BatchCheck = { name: string; status: 'PASS' | 'FAIL' | 'REVIEW' | 'NOT_TESTED' | 'NOT_APPLICABLE' | 'NOT_MEASURED'; detail: string }
@@ -228,9 +233,29 @@ export async function readBatchReferenceManifest(file: File, uploads: BatchUploa
 
 function batchInvalid(): never { throw new DemoInspectionFailure('The batch service returned an invalid review result. Nothing was approved or exported.') }
 
-function entityGraph(raw: unknown, documentIds: Set<string>, entities: BatchEntity[]): EntityGraph {
+type GraphTextIndex = { utf16AtCodePoint: number[]; lineAtCodePoint: number[] }
+// The service uses Python Unicode code-point offsets. DOM String slicing uses
+// UTF-16 code units, so create a bounded index once per document rather than
+// rescanning potentially large text for every graph evidence item.
+function graphTextIndex(text: string): GraphTextIndex {
+  const characters = Array.from(text)
+  const utf16AtCodePoint = new Array<number>(characters.length + 1)
+  const lineAtCodePoint = new Array<number>(characters.length + 1)
+  let utf16 = 0; let line = 1
+  for (let index = 0; index < characters.length; index++) {
+    utf16AtCodePoint[index] = utf16; lineAtCodePoint[index] = line
+    utf16 += characters[index].length
+    if (characters[index] === '\n') line++
+  }
+  utf16AtCodePoint[characters.length] = utf16; lineAtCodePoint[characters.length] = line
+  return { utf16AtCodePoint, lineAtCodePoint }
+}
+
+function entityGraph(raw: unknown, documents: BatchDocument[], entities: BatchEntity[]): EntityGraph {
   // This graph is deliberately aliases and rule names only: no source spans, filenames, or mail addresses.
   if (!object(raw) || !Array.isArray(raw.nodes) || !Array.isArray(raw.edges)) batchInvalid()
+  const documentIds = new Set(documents.map(document => document.id))
+  const textIndexes = new Map(documents.filter(document => !document.mediaPreview).map(document => [document.id, graphTextIndex(document.text)]))
   if (raw.nodes.length > 100 || raw.edges.length > 200) batchInvalid()
   const aliases = new Map(entities.filter(entity => entity.kind === 'PERSON_NAME').map(entity => [entity.id, entity.excluded ? 'Source retained' : entity.alias]))
   const nodes: EntityGraphNode[] = raw.nodes.map(node => {
@@ -254,14 +279,28 @@ function entityGraph(raw: unknown, documentIds: Set<string>, entities: BatchEnti
   }
   const kindsById = new Map(nodes.map(node => [node.id, node.kind]))
   const edges: EntityGraphEdge[] = raw.edges.map(edge => {
-    if (!object(edge) || !/^relationship_[1-9][0-9]{0,3}$/.test(String(edge.id)) || !allowedTypes.has(edge.type as EntityGraphEdgeType) ||
+    if (!object(edge) || !/^edge_[0-9a-f]{16}$/.test(String(edge.id)) || !allowedTypes.has(edge.type as EntityGraphEdgeType) ||
         !nodeIds.has(String(edge.source_id)) || !nodeIds.has(String(edge.target_id)) || edge.source_id === edge.target_id || !Array.isArray(edge.evidence) || !edge.evidence.length || edge.evidence.length > 20) batchInvalid()
     const expectedKinds = validKinds[edge.type as EntityGraphEdgeType]
     if (kindsById.get(String(edge.source_id)) !== expectedKinds[0] || kindsById.get(String(edge.target_id)) !== expectedKinds[1]) batchInvalid()
     const evidence = edge.evidence.map(item => {
       if (!object(item) || typeof item.document_id !== 'string' || !documentIds.has(item.document_id) ||
-          typeof item.rule !== 'string' || !rules.has(item.rule) || typeof item.field !== 'string' || !fields.has(item.field)) batchInvalid()
-      return { documentId: item.document_id, rule: item.rule, field: item.field } as EntityGraphEvidence
+          typeof item.rule !== 'string' || !rules.has(item.rule) || typeof item.field !== 'string' || !fields.has(item.field) || !object(item.locator)) batchInvalid()
+      let locator: EntityGraphEvidenceLocator
+      if (item.locator.status === 'SUPPORTED') {
+        const textIndex = textIndexes.get(item.document_id)
+        const { start, end, line_start: lineStart, line_end: lineEnd } = item.locator
+        if (item.locator.kind !== 'text_span' || !textIndex || !safeCount(start) || !safeCount(end) || end <= start || end >= textIndex.utf16AtCodePoint.length ||
+            !safeCount(lineStart) || !safeCount(lineEnd) || lineStart < 1 || lineEnd < lineStart) batchInvalid()
+        // Bind reported line bounds to the returned original text before allowing a UI jump.
+        const actualStartLine = textIndex.lineAtCodePoint[start]
+        const actualEndLine = textIndex.lineAtCodePoint[end - 1]
+        if (lineStart !== actualStartLine || lineEnd !== actualEndLine) batchInvalid()
+        locator = { status: 'SUPPORTED', kind: 'text_span', start: textIndex.utf16AtCodePoint[start], end: textIndex.utf16AtCodePoint[end], lineStart, lineEnd }
+      } else if (item.locator.status === 'UNSUPPORTED' && item.locator.reason === 'NO_DEFENSIBLE_SOURCE_LOCATOR') {
+        locator = { status: 'UNSUPPORTED', reason: 'NO_DEFENSIBLE_SOURCE_LOCATOR' }
+      } else batchInvalid()
+      return { documentId: item.document_id, rule: item.rule, field: item.field, locator } as EntityGraphEvidence
     })
     return { id: edge.id as string, type: edge.type as EntityGraphEdgeType, sourceId: edge.source_id as string,
       targetId: edge.target_id as string, evidence }
@@ -469,7 +508,7 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
     return { sourceId: raw.source_id as string, targetId: raw.target_id as string,
       type: raw.type as BatchRelationship['type'], documentId: raw.document_id as string, basis: raw.basis as string }
   })
-  const graph = entityGraph(value.entity_graph, new Set(documents.map(document => document.id)), entities)
+  const graph = entityGraph(value.entity_graph, documents, entities)
   const summary = value.summary
   if (summary.files !== documents.length || !safeCount(summary.detected_mentions) || !safeCount(summary.transformed_mentions) ||
       !safeCount(summary.suppressed_mentions) ||

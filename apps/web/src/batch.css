@@ -86,6 +86,7 @@
 .download-blocked{margin:8px 0 0;color:#9a622a;font-size:.73rem}
 
 .relationship-panel .panel-intro{max-width:900px;margin-bottom:18px}
+.provenance-navigation{margin:0 0 12px;padding:10px 12px;border:1px solid #d7c693;border-radius:8px;background:#fff9ea;color:#725b28;font-size:.74rem;line-height:1.5}.provenance-navigation.is-precise{border-color:#9ad4ca;background:#f1fbf8;color:#17645e}.document-pane mark.provenance-target{background:#c9f2e8;color:#153f3c;box-shadow:inset 0 -3px #168b80;outline:2px solid #168b80;outline-offset:2px}
 
 /* A bounded review register keeps large multi-document batches scannable. */
 .register-toolbar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin:-2px 0 15px}

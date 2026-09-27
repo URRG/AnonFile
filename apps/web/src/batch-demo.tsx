@@ -4,7 +4,7 @@ import { ArrowDown, ArrowLeft, ArrowRight, Check, ChevronRight, CircleAlert, Dow
   Sparkles, UploadCloud, X, ZoomIn, ZoomOut } from 'lucide-react'
 import { inspectSyntheticBatch, readBatchFile, readBatchReferenceManifest, type BatchDocument, type BatchInspection,
   type BatchCoordinateCorrection, type BatchManualFinding, type BatchReferenceManifest, type BatchReferenceSpan, type BatchUpload,
-  BATCH_MAX_TOTAL_BYTES, DemoInspectionFailure } from './api'
+  type EntityGraphEvidence, BATCH_MAX_TOTAL_BYTES, DemoInspectionFailure } from './api'
 import { downloadDemoCandidate } from './demo-download'
 import { RelationshipGraph } from './relationship-graph'
 import './batch.css'
@@ -99,17 +99,22 @@ function FileScorecard({ score, documents, onInspect, onCorrect }: {
   </div>
 }
 
-function HighlightedSource({ document }: { document: BatchDocument }) {
-  const chunks: React.ReactNode[] = []
-  let cursor = 0
-  document.matches.forEach((match, index) => {
-    chunks.push(document.text.slice(cursor, match.start))
-    chunks.push(<mark key={`${match.start}-${index}`} className={match.applied ? '' : 'excluded'}
-      title={match.applied ? `${shortType(match.kind)} → ${match.replacement}` : `${shortType(match.kind)} retained after reviewer exclusion`}>{match.source}</mark>)
-    cursor = match.end
-  })
-  chunks.push(document.text.slice(cursor))
-  return <pre>{chunks}</pre>
+function HighlightedSource({ document, provenance }: { document: BatchDocument; provenance: EntityGraphEvidence | null }) {
+  const target = provenance?.locator.status === 'SUPPORTED' ? provenance.locator : null
+  const points = new Set([0, document.text.length])
+  document.matches.forEach(match => { points.add(match.start); points.add(match.end) })
+  if (target) { points.add(target.start); points.add(target.end) }
+  const boundaries = [...points].sort((a, b) => a - b)
+  return <pre>{boundaries.slice(0, -1).map((start, index) => {
+    const end = boundaries[index + 1]; const value = document.text.slice(start, end)
+    const match = document.matches.find(item => item.start <= start && item.end >= end)
+    const targeted = target && target.start <= start && target.end >= end
+    if (!match && !targeted) return <React.Fragment key={`${start}-${end}`}>{value}</React.Fragment>
+    const classes = [match && !match.applied ? 'excluded' : '', targeted ? 'provenance-target' : ''].filter(Boolean).join(' ')
+    const title = targeted ? `Graph evidence: lines ${target!.lineStart}${target!.lineEnd === target!.lineStart ? '' : `–${target!.lineEnd}`}` :
+      (match?.applied ? `${shortType(match.kind)} → ${match.replacement}` : `${shortType(match!.kind)} retained after reviewer exclusion`)
+    return <mark key={`${start}-${end}`} className={classes} data-provenance-target={targeted || undefined} tabIndex={targeted ? -1 : undefined} title={title}>{value}</mark>
+  })}</pre>
 }
 
 function MediaPages({ document, candidate, zoom, pending = [], onDraw }: { document: BatchDocument; candidate: boolean; zoom: MediaZoom;
@@ -170,6 +175,7 @@ export default function BatchDemo() {
   const [comparisonMode, setComparisonMode] = useState<ComparisonMode>('split')
   const [mediaZoom, setMediaZoom] = useState<MediaZoom>(100)
   const [demoDownloadAcknowledged, setDemoDownloadAcknowledged] = useState(false)
+  const [provenanceTarget, setProvenanceTarget] = useState<EntityGraphEvidence | null>(null)
   const sourcePane = useRef<HTMLDivElement | null>(null)
   const candidatePane = useRef<HTMLDivElement | null>(null)
   const sequence = useRef(0)
@@ -177,6 +183,15 @@ export default function BatchDemo() {
   const intakeEpoch = useRef(0)
 
   useEffect(() => () => { request.current?.abort(); intakeEpoch.current += 1 }, [])
+  useEffect(() => {
+    if (resultTab !== 'documents' || !provenanceTarget || provenanceTarget.locator.status !== 'SUPPORTED') return
+    const frame = requestAnimationFrame(() => {
+      const target = sourcePane.current?.querySelector<HTMLElement>('[data-provenance-target="true"]')
+      target?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      target?.focus({ preventScroll: true })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [resultTab, selectedDoc, provenanceTarget])
 
   function resetReview() { setInspection(null); setReferenceManifest(null); setReferenceAttested(false); setSampleMode(null); setManualNames([]); setManualFindings([]); setCoordinateCorrections([]); setAppliedCoordinates([]); setCoordinateRescanRequired(false); setCoordinateRescanTarget(null); setAliasOverrides({}); setExcludedIds([]); setExclusionAcknowledged(false); setStep('upload'); setError('') }
 
@@ -472,7 +487,8 @@ export default function BatchDemo() {
           <div className="result-tabs" role="tablist" aria-label="Batch result views">{([['documents', 'Documents', Files], ['relationships', 'Entities & relationships', Link2], ['verification', 'Verification scorecard', ShieldCheck]] as const).map(([key, label, Icon]) => <button key={key} type="button" role="tab" aria-selected={resultTab === key} className={resultTab === key ? 'selected' : ''} onClick={() => setResultTab(key)}><Icon size={17} /> {label}</button>)}</div>
           {resultTab === 'documents' && selected && <section className="batch-card result-panel">
             <div className="card-header"><div><p className="overline">DOCUMENT COMPARISON</p><h2>Inspect the source and proposed candidate</h2></div><span className="quiet-tag">{selected.matches.length} matches in this file</span></div>
-            <div className="doc-selector" role="tablist" aria-label="Documents">{inspection.documents.map(document => <button type="button" role="tab" aria-selected={selected.id === document.id} className={selected.id === document.id ? 'selected' : ''} key={document.id} onClick={() => setSelectedDoc(document.id)}>{fileIcon(document.name)}<span>{document.name}</span><small>{document.matches.length}</small></button>)}</div>
+            <div className="doc-selector" role="tablist" aria-label="Documents">{inspection.documents.map(document => <button type="button" role="tab" aria-selected={selected.id === document.id} className={selected.id === document.id ? 'selected' : ''} key={document.id} onClick={() => { setProvenanceTarget(null); setSelectedDoc(document.id) }}>{fileIcon(document.name)}<span>{document.name}</span><small>{document.matches.length}</small></button>)}</div>
+            {provenanceTarget?.documentId === selected.id && <p className={`provenance-navigation ${provenanceTarget.locator.status === 'SUPPORTED' ? 'is-precise' : ''}`} role="status">{provenanceTarget.locator.status === 'SUPPORTED' ? <>Opened graph evidence at source lines {provenanceTarget.locator.lineStart}{provenanceTarget.locator.lineEnd === provenanceTarget.locator.lineStart ? '' : `–${provenanceTarget.locator.lineEnd}`}. The highlighted text is a navigation aid, not a release-safety finding.</> : <>Graph evidence supports this document only. No defensible text span, PDF page, or bounding box is available for this relationship.</>}</p>}
             <div className="comparison-toolbar">
               <div className="comparison-layout" role="group" aria-label="Comparison layout">
                 {([['split', 'Side by side'], ['original', 'Original only'], ['candidate', 'Candidate only']] as const).map(([mode, label]) =>
@@ -507,7 +523,7 @@ export default function BatchDemo() {
               {comparisonMode !== 'candidate' && <div className="comparison-column"><div className="pane-heading"><span>ORIGINAL · SYNTHETIC INPUT</span><span>{selected.matches.length} highlighted matches</span></div>
                 <div className="document-pane" ref={sourcePane} onScroll={event => syncPaneScroll(event.currentTarget, candidatePane.current)}>
                   {selected.mediaPreview && <MediaPages document={selected} candidate={false} zoom={mediaZoom} pending={coordinateCorrections} onDraw={(page, x0, y0, x1, y1) => stageCoordinate(selected.id, page, x0, y0, x1, y1)} />}
-                  <details className="ocr-transcript" open={!selected.mediaPreview}><summary>{selected.mediaPreview ? 'OCR transcript' : 'Source text'}</summary><HighlightedSource document={selected} /></details>
+                  <details className="ocr-transcript" open={!selected.mediaPreview}><summary>{selected.mediaPreview ? 'OCR transcript' : 'Source text'}</summary><HighlightedSource document={selected} provenance={provenanceTarget?.documentId === selected.id ? provenanceTarget : null} /></details>
                 </div></div>}
               {comparisonMode === 'split' && <div className="compare-divider"><ArrowDown size={17} /></div>}
               {comparisonMode !== 'original' && <div className="comparison-column"><div className="pane-heading"><span>{selected.mediaPreview ? 'RASTER CANDIDATE' : 'PROPOSED TEXT CANDIDATE'}</span><span>Demo review only</span></div>
@@ -531,7 +547,7 @@ export default function BatchDemo() {
           {resultTab === 'relationships' && <section className="batch-card result-panel relationship-panel">
             <div className="card-header"><div><p className="overline">CROSS-DOCUMENT CONTEXT</p><h2>Entity relationship map</h2></div><span className="quiet-tag">Explicit evidence only</span></div>
             <p className="panel-intro">This map separates people, organizations, and projects. Arrows carry a typed relationship; it never derives a tie from proximity or co-mentions.</p>
-            <RelationshipGraph graph={inspection.entityGraph} documentNames={new Map(inspection.documents.map((document, index) => [document.id, `Document ${String(index + 1).padStart(2, '0')} · ${document.kind.toUpperCase()}`]))} onInspectDocument={id => { setSelectedDoc(id); setResultTab('documents') }} />
+            <RelationshipGraph graph={inspection.entityGraph} documentNames={new Map(inspection.documents.map((document, index) => [document.id, `Document ${String(index + 1).padStart(2, '0')} · ${document.kind.toUpperCase()}`]))} onInspectDocument={(id, evidence) => { setProvenanceTarget(evidence); setSelectedDoc(id); setResultTab('documents') }} />
           </section>}
           {resultTab === 'verification' && <section className="batch-card result-panel"><div className="card-header"><div><p className="overline">EVIDENCE, NOT A VANITY SCORE</p><h2>Verification scorecard</h2></div><span className="status-pill">REVIEW REQUIRED</span></div>
             <p className="panel-intro">These are observable checks for this run. Reference-label agreement appears only when complete synthetic labels were supplied; it does not measure anonymity or performance on other datasets.</p>

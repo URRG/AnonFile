@@ -1,6 +1,6 @@
 import React, { useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown, ChevronUp, Focus, Minus, Plus } from 'lucide-react'
-import type { EntityGraph, EntityGraphEdge, EntityGraphNode } from './api'
+import type { EntityGraph, EntityGraphEdge, EntityGraphEvidence, EntityGraphNode } from './api'
 import './relationship-graph.css'
 
 const edgeLabel: Record<EntityGraphEdge['type'], string> = {
@@ -25,7 +25,13 @@ function layout(nodes: EntityGraphNode[]) {
   return { positions, width, height }
 }
 
-export function RelationshipGraph({ graph, documentNames, onInspectDocument }: { graph: EntityGraph; documentNames: Map<string, string>; onInspectDocument: (id: string) => void }) {
+function evidenceLocation(item: EntityGraphEvidence) {
+  return item.locator.status === 'SUPPORTED'
+    ? `Lines ${item.locator.lineStart}${item.locator.lineEnd === item.locator.lineStart ? '' : `–${item.locator.lineEnd}`} · open exact evidence`
+    : 'Document-level only · no defensible precise locator'
+}
+
+export function RelationshipGraph({ graph, documentNames, onInspectDocument }: { graph: EntityGraph; documentNames: Map<string, string>; onInspectDocument: (id: string, evidence: EntityGraphEvidence) => void }) {
   const [selectedId, setSelectedId] = useState<string | null>(graph.nodes[0]?.id ?? null)
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null)
   const [showCommunication, setShowCommunication] = useState(false)
@@ -78,11 +84,11 @@ export function RelationshipGraph({ graph, documentNames, onInspectDocument }: {
       </div>
       <aside className="relationship-map-detail" aria-live="polite">
         {selected ? <><span className="relationship-detail-kind">{kindLabel[selected.kind]}</span><h3>{selected.label}</h3><p>{selected.documentIds.length} supporting {selected.documentIds.length === 1 ? 'document' : 'documents'}</p>
-          {selectedEdges.length ? <ul>{selectedEdges.map(edge => { const isSource = edge.sourceId === selected.id; const peer = graph.nodes.find(node => node.id === (isSource ? edge.targetId : edge.sourceId)); return <li key={edge.id}><button type="button" onClick={() => selectEdge(edge)}><strong>{isSource ? edgeLabel[edge.type] : `${edgeLabel[edge.type]} from`}</strong><span>{peer?.label ?? 'Unavailable node'}</span></button><div className="relationship-evidence-list">{edge.evidence.map((item, index) => <button type="button" key={`${item.documentId}-${index}`} aria-label={`Open ${documentNames.get(item.documentId) ?? 'supporting document'} in comparison`} onClick={() => onInspectDocument(item.documentId)}>{documentNames.get(item.documentId) ?? 'Supporting document'} · {evidenceLabel[item.rule] ?? 'Explicit evidence'}</button>)}</div></li> })}</ul> : <p>No visible explicit links for this node.</p>}</> : <p>Select a node to inspect its explicit relationships.</p>}
+          {selectedEdges.length ? <ul>{selectedEdges.map(edge => { const isSource = edge.sourceId === selected.id; const peer = graph.nodes.find(node => node.id === (isSource ? edge.targetId : edge.sourceId)); return <li key={edge.id}><button type="button" onClick={() => selectEdge(edge)}><strong>{isSource ? edgeLabel[edge.type] : `${edgeLabel[edge.type]} from`}</strong><span>{peer?.label ?? 'Unavailable node'}</span></button><div className="relationship-evidence-list">{edge.evidence.map((item, index) => <button type="button" key={`${item.documentId}-${index}`} aria-label={`${item.locator.status === 'SUPPORTED' ? 'Open exact evidence in' : 'Open document-level evidence in'} ${documentNames.get(item.documentId) ?? 'supporting document'}`} onClick={() => onInspectDocument(item.documentId, item)}><strong>{documentNames.get(item.documentId) ?? 'Supporting document'} · {evidenceLabel[item.rule] ?? 'Explicit evidence'}</strong><small>{evidenceLocation(item)}</small></button>)}</div></li> })}</ul> : <p>No visible explicit links for this node.</p>}</> : <p>Select a node to inspect its explicit relationships.</p>}
       </aside>
     </div>
     <button type="button" className="relationship-fallback-toggle" aria-expanded={fallbackOpen} onClick={() => setFallbackOpen(open => !open)}>{fallbackOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />} Accessible relationship list</button>
-    {fallbackOpen && <ul className="relationship-fallback-list" aria-label="Accessible directed relationship list">{visibleEdges.map(edge => { const source = graph.nodes.find(node => node.id === edge.sourceId); const target = graph.nodes.find(node => node.id === edge.targetId); return <li key={edge.id}><button type="button" onClick={() => setSelectedId(edge.sourceId)}>{source?.label} <strong>{edgeLabel[edge.type]}</strong> {target?.label}</button><span>{edge.evidence.map(item => documentNames.get(item.documentId) ?? `Document ${item.documentId}`).join(', ')}</span></li> })}{!visibleEdges.length && <li>No visible relationship edges in this batch.</li>}</ul>}
+    {fallbackOpen && <ul className="relationship-fallback-list" aria-label="Accessible directed relationship list">{visibleEdges.map(edge => { const source = graph.nodes.find(node => node.id === edge.sourceId); const target = graph.nodes.find(node => node.id === edge.targetId); return <li key={edge.id}><button type="button" onClick={() => setSelectedId(edge.sourceId)}>{source?.label} <strong>{edgeLabel[edge.type]}</strong> {target?.label}</button><span>{edge.evidence.map(item => `${documentNames.get(item.documentId) ?? `Document ${item.documentId}`} (${item.locator.status === 'SUPPORTED' ? `lines ${item.locator.lineStart}${item.locator.lineEnd === item.locator.lineStart ? '' : `–${item.locator.lineEnd}`}` : 'document-level only'})`).join(', ')}</span></li> })}{!visibleEdges.length && <li>No visible relationship edges in this batch.</li>}</ul>}
     <p className="relationship-map-note">Arrows represent only documented, typed facts. Where role links exist, mail-only people are hidden until mail links are shown. Labels and evidence use generated aliases and rule names—not source contact details.</p>
   </section>
 }

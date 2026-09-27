@@ -74,12 +74,91 @@ def test_entity_graph_uses_typed_explicit_evidence_and_never_source_labels(demo_
     assert all(node["label"].startswith(("Organization ", "Project ")) or node["kind"] == "person"
                for node in graph["nodes"])
     assert all(set(edge) == {"id", "type", "source_id", "target_id", "evidence"} for edge in graph["edges"])
-    assert all(set(item) == {"document_id", "rule", "field"}
+    assert all(set(item) == {"document_id", "rule", "field", "locator"}
                for edge in graph["edges"] for item in edge["evidence"])
     public_graph = json.dumps(graph)
     for source in ("Maya Patel", "Isha Rao", "Lina Chen", "Arjun Mehta", "Harborline Systems",
                    "Duplicate Dispatch Guard", "private.example", "client.example"):
         assert source not in public_graph
+
+
+def test_graph_evidence_has_exact_text_locators_and_stable_ids_across_three_documents(demo_client):
+    files = [
+        file("mail", "mail.txt", "From: Maya Patel <maya@example.test>\nTo: Isha Rao <isha@example.test>\n"),
+        file("staff", "staff.csv", "person_name,works_at\nMaya Patel,Harborline Systems\n"),
+        file("work", "work.txt", "Maya Patel works on Dispatch Guard.\n"),
+    ]
+    first = demo_client.post("/demo/batch/inspect", headers=auth(), json={"synthetic_only": True, "files": files})
+    second = demo_client.post("/demo/batch/inspect", headers=auth(), json={"synthetic_only": True,
+                              "files": [files[2], files[0], files[1]]})
+    assert first.status_code == second.status_code == 200
+    graph, reordered = first.json()["entity_graph"], second.json()["entity_graph"]
+    assert {edge["id"] for edge in graph["edges"]} == {edge["id"] for edge in reordered["edges"]}
+    assert all(edge["id"].startswith("edge_") and len(edge["id"]) == 21 for edge in graph["edges"])
+    for evidence in (item for edge in graph["edges"] for item in edge["evidence"]):
+        locator = evidence["locator"]
+        assert locator["status"] == "SUPPORTED"
+        assert locator["kind"] == "text_span"
+        assert 0 <= locator["start"] < locator["end"]
+        assert locator["line_start"] <= locator["line_end"]
+
+
+def test_media_locator_abstains_without_a_public_page_box():
+    from app.demo_batch import _text_locator
+
+    assert _text_locator({"kind": "image", "text": "Maya Patel works on Dispatch Guard."},
+                         "Maya Patel", "Dispatch Guard") == {
+                             "status": "UNSUPPORTED", "reason": "NO_DEFENSIBLE_SOURCE_LOCATOR"}
+
+
+def test_locator_abstains_for_duplicate_or_nonrecord_text_occurrences():
+    from app.demo_batch import _text_locator
+
+    duplicate = {"kind": "csv", "text": "person_name,works_at\nMaya Patel,Harborline Systems\n"
+                 "Maya Patel,Harborline Systems\n"}
+    record = {"person_name": "Maya Patel", "works_at": "Harborline Systems"}
+    assert _text_locator(duplicate, "Maya Patel", "Harborline Systems", record=record) == {
+        "status": "UNSUPPORTED", "reason": "NO_DEFENSIBLE_SOURCE_LOCATOR"}
+    # A coincidental earlier prose/sub-string occurrence is never promoted to
+    # structured evidence without an exact parser span.
+    unrelated = {"kind": "txt", "text": "Maya Patel works at Harborline Systems?\n"
+                 "Maya Patel works on Harborline Systems Upgrade.\n"}
+    assert _text_locator(unrelated, "Maya Patel", "Harborline Systems") == {
+        "status": "UNSUPPORTED", "reason": "NO_DEFENSIBLE_SOURCE_LOCATOR"}
+
+
+def test_repeated_mail_headers_keep_distinct_exact_evidence_spans(demo_client):
+    request = {"synthetic_only": True, "files": [
+        file("mail", "mail.txt", "From: Maya Patel <maya@example.test>\nTo: Isha Rao <isha@example.test>\n\n"
+             "From: Maya Patel <maya@example.test>\nTo: Isha Rao <isha@example.test>\n"),
+        file("record", "record.json", '[{"full_name":"Maya Patel"}]'),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200
+    edge = next(item for item in response.json()["entity_graph"]["edges"] if item["type"] == "sent_to")
+    spans = [(item["locator"]["start"], item["locator"]["end"]) for item in edge["evidence"]]
+    assert len(spans) == 2 and len(set(spans)) == 2
+
+
+def test_malformed_from_header_resets_prior_sender_before_following_recipient(demo_client):
+    text = ("From: Maya Patel <maya@example.test>\nTo: Isha Rao <isha@example.test>\n\n"
+            "From: 123 <bad@example.test>\nTo: Isha Rao <isha@example.test>\n")
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json={"synthetic_only": True, "files": [
+        file("mail", "mail.txt", text),
+        file("record", "record.json", '[{"full_name":"Maya Patel"}]'),
+    ]})
+    assert response.status_code == 200
+    edge = next(item for item in response.json()["entity_graph"]["edges"] if item["type"] == "sent_to")
+    assert len(edge["evidence"]) == 1
+    assert edge["evidence"][0]["locator"]["end"] < text.index("From: 123")
+
+
+def test_batch_explicitly_declares_revisioned_reviewer_actions_unsupported(demo_client):
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=payload())
+    assert response.status_code == 200
+    assert response.json()["review_capabilities"] == {
+        "state": "EPHEMERAL_STATELESS", "accept_reject": "UNSUPPORTED",
+        "identity_merge_split": "UNSUPPORTED", "reason": "REVISIONED_REVIEW_STATE_NOT_AVAILABLE"}
 
 
 def test_entity_graph_abstains_on_proximity_headers_and_cross_record_values(demo_client):

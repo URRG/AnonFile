@@ -354,29 +354,37 @@ def _structured_fields(document: dict[str, Any]) -> list[tuple[int, int, str]]:
     return result
 
 
-def _names_and_headers(documents: list[dict[str, Any]]) -> tuple[set[str], list[tuple[str, str, str]]]:
+def _names_and_headers(documents: list[dict[str, Any]]) -> tuple[set[str], list[tuple[str, str, str, int, int]]]:
     names: set[str] = set()
-    edges: list[tuple[str, str, str]] = []
+    edges: list[tuple[str, str, str, int, int]] = []
     for document in documents:
         text = document["text"]
         sender: str | None = None
-        recipients: list[str] = []
+        sender_start: int | None = None
+        recipients: list[tuple[str, int]] = []
 
         def flush_message() -> None:
-            if sender:
-                for recipient in recipients:
+            if sender and sender_start is not None:
+                for recipient, recipient_end in recipients:
                     if sender.casefold() != recipient.casefold():
-                        edges.append((sender, recipient, document["id"]))
+                        edges.append((sender, recipient, document["id"], sender_start, recipient_end))
 
         for match in HEADER.finditer(text):
-            name = match.group(2).strip()
-            if SAFE_NAME.fullmatch(name):
+            label, name = match.group(1).casefold(), match.group(2).strip()
+            if label == "from":
+                # Every syntactic From line ends the preceding message, even
+                # when its display name is invalid.  Otherwise a following
+                # valid To line could be incorrectly attributed to the prior
+                # sender with a precise-looking source span.
+                flush_message()
+                sender, sender_start, recipients = None, None, []
+                if SAFE_NAME.fullmatch(name):
+                    names.add(name)
+                    sender, sender_start = name, match.start()
+            elif SAFE_NAME.fullmatch(name):
                 names.add(name)
-                if match.group(1).casefold() == "from":
-                    flush_message()
-                    sender, recipients = name, []
-                elif sender:
-                    recipients.append(name)
+                if sender:
+                    recipients.append((name, match.end()))
         flush_message()
         for match in ROSTER_ROW.finditer(text):
             if SAFE_NAME.fullmatch(match.group(1)):
@@ -461,8 +469,61 @@ def _structured_role_edges(documents: list[dict[str, Any]]) -> list[tuple[str, s
     return edges
 
 
+def _unsupported_locator() -> dict[str, str]:
+    """Say explicitly when this preview cannot navigate to source evidence."""
+    return {"status": "UNSUPPORTED", "reason": "NO_DEFENSIBLE_SOURCE_LOCATOR"}
+
+
+def _csv_record_span(document: dict[str, Any], record: dict[str, Any]) -> tuple[int, int] | None:
+    """Locate one exact one-line CSV record, rejecting duplicates/ambiguity."""
+    lines = document["text"].splitlines(keepends=True)
+    if len(lines) < 2:
+        return None
+    try:
+        header = next(csv.reader([lines[0].rstrip("\r\n")], strict=True))
+    except (StopIteration, csv.Error):
+        return None
+    candidates: list[tuple[int, int]] = []
+    offset = len(lines[0])
+    for raw_line in lines[1:]:
+        content = raw_line.rstrip("\r\n")
+        try:
+            values = next(csv.reader([content], strict=True))
+        except (StopIteration, csv.Error):
+            return None
+        if len(values) == len(header) and dict(zip(header, values)) == record:
+            candidates.append((offset, offset + len(content)))
+        offset += len(raw_line)
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _text_locator(document: dict[str, Any], source: str, target: str,
+                  span: tuple[int, int] | None = None,
+                  record: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return a source-free, exact text locator, or abstain.
+
+    OCR offsets are deliberately not exposed as locators: this parser has no
+    stable public source-page/box mapping for a relationship claim.  For
+    source text, a supplied parser span is exact.  The sole derived fallback
+    is a *unique complete CSV record* reconstructed by its parser.  We do not
+    search arbitrary lines or JSON substrings: an earlier prose occurrence,
+    duplicate row, cross-record pair, or multiline form is unsupported.
+    """
+    if document["kind"] in {"pdf", "image"}:
+        return _unsupported_locator()
+    text = document["text"]
+    if span is None and record is not None and document["kind"] == "csv":
+        span = _csv_record_span(document, record)
+    if span is None or not (0 <= span[0] < span[1] <= len(text)):
+        return _unsupported_locator()
+    start, end = span
+    return {"status": "SUPPORTED", "kind": "text_span", "start": start, "end": end,
+            "line_start": text.count("\n", 0, start) + 1,
+            "line_end": text.count("\n", 0, end - 1) + 1}
+
+
 def _entity_graph_facts(documents: list[dict[str, Any]],
-                        header_edges: list[tuple[str, str, str]]) -> list[dict[str, str]]:
+                        header_edges: list[tuple[str, str, str, int, int]]) -> list[dict[str, Any]]:
     """Extract only relationship claims expressed by a bounded explicit form.
 
     Graph facts deliberately retain their source values only until aliases and
@@ -470,7 +531,8 @@ def _entity_graph_facts(documents: list[dict[str, Any]],
     In particular, this function does not infer relationships from entity
     proximity, repeated domains, message threads, or arbitrary prose.
     """
-    facts: list[dict[str, str]] = []
+    facts: list[dict[str, Any]] = []
+    by_document = {document["id"]: document for document in documents}
 
     def person(value: object) -> str | None:
         if isinstance(value, str) and SAFE_NAME.fullmatch(value.strip()):
@@ -483,18 +545,23 @@ def _entity_graph_facts(documents: list[dict[str, Any]],
         return None
 
     def add(type_: str, source_kind: str, source: str, target_kind: str,
-            target: str, document_id: str, rule: str, field: str) -> None:
+            target: str, document_id: str, rule: str, field: str,
+            span: tuple[int, int] | None = None,
+            record: dict[str, Any] | None = None) -> bool:
         if source.casefold() != target.casefold():
             if len(facts) >= MAX_GRAPH_FACTS:
                 raise PayloadError("The explicit entity graph exceeds the synthetic demo review limit.")
             facts.append({"type": type_, "source_kind": source_kind, "source": source,
                           "target_kind": target_kind, "target": target,
-                          "document_id": document_id, "rule": rule, "field": field})
+                          "document_id": document_id, "rule": rule, "field": field,
+                          "locator": _text_locator(by_document[document_id], source, target, span, record)})
+            return True
+        return False
 
-    for sender, recipient, document_id in header_edges:
+    for sender, recipient, document_id, start, end in header_edges:
         add("sent_to", "person", sender, "person", recipient, document_id,
-            "explicit_mail_header", "From/To/Cc")
-    records = list(_structured_records(documents))
+            "explicit_mail_header", "From/To/Cc", (start, end))
+    records = [(document, record, None) for document, record in _structured_records(documents)]
     # OCR/text fixtures can contain an exact one-line JSON record.  This is a
     # deliberate escape hatch for document evidence, not a JSON-like prose
     # parser: malformed or multiline content is ignored rather than guessed.
@@ -507,16 +574,16 @@ def _entity_graph_facts(documents: list[dict[str, Any]],
             except (ValueError, TypeError):
                 continue
             if isinstance(record, dict) and all(isinstance(key, str) for key in record):
-                records.append((document, record))
-    for document, record in records:
+                records.append((document, record, match.span()))
+    for document, record, record_span in records:
         assistant, principal = person(record.get("assistant")), person(record.get("assistant_to"))
         if assistant and principal:
             add("assistant_to", "person", assistant, "person", principal, document["id"],
-                "explicit_structured_field_pair", "assistant,assistant_to")
+                "explicit_structured_field_pair", "assistant,assistant_to", record_span, record)
         assistant_for = label(record.get("assistant_for"))
         if assistant and assistant_for:
             add("assistant_for", "person", assistant, "organization", assistant_for, document["id"],
-                "explicit_structured_field_pair", "assistant,assistant_for")
+                "explicit_structured_field_pair", "assistant,assistant_for", record_span, record)
         worker_field = "person_name" if person(record.get("person_name")) else "employee_name"
         worker = person(record.get(worker_field))
         organization_field = next((key for key in ("works_at", "company", "employer") if label(record.get(key))), None)
@@ -524,70 +591,71 @@ def _entity_graph_facts(documents: list[dict[str, Any]],
         if worker and organization:
             add("works_at", "person", worker, "organization", organization, document["id"],
                 "explicit_structured_field_pair",
-                f"{worker_field},works_at" if organization_field == "works_at" else organization_field)
+                f"{worker_field},works_at" if organization_field == "works_at" else organization_field,
+                record_span, record)
         client, client_for = person(record.get("client_name")), label(record.get("client_for"))
         if client and client_for:
             add("client_of", "person", client, "organization", client_for, document["id"],
-                "explicit_structured_field_pair", "client_name,client_for")
+                "explicit_structured_field_pair", "client_name,client_for", record_span, record)
         contributor_field = "person_name" if person(record.get("person_name")) else "employee_name"
         contributor, project = person(record.get(contributor_field)), label(record.get("works_on"))
         if contributor and project:
             add("works_on", "person", contributor, "project", project, document["id"],
-                "explicit_structured_field_pair", f"{contributor_field},works_on")
+                "explicit_structured_field_pair", f"{contributor_field},works_on", record_span, record)
         assigned_project, assignee = label(record.get("project_name")), person(record.get("assigned_to"))
         if assigned_project and assignee:
             add("assigned_to", "project", assigned_project, "person", assignee, document["id"],
-                "explicit_structured_field_pair", "project_name,assigned_to")
+                "explicit_structured_field_pair", "project_name,assigned_to", record_span, record)
     for document in documents:
         for match in SIGNATURE_BLOCK.finditer(document["text"]):
             signer, organization = person(match.group("person")), label(match.group("organization"))
             if not signer or not organization:
                 continue
             add("works_at", "person", signer, "organization", organization, document["id"],
-                "explicit_signature_block", "Name,Title,Company")
+                "explicit_signature_block", "Name,Title,Company", match.span())
             assistant_match = ASSISTANT_TITLE.fullmatch(match.group("title").strip())
             if assistant_match:
                 principal = person(assistant_match.group("principal"))
                 if principal:
                     add("assistant_to", "person", signer, "person", principal, document["id"],
-                        "explicit_signature_title", "Title")
+                        "explicit_signature_title", "Title", match.span())
             assistant_for_match = ASSISTANT_FOR_TITLE.fullmatch(match.group("title").strip())
             if assistant_for_match:
                 assisted_organization = label(assistant_for_match.group("organization"))
                 if assisted_organization:
                     add("assistant_for", "person", signer, "organization", assisted_organization, document["id"],
-                        "explicit_signature_title", "Title")
+                        "explicit_signature_title", "Title", match.span())
         # These are complete, line-bounded declarative claims.  Similar words
         # elsewhere in an email cannot create an affiliation edge.
         for match in EXPLICIT_CLIENT_OF.finditer(document["text"]):
             client, organization = person(match.group("person")), label(match.group("organization"))
             if client and organization:
                 add("client_of", "person", client, "organization", organization, document["id"],
-                    "explicit_role_statement", "client_of_statement")
+                    "explicit_role_statement", "client_of_statement", match.span())
         for match in EXPLICIT_ASSISTANT_TO.finditer(document["text"]):
             assistant, principal = person(match.group("assistant")), person(match.group("principal"))
             if assistant and principal:
                 add("assistant_to", "person", assistant, "person", principal, document["id"],
-                    "explicit_role_statement", "assistant_to_statement")
+                    "explicit_role_statement", "assistant_to_statement", match.span())
         for match in EXPLICIT_ASSISTANT_FOR.finditer(document["text"]):
             assistant, organization = person(match.group("assistant")), label(match.group("organization"))
             if assistant and organization:
                 add("assistant_for", "person", assistant, "organization", organization, document["id"],
-                    "explicit_role_statement", "assistant_for_statement")
+                    "explicit_role_statement", "assistant_for_statement", match.span())
         for match in EXPLICIT_WORKS_ON.finditer(document["text"]):
             contributor, project = person(match.group("person")), label(match.group("project"))
             if contributor and project:
                 add("works_on", "person", contributor, "project", project, document["id"],
-                    "explicit_role_statement", "works_on_statement")
+                    "explicit_role_statement", "works_on_statement", match.span())
         for match in EXPLICIT_ASSIGNED_TO.finditer(document["text"]):
             project, assignee = label(match.group("project")), person(match.group("person"))
             if project and assignee:
                 add("assigned_to", "project", project, "person", assignee, document["id"],
-                    "explicit_role_statement", "assigned_to_statement")
+                    "explicit_role_statement", "assigned_to_statement", match.span())
     return facts
 
 
-def _public_entity_graph(facts: list[dict[str, str]], person_ids: dict[str, str],
+def _public_entity_graph(facts: list[dict[str, Any]], person_ids: dict[str, str],
                          person_labels: dict[str, str]) -> dict[str, list[dict[str, Any]]]:
     """Render source-free graph nodes and evidence from explicit facts only."""
     def unique_casefold(values: list[str]) -> list[str]:
@@ -601,6 +669,8 @@ def _public_entity_graph(facts: list[dict[str, str]], person_ids: dict[str, str]
     project_values = unique_casefold([fact[side] for fact in facts for side in ("source", "target")
                                        if fact[f"{side}_kind"] == "project"])
     opaque_ids = {
+        # Response-local ordinals intentionally avoid hashing low-entropy
+        # source labels. They are not durable or cross-revision identities.
         "organization": {value.casefold(): f"organization_{index}" for index, value in enumerate(organization_values, 1)},
         "project": {value.casefold(): f"project_{index}" for index, value in enumerate(project_values, 1)},
     }
@@ -611,7 +681,7 @@ def _public_entity_graph(facts: list[dict[str, str]], person_ids: dict[str, str]
         return opaque_ids[kind].get(value.casefold())
 
     evidence_by_node: dict[str, set[str]] = {}
-    grouped: dict[tuple[str, str, str], list[dict[str, str]]] = {}
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for fact in facts:
         source_id, target_id = node_id(fact["source_kind"], fact["source"]), node_id(fact["target_kind"], fact["target"])
         if not source_id or not target_id:
@@ -632,15 +702,21 @@ def _public_entity_graph(facts: list[dict[str, str]], person_ids: dict[str, str]
             nodes.append({"id": identifier, "kind": kind, "label": f"{prefix} {index}",
                           "document_ids": sorted(evidence_by_node.get(identifier, set()))})
     edges = []
-    for index, ((type_, source_id, target_id), grouped_facts) in enumerate(sorted(grouped.items()), 1):
-        evidence = sorted({(fact["document_id"], fact["rule"], fact["field"])
-                           for fact in grouped_facts})
+    for (type_, source_id, target_id), grouped_facts in sorted(grouped.items()):
+        # Deterministic only for the same response input: public node IDs are
+        # response-local and must not be treated as durable review identities.
+        edge_id = "edge_" + hashlib.sha256(
+            f"{type_}\x1f{source_id}\x1f{target_id}".encode("utf-8")).hexdigest()[:16]
+        evidence = sorted({(fact["document_id"], fact["rule"], fact["field"],
+                           json.dumps(fact["locator"], sort_keys=True, separators=(",", ":")))
+                          for fact in grouped_facts})
         if len(evidence) > MAX_GRAPH_EVIDENCE_PER_EDGE:
             raise PayloadError("An entity graph relationship has too much evidence for this demo.")
-        edges.append({"id": f"relationship_{index}", "type": type_, "source_id": source_id,
+        edges.append({"id": edge_id, "type": type_, "source_id": source_id,
                       "target_id": target_id, "evidence": [
-                          {"document_id": doc_id, "rule": rule, "field": field}
-                          for doc_id, rule, field in evidence]})
+                          {"document_id": doc_id, "rule": rule, "field": field,
+                           "locator": json.loads(locator)}
+                          for doc_id, rule, field, locator in evidence]})
     return {"nodes": nodes, "edges": edges}
 
 
@@ -1012,7 +1088,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
     entity_graph = _public_entity_graph(graph_facts, person_id, graph_person_labels)
     relationships = []
     seen_edges: set[tuple[str, str, str, str]] = set()
-    for sender, recipient, document_id in raw_edges:
+    for sender, recipient, document_id, _, _ in raw_edges:
         source_id, target_id = person_id.get(sender.casefold()), person_id.get(recipient.casefold())
         if not source_id or not target_id:
             continue
@@ -1052,6 +1128,12 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
         "posture": "SYNTHETIC_DEMO_ONLY", "release_authorized": False, "export_available": False,
         "documents": documents, "entities": entities, "relationships": relationships,
         "entity_graph": entity_graph,
+        "review_capabilities": {
+            "state": "EPHEMERAL_STATELESS",
+            "accept_reject": "UNSUPPORTED",
+            "identity_merge_split": "UNSUPPORTED",
+            "reason": "REVISIONED_REVIEW_STATE_NOT_AVAILABLE",
+        },
         "summary": {"files": len(documents), "detected_mentions": total_mentions,
                     "transformed_mentions": transformed_mentions, "suppressed_mentions": total_mentions - transformed_mentions,
                     "linked_entities": sum(e["mentions"] > 0 for e in entities),
@@ -1091,6 +1173,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
             "Image and scanned-PDF OCR may miss or misread content. The same-engine raster recheck is not independent validation, and source content outside recognized OCR lines may remain visible.",
             "Entity-graph edges require explicit mail headers, labelled signature blocks, or named field pairs in one parsed record; they do not infer social, employment, client, or organizational ties from proximity, prose, or email domains.",
             "Graph evidence identifies only the source document and bounded extraction rule/field. Graph organization and project labels are batch-local pseudonyms, and the graph is capped for review rather than treated as a complete organization model.",
+            "This stateless demo cannot record reviewer accept/reject decisions or identity merge/split operations: those actions require authenticated, revisioned durable state and conflict handling. No displayed control is a review decision.",
             "Pseudonyms and retained relationships may remain linkable. No release, sale, or production export is authorized; demo downloads are unverified synthetic review copies only.",
             "Reference-label agreement, when present, depends on the reviewer's completeness assertion and does not establish generalization or anonymity.",
         ],
