@@ -65,8 +65,8 @@ test('top-level result views use the same roving ARIA tab behavior with labelled
   }
 })
 
-test('recorded graph panel is opt-in, memory-only, and keeps durable decisions distinct from temporary review', () => {
-  for (const required of ['RecordedGraphReviewPanel', 'type="password"', 'autoComplete="off"', 'getRecordedGraphReview', 'decideRecordedGraphClaim', 'Recorded · revision', 'No merge or split editor is included', 'graphReview && apiBase']) {
+test('recorded graph panel is opt-in, memory-only, and keeps durable actions distinct from temporary review', () => {
+  for (const required of ['RecordedGraphReviewPanel', 'type="password"', 'autoComplete="off"', 'getRecordedGraphReview', 'decideRecordedGraphClaim', 'mergeRecordedGraphIdentities', 'splitRecordedGraphIdentity', 'Record merge', 'Record split', 'Recorded · revision', 'graphReview && apiBase']) {
     assert.match(graphSource, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   }
   assert.doesNotMatch(graphSource, /localStorage|sessionStorage|console\.log/)

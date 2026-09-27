@@ -162,8 +162,12 @@ export type BatchGraphReviewBinding = { snapshotRef: string; nodes: { graphNodeI
   claims: { graphEdgeId: string; claimRef: string }[];
   posture: 'DEVELOPMENT_BINDING_ONLY_NO_ADJUDICATION_OR_RELEASE' }
 export type RecordedGraphDecision = { claimRef: string; decision: 'ACCEPT' | 'REJECT' }
+export type RecordedGraphIdentityMerge = { action: 'MERGE'; canonicalPersonRef: string; memberPersonRefs: [string, string] }
+export type RecordedGraphSplitAssignment = { claimRef: string; endpoint: 'source' | 'target'; replacementPersonRef: string }
+export type RecordedGraphIdentitySplit = { action: 'SPLIT'; sourcePersonRef: string; replacementPersonRefs: string[]; endpointAssignments: RecordedGraphSplitAssignment[] }
+export type RecordedGraphIdentityAction = RecordedGraphIdentityMerge | RecordedGraphIdentitySplit
 export type RecordedGraphReview = { snapshotRef: string; revision: number; decisions: RecordedGraphDecision[];
-  posture: 'REVIEW_ONLY_NO_RELEASE_OR_DELIVERY' }
+  identityActions: RecordedGraphIdentityAction[]; posture: 'REVIEW_ONLY_NO_RELEASE_OR_DELIVERY' }
 
 /** Source-safe failure for the optional encrypted development review seam. */
 export class GraphReviewFailure extends Error {
@@ -1121,7 +1125,7 @@ const GRAPH_REVIEW_REF = /^graph(?:snap|node|claim):v1:[A-Za-z0-9_-]{43}$/
 const GRAPH_REVIEW_MAX_RESPONSE_BYTES = 64_000
 
 function graphReviewInvalid(): never {
-  throw new GraphReviewFailure('The recorded review response was invalid. No decision was applied.')
+  throw new GraphReviewFailure('The recorded review response was invalid. Reload before taking another action.')
 }
 
 function graphReviewPath(snapshotRef: string, suffix = ''): string {
@@ -1158,14 +1162,58 @@ function parseRecordedGraphReview(value: unknown, binding: BatchGraphReviewBindi
         !['ACCEPT', 'REJECT'].includes(String(raw.decision)) || seen.has(raw.claim_ref)) graphReviewInvalid()
     seen.add(raw.claim_ref); decisions.push({ claimRef: raw.claim_ref, decision: raw.decision as 'ACCEPT' | 'REJECT' })
   }
-  // This narrow panel has no identity editor. Do not even retain a response
-  // containing overlays that it cannot bind and display safely.
-  if (value.identity_actions.length !== 0) graphReviewInvalid()
+  const nodeKinds = new Map<string, EntityGraphNode['kind']>()
+  for (const raw of value.nodes) nodeKinds.set(raw.id as string, raw.kind as EntityGraphNode['kind'])
+  const claims = new Map<string, { relation: EntityGraphEdgeType; source: string; target: string }>()
+  for (const raw of value.claims) claims.set(raw.id as string, { relation: raw.relation as EntityGraphEdgeType, source: raw.source as string, target: raw.target as string })
+  const rejected = new Set(decisions.filter(item => item.decision === 'REJECT').map(item => item.claimRef))
+  const activePeople = new Set([...nodeKinds].filter(([, kind]) => kind === 'person').map(([id]) => id))
+  const effectivePeople = new Map<string, string>()
+  for (const [claimRef, claim] of claims) {
+    if (nodeKinds.get(claim.source) === 'person') effectivePeople.set(`${claimRef}:source`, claim.source)
+    if (nodeKinds.get(claim.target) === 'person') effectivePeople.set(`${claimRef}:target`, claim.target)
+  }
+  const identityActions: RecordedGraphIdentityAction[] = []
+  const noSelfLinks = () => {
+    for (const [claimRef, claim] of claims) {
+      if (rejected.has(claimRef) || (claim.relation !== 'assistant_to' && claim.relation !== 'sent_to')) continue
+      if (effectivePeople.get(`${claimRef}:source`) === effectivePeople.get(`${claimRef}:target`)) graphReviewInvalid()
+    }
+  }
+  for (const raw of value.identity_actions) {
+    if (!object(raw) || typeof raw.action !== 'string') graphReviewInvalid()
+    if (raw.action === 'MERGE') {
+      if (Object.keys(raw).length !== 3 || typeof raw.canonical !== 'string' || !Array.isArray(raw.members) || raw.members.length !== 2 ||
+          raw.members.some(item => typeof item !== 'string') || new Set(raw.members).size !== 2 || !raw.members.includes(raw.canonical) ||
+          raw.members.some(item => nodeKinds.get(item) !== 'person' || !activePeople.has(item))) graphReviewInvalid()
+      for (const [key, person] of effectivePeople) if ((raw.members as string[]).includes(person)) effectivePeople.set(key, raw.canonical)
+      for (const member of raw.members as string[]) activePeople.delete(member); activePeople.add(raw.canonical)
+      noSelfLinks(); identityActions.push({ action: 'MERGE', canonicalPersonRef: raw.canonical, memberPersonRefs: [raw.members[0], raw.members[1]] })
+    } else if (raw.action === 'SPLIT') {
+      if (Object.keys(raw).length !== 4 || typeof raw.source !== 'string' || !Array.isArray(raw.replacements) || raw.replacements.length < 2 || raw.replacements.length > 100 ||
+          raw.replacements.some(item => typeof item !== 'string') || new Set(raw.replacements).size !== raw.replacements.length || raw.replacements.includes(raw.source) ||
+          nodeKinds.get(raw.source) !== 'person' || !activePeople.has(raw.source) || raw.replacements.some(item => nodeKinds.get(item) !== 'person' || !activePeople.has(item)) || !Array.isArray(raw.assignments) || raw.assignments.length > 200) graphReviewInvalid()
+      const required = new Set([...effectivePeople].filter(([key, person]) => person === raw.source && !rejected.has(key.slice(0, key.lastIndexOf(':')))).map(([key]) => key))
+      const assigned = new Set<string>(); const endpointAssignments: RecordedGraphSplitAssignment[] = []
+      for (const assignment of raw.assignments) {
+        if (!object(assignment) || Object.keys(assignment).length !== 3 || typeof assignment.claim_ref !== 'string' ||
+            (assignment.endpoint !== 'source' && assignment.endpoint !== 'target') || typeof assignment.replacement !== 'string' ||
+            !raw.replacements.includes(assignment.replacement)) graphReviewInvalid()
+        const key = `${assignment.claim_ref}:${assignment.endpoint}`
+        if (!required.has(key) || assigned.has(key)) graphReviewInvalid()
+        assigned.add(key); endpointAssignments.push({ claimRef: assignment.claim_ref, endpoint: assignment.endpoint, replacementPersonRef: assignment.replacement })
+      }
+      if (assigned.size !== required.size) graphReviewInvalid()
+      for (const assignment of endpointAssignments) effectivePeople.set(`${assignment.claimRef}:${assignment.endpoint}`, assignment.replacementPersonRef)
+      activePeople.delete(raw.source); for (const replacement of raw.replacements as string[]) activePeople.add(replacement)
+      noSelfLinks(); identityActions.push({ action: 'SPLIT', sourcePersonRef: raw.source, replacementPersonRefs: [...raw.replacements] as string[], endpointAssignments })
+    } else graphReviewInvalid()
+  }
   for (const raw of value.conflicts) {
     if (!object(raw) || Object.keys(raw).length !== 3 || !['POTENTIAL_MULTIPLE_WORKS_AT', 'POTENTIAL_MULTIPLE_ASSIGNED_TO'].includes(String(raw.kind)) ||
         !Number.isSafeInteger(raw.subjects) || !Number.isSafeInteger(raw.relationships) || (raw.subjects as number) < 1 || (raw.relationships as number) < 2) graphReviewInvalid()
   }
-  return { snapshotRef: binding.snapshotRef, revision: value.revision as number, decisions, posture: 'REVIEW_ONLY_NO_RELEASE_OR_DELIVERY' }
+  return { snapshotRef: binding.snapshotRef, revision: value.revision as number, decisions, identityActions, posture: 'REVIEW_ONLY_NO_RELEASE_OR_DELIVERY' }
 }
 
 async function boundedGraphReviewJson(response: Response, signal: AbortSignal): Promise<unknown> {
@@ -1223,7 +1271,52 @@ export async function getRecordedGraphReview(request: { apiBase: string; token: 
 
 export async function decideRecordedGraphClaim(request: { apiBase: string; token: string; binding: BatchGraphReviewBinding; graph: EntityGraph; claimRef: string; decision: 'ACCEPT' | 'REJECT'; expectedRevision: number; signal?: AbortSignal }): Promise<RecordedGraphReview> {
   if (!request.binding.claims.some(item => item.claimRef === request.claimRef) || !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0) graphReviewInvalid()
-  return parseRecordedGraphReview(await graphReviewRequest(request.apiBase, graphReviewPath(request.binding.snapshotRef, '/decisions'), request.token, 'POST', {
-    claim_ref: request.claimRef, decision: request.decision, expected_revision: request.expectedRevision,
-  }, request.signal), request.binding, request.graph)
+  try {
+    return parseRecordedGraphReview(await graphReviewRequest(request.apiBase, graphReviewPath(request.binding.snapshotRef, '/decisions'), request.token, 'POST', {
+      claim_ref: request.claimRef, decision: request.decision, expected_revision: request.expectedRevision,
+    }, request.signal), request.binding, request.graph)
+  } catch (cause) {
+    if (cause instanceof GraphReviewFailure && cause.status === undefined && cause.message.includes('response was invalid')) throw new GraphReviewFailure('Recorded decision outcome may be unverified. Reload the graph before retrying.')
+    throw cause
+  }
+}
+
+function boundPersonRef(binding: BatchGraphReviewBinding, graph: EntityGraph, ref: string): boolean {
+  if (!GRAPH_REVIEW_REF.test(ref) || !ref.startsWith('graphnode:')) return false
+  const nodeId = binding.nodes.find(item => item.nodeRef === ref)?.graphNodeId
+  return graph.nodes.some(node => node.id === nodeId && node.kind === 'person')
+}
+
+function boundClaimRef(binding: BatchGraphReviewBinding, ref: string): boolean {
+  return GRAPH_REVIEW_REF.test(ref) && ref.startsWith('graphclaim:') && binding.claims.some(item => item.claimRef === ref)
+}
+
+export async function mergeRecordedGraphIdentities(request: { apiBase: string; token: string; binding: BatchGraphReviewBinding; graph: EntityGraph; canonicalPersonRef: string; memberPersonRefs: [string, string]; expectedRevision: number; signal?: AbortSignal }): Promise<RecordedGraphReview> {
+  const members = request.memberPersonRefs
+  if (!Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 || members.length !== 2 || new Set(members).size !== 2 || !members.includes(request.canonicalPersonRef) ||
+      !boundPersonRef(request.binding, request.graph, request.canonicalPersonRef) || members.some(ref => !boundPersonRef(request.binding, request.graph, ref))) graphReviewInvalid()
+  try {
+    return parseRecordedGraphReview(await graphReviewRequest(request.apiBase, graphReviewPath(request.binding.snapshotRef, '/merges'), request.token, 'POST', {
+      canonical_person_ref: request.canonicalPersonRef, member_person_refs: members, expected_revision: request.expectedRevision,
+    }, request.signal), request.binding, request.graph)
+  } catch (cause) {
+    if (cause instanceof GraphReviewFailure && cause.status === undefined) throw new GraphReviewFailure('Recorded identity outcome may be unverified. Reload the graph before retrying.')
+    throw cause
+  }
+}
+
+export async function splitRecordedGraphIdentity(request: { apiBase: string; token: string; binding: BatchGraphReviewBinding; graph: EntityGraph; sourcePersonRef: string; replacementPersonRefs: string[]; endpointAssignments: RecordedGraphSplitAssignment[]; expectedRevision: number; signal?: AbortSignal }): Promise<RecordedGraphReview> {
+  const replacements = request.replacementPersonRefs
+  const assignments = request.endpointAssignments
+  if (!Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 || !boundPersonRef(request.binding, request.graph, request.sourcePersonRef) ||
+      replacements.length < 2 || replacements.length > 100 || new Set(replacements).size !== replacements.length || replacements.includes(request.sourcePersonRef) || replacements.some(ref => !boundPersonRef(request.binding, request.graph, ref)) || assignments.length > 200 ||
+      assignments.some(item => !boundClaimRef(request.binding, item.claimRef) || (item.endpoint !== 'source' && item.endpoint !== 'target') || !replacements.includes(item.replacementPersonRef)) || new Set(assignments.map(item => `${item.claimRef}:${item.endpoint}`)).size !== assignments.length) graphReviewInvalid()
+  try {
+    return parseRecordedGraphReview(await graphReviewRequest(request.apiBase, graphReviewPath(request.binding.snapshotRef, '/splits'), request.token, 'POST', {
+      source_person_ref: request.sourcePersonRef, replacement_person_refs: replacements, endpoint_assignments: assignments.map(item => ({ claim_ref: item.claimRef, endpoint: item.endpoint, replacement_person_ref: item.replacementPersonRef })), expected_revision: request.expectedRevision,
+    }, request.signal), request.binding, request.graph)
+  } catch (cause) {
+    if (cause instanceof GraphReviewFailure && cause.status === undefined) throw new GraphReviewFailure('Recorded identity outcome may be unverified. Reload the graph before retrying.')
+    throw cause
+  }
 }

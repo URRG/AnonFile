@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import ts from 'typescript'
 const source = readFileSync(new URL('../src/api.ts', import.meta.url), 'utf8')
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText
-const { requestRelease, validateRelease, runControlPlane, ControlPlaneFailure, DEFAULT_POLICY_NOTICE, REQUEST_TIMEOUT_MS, decodeDemoUpload, inspectSyntheticDemo, DemoInspectionFailure, DEMO_MAX_BYTES, getRecordedGraphReview, decideRecordedGraphClaim, GraphReviewFailure } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
+const { requestRelease, validateRelease, runControlPlane, ControlPlaneFailure, DEFAULT_POLICY_NOTICE, REQUEST_TIMEOUT_MS, decodeDemoUpload, inspectSyntheticDemo, DemoInspectionFailure, DEMO_MAX_BYTES, getRecordedGraphReview, decideRecordedGraphClaim, mergeRecordedGraphIdentities, splitRecordedGraphIdentity, GraphReviewFailure } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
 const request = { apiBase: 'http://localhost:8000', token: 'test-token', content: 'synthetic', recipient: 'buyer-test', mode: 'external_anonymized' }
 const safe = () => ({ id: 'release-1', dataset_id: 'dataset-1', status: 'evaluation_incomplete', eligibility: 'REVIEW_REQUIRED', output: null, card: { release_id: 'release-1', dataset_id: 'dataset-1', eligibility: 'REVIEW_REQUIRED', policy_version: 'external-release-v1', release_mode: 'external_anonymized', evidence_status: 'INSUFFICIENT_EVIDENCE', scores: null, findings: [], gates: ['EXPORT_DISABLED', 'QUALIFICATION_REQUIRED'], limitations: ['rules-only'] } })
 for (const status of [401, 403, 409, 413, 422, 429, 500, 503]) {
@@ -43,6 +43,20 @@ test('recorded decision posts only bound claim and expected revision', async t =
   t.mock.method(globalThis, 'fetch', async (_url, options) => { received = JSON.parse(options.body); return Response.json({ ...recordedPayload(4), decisions: [{ claim_ref: recordedBinding.claims[0].claimRef, decision: 'ACCEPT' }] }) })
   const view = await decideRecordedGraphClaim({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding: recordedBinding, graph: recordedGraph, claimRef: recordedBinding.claims[0].claimRef, decision: 'ACCEPT', expectedRevision: 3 })
   assert.deepEqual(received, { claim_ref: recordedBinding.claims[0].claimRef, decision: 'ACCEPT', expected_revision: 3 }); assert.deepEqual(view.decisions, [{ claimRef: recordedBinding.claims[0].claimRef, decision: 'ACCEPT' }])
+})
+
+test('recorded identity actions post only bound opaque refs and reject malformed post responses as uncertain', async t => {
+  const secondRef = `${opaque('graphnode').slice(0, -1)}C`
+  const graph = { ...recordedGraph, nodes: [...recordedGraph.nodes, { id: 'person_2', kind: 'person', label: 'Person B', documentIds: ['document_1'] }] }
+  const binding = { ...recordedBinding, nodes: [...recordedBinding.nodes, { graphNodeId: 'person_2', nodeRef: secondRef }] }
+  let received
+  t.mock.method(globalThis, 'fetch', async (_url, options) => { received = JSON.parse(options.body); return Response.json({ ...recordedPayload(1), nodes: [...recordedPayload(1).nodes, { id: secondRef, kind: 'person' }], identity_actions: [{ action: 'MERGE', canonical: recordedBinding.nodes[0].nodeRef, members: [recordedBinding.nodes[0].nodeRef, secondRef] }] }) })
+  const view = await mergeRecordedGraphIdentities({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding, graph, canonicalPersonRef: recordedBinding.nodes[0].nodeRef, memberPersonRefs: [recordedBinding.nodes[0].nodeRef, secondRef], expectedRevision: 0 })
+  assert.deepEqual(received, { canonical_person_ref: recordedBinding.nodes[0].nodeRef, member_person_refs: [recordedBinding.nodes[0].nodeRef, secondRef], expected_revision: 0 })
+  assert.deepEqual(view.identityActions, [{ action: 'MERGE', canonicalPersonRef: recordedBinding.nodes[0].nodeRef, memberPersonRefs: [recordedBinding.nodes[0].nodeRef, secondRef] }])
+  t.mock.restoreAll(); t.mock.method(globalThis, 'fetch', async () => Response.json({ invalid: true }))
+  await assert.rejects(mergeRecordedGraphIdentities({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding, graph, canonicalPersonRef: recordedBinding.nodes[0].nodeRef, memberPersonRefs: [recordedBinding.nodes[0].nodeRef, secondRef], expectedRevision: 0 }), /identity outcome may be unverified/)
+  await assert.rejects(splitRecordedGraphIdentity({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding: recordedBinding, graph: recordedGraph, sourcePersonRef: recordedBinding.nodes[0].nodeRef, replacementPersonRefs: ['unbound', 'also-unbound'], endpointAssignments: [], expectedRevision: 0 }), GraphReviewFailure)
 })
 
 test('recorded decision separates definite HTTP rejection from uncertain transport outcome', async t => {
