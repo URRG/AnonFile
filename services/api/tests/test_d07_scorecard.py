@@ -173,3 +173,100 @@ def test_malformed_format_abstention_and_direct_gold_document_fail_closed():
         assert str(error) == "Invalid D07 scorecard input."
     else:
         assert False
+
+
+def test_graph_typed_relation_pr_and_fictional_evidence_locator_agreement_are_aggregate_only():
+    values = inputs()
+    values.update(
+        graph_gold={('works_at', 'E1', 'organization_1'), ('sent_to', 'E1', 'E2')},
+        graph_automatic={('works_at', 'E1', 'organization_1'), ('assistant_to', 'E1', 'E2')},
+        graph_reviewer_corrected={('works_at', 'E1', 'organization_1'), ('sent_to', 'E1', 'E2')},
+        graph_evidence_gold={('works_at', 'E1', 'organization_1', 'L1'), ('sent_to', 'E1', 'E2', 'L3')},
+        graph_evidence_automatic={('works_at', 'E1', 'organization_1', 'L1'), ('assistant_to', 'E1', 'E2', 'L3')},
+        graph_evidence_reviewer_corrected={('works_at', 'E1', 'organization_1', 'L1'), ('sent_to', 'E1', 'E2', 'L3')},
+    )
+    report = scorecard(**values)
+    automatic = report['graph']['automatic']['precision_recall']['corpus']
+    assert automatic == {'true_positives': 1, 'false_positives': 1, 'false_negatives': 1,
+                         'precision': 0.5, 'recall': 0.5}
+    locator = report['evidence_locator_agreement']
+    assert locator['automatic']['precision_recall']['corpus']['true_positives'] == 1
+    assert locator['reviewer_corrected']['precision_recall']['per_type']['works_at']['recall'] == 1.0
+    assert 'L1' not in str(report) and 'E1' not in str(report)
+
+
+def test_identity_complete_pair_dispositions_and_merge_clusters_keep_automatic_separate():
+    values = inputs()
+    values.update(
+        identity_gold={('MERGE', 'E1', 'E2'), ('SPLIT', 'E1', 'E3'), ('SPLIT', 'E2', 'E3')},
+        identity_automatic={('SPLIT', 'E1', 'E2'), ('MERGE', 'E1', 'E3'), ('SPLIT', 'E2', 'E3')},
+        identity_reviewer_corrected={('MERGE', 'E1', 'E2'), ('SPLIT', 'E1', 'E3'), ('SPLIT', 'E2', 'E3')},
+    )
+    report = scorecard(**values)
+    automatic = report['identity']['automatic']
+    assert automatic['pair_dispositions']['MERGE'] == {
+        'true_positives': 0, 'false_positives': 1, 'false_negatives': 1, 'precision': 0.0, 'recall': 0.0}
+    assert automatic['merge_clusters']['true_positives'] == 0
+    assert report['identity']['reviewer_corrected']['pair_dispositions']['SPLIT']['recall'] == 1.0
+    assert 'E1' not in str(report)
+
+
+def test_new_graph_and_identity_slices_abstain_without_complete_fictional_labels():
+    report = scorecard(**inputs())
+    assert report['evidence_locator_agreement']['automatic'] == {
+        'status': 'ABSTAINED', 'reason': 'NO_COMPLETE_EVIDENCE_LOCATOR_LABELS'}
+    assert report['identity']['reviewer_corrected'] == {
+        'status': 'ABSTAINED', 'reason': 'NO_COMPLETE_IDENTITY_LABELS'}
+
+
+def test_identity_requires_every_pair_to_have_one_disposition():
+    values = inputs()
+    incomplete = {('MERGE', 'E1', 'E2'), ('SPLIT', 'E1', 'E3')}
+    values.update(identity_gold=incomplete, identity_automatic=incomplete,
+                  identity_reviewer_corrected=incomplete)
+    try:
+        scorecard(**values)
+    except ScorecardError as error:
+        assert str(error) == 'Invalid D07 scorecard input.'
+    else:
+        assert False
+
+
+def test_identity_rejects_conflicting_dispositions_for_one_unordered_pair():
+    values = inputs()
+    conflicting = {('MERGE', 'E1', 'E2'), ('SPLIT', 'E1', 'E2')}
+    values.update(identity_gold=conflicting, identity_automatic=conflicting,
+                  identity_reviewer_corrected=conflicting)
+    try:
+        scorecard(**values)
+    except ScorecardError as error:
+        assert str(error) == 'Invalid D07 scorecard input.'
+    else:
+        assert False
+
+
+def test_identity_rejects_split_that_contradicts_merge_closure():
+    values = inputs()
+    non_transitive = {('MERGE', 'E1', 'E2'), ('MERGE', 'E2', 'E3'), ('SPLIT', 'E1', 'E3')}
+    values.update(identity_gold=non_transitive, identity_automatic=non_transitive,
+                  identity_reviewer_corrected=non_transitive)
+    try:
+        scorecard(**values)
+    except ScorecardError as error:
+        assert str(error) == 'Invalid D07 scorecard input.'
+    else:
+        assert False
+
+
+def test_locator_prediction_must_bind_a_relation_in_its_corresponding_graph_output():
+    values = inputs()
+    values.update(graph_evidence_gold={('works_at', 'E1', 'organization_1', 'L1')},
+                  graph_evidence_automatic={('works_at', 'E1', 'organization_1', 'L1')},
+                  graph_evidence_reviewer_corrected={('works_at', 'E1', 'organization_1', 'L1')},
+                  graph_automatic=set())
+    try:
+        scorecard(**values)
+    except ScorecardError as error:
+        assert str(error) == 'Invalid D07 scorecard input.'
+    else:
+        assert False
