@@ -6,6 +6,9 @@ import ts from 'typescript'
 const navigationSource = readFileSync(new URL('../src/review-navigation.ts', import.meta.url), 'utf8')
 const navigationCompiled = ts.transpileModule(navigationSource, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText
 const { isDenseReviewGraph, moveReviewFocus, readableReviewZoom } = await import(`data:text/javascript;base64,${Buffer.from(navigationCompiled).toString('base64')}`)
+const reviewSource = readFileSync(new URL('../src/relationship-review.ts', import.meta.url), 'utf8')
+const reviewCompiled = ts.transpileModule(reviewSource, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText
+const { relationshipConflictCues, reviewStatusFor } = await import(`data:text/javascript;base64,${Buffer.from(reviewCompiled).toString('base64')}`)
 const graphSource = readFileSync(new URL('../src/relationship-graph.tsx', import.meta.url), 'utf8')
 const graphCss = readFileSync(new URL('../src/relationship-graph.css', import.meta.url), 'utf8')
 const batchSource = readFileSync(new URL('../src/batch-demo.tsx', import.meta.url), 'utf8')
@@ -34,9 +37,26 @@ test('narrow layouts scroll a readable map instead of shrinking node text to an 
 })
 
 test('review graph exposes accessible navigation, live updates, and evidence controls', () => {
-  for (const required of ['aria-live="polite"', 'aria-atomic="true"', 'relationship-map-instructions', 'moveReviewFocus', 'onKeyDown', 'aria-controls="relationship-table"', '<table className="relationship-fallback-table">', 'onInspectDocument(item.documentId, item)', "typeof ResizeObserver === 'undefined'", "window.addEventListener('resize', update)"]) {
+  for (const required of ['aria-live="polite"', 'aria-atomic="true"', 'relationship-map-instructions', 'moveReviewFocus', 'onKeyDown', 'aria-controls="relationship-table"', '<table className="relationship-fallback-table">', 'onInspectDocument(item.documentId, item)', 'relationship-edge-review', 'aria-pressed={status === next}', 'relationship-review-note', "typeof ResizeObserver === 'undefined'", "window.addEventListener('resize', update)"]) {
     assert.match(graphSource, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   }
+})
+
+test('three-document synthetic graph keeps review state ephemeral and cues only typed conflicts', () => {
+  const edges = [
+    { id: 'edge_a', type: 'works_at', sourceId: 'alias_person_01', targetId: 'alias_org_01', evidence: [{ documentId: 'document_01' }] },
+    { id: 'edge_b', type: 'works_at', sourceId: 'alias_person_01', targetId: 'alias_org_02', evidence: [{ documentId: 'document_02' }] },
+    { id: 'edge_c', type: 'assigned_to', sourceId: 'alias_project_01', targetId: 'alias_person_02', evidence: [{ documentId: 'document_03' }] },
+  ]
+  const freshReview = {}
+  assert.equal(reviewStatusFor('edge_a', freshReview), 'pending')
+  const cues = relationshipConflictCues(edges, freshReview)
+  assert.deepEqual(cues.get('edge_a'), { code: 'MULTIPLE_WORKS_AT', edgeIds: ['edge_a', 'edge_b'] })
+  assert.equal(cues.has('edge_c'), false)
+  // Rejecting one claim removes the temporary cue. Reload starts from the
+  // empty object again; no identity or adjudication is persisted here.
+  assert.equal(relationshipConflictCues(edges, { edge_b: 'rejected' }).has('edge_a'), false)
+  assert.equal(reviewStatusFor('edge_a', {}), 'pending')
 })
 
 test('review graph preserves visible focus, touch-sized controls, responsive layout, and reduced-motion support', () => {
