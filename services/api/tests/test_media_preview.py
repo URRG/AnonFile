@@ -172,6 +172,43 @@ def test_ocr_edge_guard_does_not_certify_text_from_a_graphic_edge(monkeypatch):
     assert _ocr_lines(image)[0]["text"] == "fictional OCR claim"
 
 
+def test_ocr_geometry_rejects_one_overbroad_line_that_hides_adjacent_source_ink(monkeypatch):
+    """A same-engine line cannot erase an unrecognised neighbouring value."""
+    from types import SimpleNamespace
+    from app import media_preview
+
+    source = "Maya Patel"
+    hidden = "ACCOUNT 4932"
+    image = Image.new("RGB", (360, 120), "white")
+    draw = ImageDraw.Draw(image)
+    draw.text((20, 40), source, fill="black")
+    # The old edge check passed: both regions have high-contrast edges and no
+    # second OCR line exists for the repaint-neighbour guard.
+    draw.text((180, 40), hidden, fill="black")
+    box = [(15, 30), (330, 30), (330, 65), (15, 65)]
+    monkeypatch.setattr(media_preview, "_engine", lambda: lambda _: SimpleNamespace(
+        txts=[source], boxes=[box], scores=[0.99]))
+
+    with pytest.raises(PayloadError, match="separate source-ink regions") as error:
+        _ocr_lines(image)
+    assert source not in str(error.value)
+    assert hidden not in str(error.value)
+
+
+def test_ocr_geometry_accepts_one_tight_line_with_ordinary_word_spacing(monkeypatch):
+    from types import SimpleNamespace
+    from app import media_preview
+
+    text = "Maya Patel"
+    image = Image.new("RGB", (240, 100), "white")
+    ImageDraw.Draw(image).text((20, 40), text, fill="black")
+    box = [(15, 30), (110, 30), (110, 65), (15, 65)]
+    monkeypatch.setattr(media_preview, "_engine", lambda: lambda _: SimpleNamespace(
+        txts=[text], boxes=[box], scores=[0.99]))
+
+    assert _ocr_lines(image)[0]["text"] == text
+
+
 @pytest.mark.parametrize("boxes", [
     # Adjacent cells / two columns share a vertical band. Their OCR order is
     # not proof of the intended reading order.

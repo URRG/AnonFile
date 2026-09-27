@@ -31,7 +31,9 @@ claim that OCR coverage, entity detection, or anonymization is complete.
 The corpus verifies the present conservative geometry guards for overlapping
 OCR boxes, competing same-baseline two- and three-cell rows, repeated
 vertically staggered column bands, and an actual padded repaint box that
-touches an otherwise unprocessed OCR neighbor. A real OCR screenshot case also
+touches an otherwise unprocessed OCR neighbor. It also rejects one overbroad
+OCR line whose box contains a separate, unrecognised fictional ink region: a
+local edge alone cannot authorize repainting both regions. A real OCR screenshot case also
 repaints a fictional name and checks that pixels outside its OCR box are
 unchanged. This does **not** establish general table parsing, multi-column
 reading order, or general scan quality. The interactive AcroForm is required

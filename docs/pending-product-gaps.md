@@ -62,6 +62,10 @@ supplier data. `Blocked externally` is not the same as done.
     before preview construction. This is a geometry sanity check only: a dark
     rule or JPEG artifact can also satisfy it, so it is not text support,
     readability, completeness, or a visual-coverage score.
+  - [x] A single OCR claim with material separated ink islands inside its own
+    reported box abstains. This closes the case where same-engine OCR reports
+    one value but an overbroad repaint would hide an unrecognised adjacent value;
+    it remains a local geometry guard, not an OCR-completeness claim.
   - [ ] General multi-column/table/form reading-order mapping, real OCR blur and
     coverage qualification, and visual utility thresholds remain open. These
     synthetic controls do not prove completeness or production fidelity.
