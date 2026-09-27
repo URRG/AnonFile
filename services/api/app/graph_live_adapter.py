@@ -17,7 +17,9 @@ _TYPES = {"assistant_to", "assistant_for", "works_at", "client_of", "works_on", 
 _KIND = {"person", "organization", "project"}
 _EDGE_ID = re.compile(r"^edge_[0-9a-f]{16}$")
 _MAX_NODE_DOCUMENTS = 3
-_MAX_EVIDENCE = 4
+# Must match demo_batch.MAX_GRAPH_EVIDENCE_PER_EDGE; duplicated to avoid a
+# demo_batch import cycle in this low-level ledger helper.
+_MAX_EVIDENCE = 20
 
 
 @dataclass(frozen=True)

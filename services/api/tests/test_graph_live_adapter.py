@@ -9,6 +9,17 @@ def test_empty_public_graph_builds_private_no_adjudication_ledger():
     assert ledger.nodes == () and ledger.claims_by_edge == ()
 
 
+def test_evidence_bound_matches_producer_limit():
+    value, _ = graph()
+    edge = value["edges"][0]
+    base = edge["evidence"][0]
+    edge["evidence"] = [{**base, "field": f"field_{index}"} for index in range(5)]
+    assert build_private_graph_ledger(value).claims_by_edge
+    edge["evidence"] = [{**base, "field": f"field_{index}"} for index in range(21)]
+    with pytest.raises(GraphAdjudicationError):
+        build_private_graph_ledger(value)
+
+
 def graph():
     facts = [
         {"type":"works_at","source":"A","source_kind":"person","target":"O","target_kind":"organization","document_id":"upload-a","rule":"signature","field":"company","locator":{}},
