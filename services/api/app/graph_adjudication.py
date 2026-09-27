@@ -75,7 +75,7 @@ def _validate_nodes(nodes: tuple[GraphNode, ...]) -> dict[str, str]:
     result: dict[str, str] = {}
     for node in nodes:
         if (type(node) is not GraphNode or not isinstance(node.identifier, str)
-                or not _NODE_ID.fullmatch(node.identifier) or node.kind not in _KIND
+                or not _NODE_ID.fullmatch(node.identifier) or not isinstance(node.kind, str) or node.kind not in _KIND
                 or node.identifier in result):
             _reject()
         prefix_kind = "person" if node.identifier.startswith("E") else node.identifier.split("_", 1)[0]
@@ -92,7 +92,7 @@ def _validate_claims(claims: tuple[GraphClaim, ...], nodes: dict[str, str]) -> d
     for claim in claims:
         if (type(claim) is not GraphClaim or not isinstance(claim.identifier, str)
                 or not _CLAIM_ID.fullmatch(claim.identifier) or claim.identifier in result
-                or claim.relation not in _RELATIONS or not isinstance(claim.source_id, str)
+                or not isinstance(claim.relation, str) or claim.relation not in _RELATIONS or not isinstance(claim.source_id, str)
                 or not isinstance(claim.target_id, str) or not isinstance(claim.evidence_document_id, str)
                 or not _DOCUMENT_ID.fullmatch(claim.evidence_document_id)
                 or claim.source_id not in nodes or claim.target_id not in nodes or claim.source_id == claim.target_id
@@ -107,51 +107,63 @@ def _validate_decisions(decisions: tuple[ReviewDecision, ...], claims: dict[str,
         _reject()
     result: dict[str, str] = {}
     for item in decisions:
-        if (type(item) is not ReviewDecision or item.claim_id not in claims
-                or item.decision not in {"ACCEPT", "REJECT"} or item.claim_id in result):
+        if (type(item) is not ReviewDecision or not isinstance(item.claim_id, str) or item.claim_id not in claims
+                or not isinstance(item.decision, str) or item.decision not in {"ACCEPT", "REJECT"} or item.claim_id in result):
             _reject()
         result[item.claim_id] = item.decision
     return result
 
 
-def _identity_map(merges: tuple[IdentityMerge, ...], nodes: dict[str, str]) -> dict[str, str]:
+def _identity_map(merges: tuple[IdentityMerge, ...], nodes: dict[str, str]) -> tuple[dict[str, str], frozenset[str]]:
     if type(merges) is not tuple or len(merges) > len(nodes):
         _reject()
     aliases = {identifier: identifier for identifier in nodes}
     seen: set[str] = set()
     for merge in merges:
-        members = merge.member_person_ids if type(merge) is IdentityMerge else ()
-        if (type(merge) is not IdentityMerge or merge.canonical_person_id not in nodes
+        if type(merge) is not IdentityMerge:
+            _reject()
+        members = merge.member_person_ids
+        if (not isinstance(merge.canonical_person_id, str) or merge.canonical_person_id not in nodes
                 or nodes[merge.canonical_person_id] != "person" or type(members) is not tuple
-                or len(members) < 2 or len(set(members)) != len(members)
+                or len(members) < 2 or not all(isinstance(member, str) for member in members)
+                or len(set(members)) != len(members)
                 or merge.canonical_person_id not in members or any(member not in nodes or nodes[member] != "person" for member in members)
                 or seen.intersection(members)):
             _reject()
         seen.update(members)
         for member in members:
             aliases[member] = merge.canonical_person_id
-    return aliases
+    return aliases, frozenset(seen)
 
 
 def _apply_splits(splits: tuple[IdentitySplit, ...], claims: dict[str, GraphClaim], nodes: dict[str, str],
-                  decisions: dict[str, str], aliases: dict[str, str]) -> tuple[dict[str, str], int]:
+                  decisions: dict[str, str], aliases: dict[str, str], merged_people: frozenset[str]) -> tuple[dict[str, str], int]:
     if type(splits) is not tuple or len(splits) > len(nodes):
         _reject()
     replacements: dict[str, str] = {}
     assigned_claims: set[str] = set()
     affected_count = 0
     for split in splits:
-        if type(split) is not IdentitySplit or split.source_person_id not in nodes or nodes[split.source_person_id] != "person":
+        if (type(split) is not IdentitySplit or not isinstance(split.source_person_id, str)
+                or split.source_person_id not in nodes or nodes[split.source_person_id] != "person"):
             _reject()
         children = split.replacement_person_ids
-        if (type(children) is not tuple or len(children) < 2 or len(set(children)) != len(children)
+        if (type(children) is not tuple or len(children) < 2 or not all(isinstance(child, str) for child in children)
+                or len(set(children)) != len(children)
                 or split.source_person_id in children or any(child not in nodes or nodes[child] != "person" for child in children)
-                or split.source_person_id in replacements or aliases[split.source_person_id] != split.source_person_id):
+                or split.source_person_id in replacements or aliases[split.source_person_id] != split.source_person_id
+                or split.source_person_id in merged_people or any(child in merged_people for child in children)):
             _reject()
         affected = {identifier for identifier, claim in claims.items()
                     if decisions.get(identifier) != "REJECT" and split.source_person_id in {claim.source_id, claim.target_id}}
-        assignments = dict(split.claim_assignments) if type(split.claim_assignments) is tuple else None
-        if (assignments is None or len(assignments) != len(split.claim_assignments)
+        if type(split.claim_assignments) is not tuple:
+            _reject()
+        pairs = split.claim_assignments
+        if any(type(pair) is not tuple or len(pair) != 2 or not isinstance(pair[0], str) or not isinstance(pair[1], str)
+               for pair in pairs):
+            _reject()
+        assignments = dict(pairs)
+        if (len(assignments) != len(pairs)
                 or set(assignments) != affected or any(target not in children for target in assignments.values())):
             _reject()
         # One assignment selects one replacement *endpoint*.  A person-person
@@ -171,11 +183,14 @@ def adjudicate(*, nodes: tuple[GraphNode, ...], claims: tuple[GraphClaim, ...],
                decisions: tuple[ReviewDecision, ...] = (), merges: tuple[IdentityMerge, ...] = (),
                splits: tuple[IdentitySplit, ...] = ()) -> dict[str, object]:
     """Return a source-free summary of bounded, in-memory review actions."""
-    node_kinds = _validate_nodes(nodes)
-    claim_by_id = _validate_claims(claims, node_kinds)
-    decision_by_claim = _validate_decisions(decisions, claim_by_id)
-    aliases = _identity_map(merges, node_kinds)
-    split_targets, split_claims = _apply_splits(splits, claim_by_id, node_kinds, decision_by_claim, aliases)
+    try:
+        node_kinds = _validate_nodes(nodes)
+        claim_by_id = _validate_claims(claims, node_kinds)
+        decision_by_claim = _validate_decisions(decisions, claim_by_id)
+        aliases, merged_people = _identity_map(merges, node_kinds)
+        split_targets, split_claims = _apply_splits(splits, claim_by_id, node_kinds, decision_by_claim, aliases, merged_people)
+    except (TypeError, ValueError, KeyError):
+        _reject()
 
     counts = Counter(decision_by_claim.values())
     by_type: dict[str, Counter[str]] = {relation: Counter() for relation in sorted(_RELATIONS)}

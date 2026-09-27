@@ -67,3 +67,30 @@ def test_accepted_person_edge_collapsed_by_merge_fails_closed():
     with pytest.raises(GraphAdjudicationError, match="^Invalid ephemeral graph adjudication input\\.$"):
         adjudicate(nodes=nodes, claims=claims, decisions=(ReviewDecision("claim_7", "ACCEPT"),),
                    merges=(IdentityMerge("E1", ("E1", "E2")),))
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda nodes, claims: dict(nodes=(GraphNode("E1", []),)),
+    lambda nodes, claims: dict(claims=(GraphClaim("claim_1", [], "E1", "E2", "doc_1"),)),
+    lambda nodes, claims: dict(decisions=(ReviewDecision([], "ACCEPT"),)),
+    lambda nodes, claims: dict(merges=(IdentityMerge([], ("E1", "E2")),)),
+    lambda nodes, claims: dict(merges=(IdentityMerge("E1", ("E1", [])),)),
+    lambda nodes, claims: dict(splits=(IdentitySplit([], ("E5", "E6"), ()),)),
+    lambda nodes, claims: dict(splits=(IdentitySplit("E3", ("E5", []), ()),)),
+    lambda nodes, claims: dict(splits=(IdentitySplit("E3", ("E5", "E6"), (([], "E5"),)),)),
+])
+def test_malformed_direct_dataclass_fields_fail_with_the_fixed_error(mutate):
+    nodes, claims = fixture_graph()
+    values = {"nodes": nodes, "claims": claims}
+    values.update(mutate(nodes, claims))
+    with pytest.raises(GraphAdjudicationError, match="^Invalid ephemeral graph adjudication input\\.$"):
+        adjudicate(**values)
+
+
+def test_split_and_merge_cannot_share_any_person_identity():
+    nodes, claims = fixture_graph()
+    with pytest.raises(GraphAdjudicationError, match="^Invalid ephemeral graph adjudication input\\.$"):
+        adjudicate(nodes=nodes, claims=claims,
+                   decisions=(ReviewDecision("claim_4", "ACCEPT"),),
+                   merges=(IdentityMerge("E5", ("E5", "E6")),),
+                   splits=(IdentitySplit("E3", ("E5", "E6"), (("claim_4", "E6"),)),))

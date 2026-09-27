@@ -28,6 +28,10 @@ is incident to two split identities fails closed instead of overwriting one
 endpoint. Similarly, an accepted person-to-person edge that would collapse to
 a self-link after a merge fails closed.
 
+Merges and splits cannot share a person: neither a split source nor a split
+replacement may participate in a merge in the same call. This avoids inventing
+an order or silently retaining a non-canonical replacement identity.
+
 ## Explicit limits
 
 This prototype has no route, UI control, persistence, identity registry,
