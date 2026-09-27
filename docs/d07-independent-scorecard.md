@@ -51,6 +51,24 @@ media-redaction, residual-disclosure, or release-safety claim.
 
 It is not a benchmark, adjudication system, release gate, or identity-resolution proof. Reports omit text and document IDs. Abstained documents are excluded from every span metric and format slice; an all-abstained span set has no metrics. Empty/unsupported slices and final-artifact checks remain explicit abstentions.
 
+### Coverage-aware recall bounds
+
+The v2 synthetic scorecard additionally emits `coverage_aware_recall` for the
+automatic and reviewer-corrected inputs, overall and per source format/entity
+type. It preserves the existing assessed-only exact-span measurements and
+adds eligible, assessed, and abstained document and gold-positive counts.
+`conditional_recall` is recall on assessed gold positives only. The
+`operational_recall_lower_bound` treats every gold positive in an abstained
+document as missed; the upper bound treats each as potentially found. Thus an
+all-abstained slice with positive gold has conditional recall `null`, a lower
+bound of `0`, and an upper bound of `1`, never a perfect result. A slice with
+no eligible gold positives has `null` recall and bounds.
+
+These are deterministic accounting bounds over complete, fictional supplied
+labels, not confidence intervals, representative performance, independent
+evaluation, or a release threshold. Reviewer-corrected bounds measure the
+supplied synthetic workflow result, not automatic detector performance.
+
 ## Synthetic demo integration
 
 When a complete, reviewer-supplied synthetic reference-label set is attached
