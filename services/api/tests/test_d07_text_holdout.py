@@ -36,6 +36,28 @@ def test_frozen_text_holdout_reports_only_exact_aggregate_text_metrics():
     assert "jules@example.test" not in encoded and "text-001" not in encoded
 
 
+def test_existing_crlf_worktree_fixture_has_same_locked_content(tmp_path):
+    copied = tmp_path / "crlf-fixture"
+    copied.mkdir()
+    for source in FIXTURE.iterdir():
+        raw = source.read_bytes()
+        assert b"\r" not in raw
+        (copied / source.name).write_bytes(raw.replace(b"\n", b"\r\n"))
+    assert run_fixture(copied) == run_fixture(FIXTURE)
+    assert run_live_detector_fixture(copied) == run_live_detector_fixture(FIXTURE)
+
+
+def test_lone_carriage_return_is_not_a_fallback_canonicalization(tmp_path):
+    copied = tmp_path / "lone-cr-fixture"
+    copied.mkdir()
+    for source in FIXTURE.iterdir():
+        (copied / source.name).write_bytes(source.read_bytes())
+    lock = copied / "fixture-lock.json"
+    lock.write_bytes(lock.read_bytes().replace(b"\n", b"\r", 1))
+    with pytest.raises(D07TextHoldoutError):
+        run_fixture(copied)
+
+
 @pytest.mark.parametrize("filename", ["gold.jsonl", "automatic-predictions.jsonl", "annotation-protocol.md"])
 def test_fixture_or_hash_drift_fails_closed(tmp_path, filename):
     copied = tmp_path / "fixture"

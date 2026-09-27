@@ -11,6 +11,10 @@ or lock drift fails without a report. The lock file is itself source-pinned,
 so changing an input and its lock together cannot silently redefine the
 fixture. It emits aggregate exact-span counts by
 entity type and `text` format only, without source text or fixture IDs.
+Hashes bind canonical LF content: CRLF-only copies left in existing Windows
+worktrees are accepted as the same fixture, while lone carriage returns and
+all other content drift fail closed. New checkouts preserve fixture bytes via
+`.gitattributes`; this compatibility rule does not relax annotation changes.
 
 This is deliberately a narrow regression slice, not D07 completion or a
 generalization claim. It is `NOT_QUALIFIED`: PDF, image, OCR, graph, and
