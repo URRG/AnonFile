@@ -36,9 +36,17 @@ test('narrow layouts scroll a readable map instead of shrinking node text to an 
   assert.equal(readableReviewZoom(1200, 1100), 1)
 })
 
-test('review graph exposes accessible navigation, live updates, and evidence controls', () => {
-  for (const required of ['aria-live="polite"', 'aria-atomic="true"', 'relationship-map-instructions', 'moveReviewFocus', 'onKeyDown', 'aria-controls="relationship-table"', '<table className="relationship-fallback-table">', 'onInspectDocument(item.documentId, item)', 'relationship-edge-review', 'relationship-review-select', 'sourceLabel} ${edgeLabel[edge.type]} ${targetLabel}', 'relationship-review-note', "typeof ResizeObserver === 'undefined'", "window.addEventListener('resize', update)"]) {
+test('review graph exposes roving keyboard navigation, concise updates, and evidence controls', () => {
+  for (const required of ['role="status" aria-live="polite"', 'tabIndex={isSelected ? 0 : -1}', 'relationship-map-instructions', 'moveReviewFocus', 'onKeyDown', 'aria-controls="relationship-table"', '<table className="relationship-fallback-table">', 'onInspectDocument(item.documentId, item)', 'relationship-edge-review', 'relationship-review-select', 'sourceLabel} ${edgeLabel[edge.type]} ${targetLabel}', 'relationship-review-note', "typeof ResizeObserver === 'undefined'", "window.addEventListener('resize', update)"]) {
     assert.match(graphSource, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  }
+  assert.doesNotMatch(graphSource, /<aside className="relationship-map-detail" aria-live/)
+  assert.doesNotMatch(graphSource, /aria-atomic="true"/)
+})
+
+test('document selector implements roving ARIA tabs and document-level evidence returns focus to status', () => {
+  for (const required of ['role="tab"', 'aria-controls="document-comparison-panel"', 'tabIndex={isSelected ? 0 : -1}', "['ArrowLeft', 'ArrowRight', 'Home', 'End']", 'role="tabpanel"', 'aria-labelledby={`document-tab-${selected.id}`}', 'const provenanceStatus = useRef<HTMLParagraphElement | null>(null)', 'provenanceStatus.current', 'tabIndex={-1}', "provenanceTarget.locator.status === 'SUPPORTED'"]) {
+    assert.match(batchSource, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   }
 })
 

@@ -5,11 +5,14 @@ does not authorize release, export, or processing of real supplier data.
 
 ## Implemented checks
 
-- Map nodes are buttons with an announced selected state. Left/Right and
-  Up/Down move focus through visible nodes; Home and End move to the bounds.
-- The selected node and its visible explicit links are announced in a polite
-  live region. Zoom percentage, evidence buttons, map controls, and table
-  controls have accessible labels.
+- Map nodes use roving `tabIndex`: exactly the selected visible node is in the
+  tab order. Left/Right and Up/Down move focus through visible nodes; Home and
+  End move to the bounds, including in dense graphs.
+- The document selector is a roving ARIA tab list with labelled tab-panel
+  ownership and Left/Right, Home, and End navigation. The selected node and
+  its relationship count are announced in a concise polite status region;
+  the interactive detail panel is not a live region. Zoom percentage,
+  evidence buttons, map controls, and table controls have accessible labels.
 - Strong `:focus-visible` outlines are present for the map, node controls,
   evidence buttons, table scroller, and controls. Every actionable
   detail/evidence/table control has a 44px minimum target. Motion is disabled
@@ -23,9 +26,12 @@ does not authorize release, export, or processing of real supplier data.
   semantic relationship table automatically. Each table source/target selects
   that node; each evidence button opens the same precise evidence workflow as
   the detail panel.
+- Document-level-only evidence moves focus to the persistent result status
+  after the graph view unmounts, instead of losing it to the document body.
 
 Automated evidence: `npm test` includes `tests/review-ui.test.mjs`, which
-checks the focus helper, dense-batch threshold, target-size and reduced-motion
+checks the focus helper, dense-batch threshold, roving graph/document tabs,
+durable document-level focus fallback, target-size and reduced-motion
 contracts, and required accessibility/responsive source contracts. These are
 static source-contract checks, not rendered browser interaction tests. `npm run
 build` type-checks and bundles the UI.
