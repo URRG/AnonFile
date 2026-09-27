@@ -10,20 +10,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import pypdfium2 as pdfium
-from PIL import Image, ImageDraw, ImageFont
 from reportlab.pdfgen.canvas import Canvas
 
 
 HERE = Path(__file__).parent
-def _font(size: int) -> ImageFont.ImageFont:
-    return ImageFont.load_default(size=size)
-
-
-def _pdf_page() -> None:
-    source = HERE / "pdf-page-1-source.pdf"
+def _render_pdf(source_name: str, output_name: str, marker: str) -> None:
+    source = HERE / source_name
     canvas = Canvas(str(source), pagesize=(720, 160), invariant=1)
     canvas.setFont("Helvetica-Bold", 30)
-    canvas.drawString(36, 82, "D07-FINAL-ALPHA-91")
+    canvas.drawString(36, 82, marker)
     canvas.save()
     document = pdfium.PdfDocument(source.read_bytes())
     try:
@@ -32,7 +27,7 @@ def _pdf_page() -> None:
             bitmap = page.render(scale=1.0, rev_byteorder=True)
             try:
                 image = bitmap.to_pil().convert("RGB")
-                image.save(HERE / "pdf-page-1.png", format="PNG", optimize=False)
+                image.save(HERE / output_name, format="PNG", optimize=False)
             finally:
                 bitmap.close()
         finally:
@@ -41,12 +36,6 @@ def _pdf_page() -> None:
         document.close()
 
 
-def _image() -> None:
-    image = Image.new("RGB", (720, 160), "white")
-    ImageDraw.Draw(image).text((36, 55), "D07-FINAL-BRAVO-27", fill="black", font=_font(30))
-    image.save(HERE / "image-1.png", format="PNG", optimize=False)
-
-
 if __name__ == "__main__":
-    _pdf_page()
-    _image()
+    _render_pdf("pdf-page-1-source.pdf", "pdf-page-1.png", "D07-FINAL-ALPHA-91")
+    _render_pdf("image-1-source.pdf", "image-1.png", "D07-FINAL-BRAVO-27")

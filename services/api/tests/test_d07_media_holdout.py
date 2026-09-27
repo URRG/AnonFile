@@ -1,15 +1,22 @@
 import json
 import hashlib
+import os
 from pathlib import Path
+import subprocess
 
 import pytest
 from PIL import Image
 
 from app.d07_media_holdout import (EvaluationStatus, MediaKind, RenderedPixels,
                                    TesseractPixelOcr, evaluate_final_pixels)
+from app.tesseract_verifier import TesseractCliVerifier
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "d07_media_holdout"
+LOCAL_TESSERACT = Path("C:/Users/utkar/Documents/Codex/2026-09-19/ca/tools/tesseract-5.5.3/runtime/tesseract.exe")
+LOCAL_TESSDATA = LOCAL_TESSERACT.parent / "tessdata"
+LOCAL_EXECUTABLE_SHA256 = "c66f0f12ed76f6aa455dac97684bbc86756d6a732380bee09122454cfda3f420"
+LOCAL_ENG_SHA256 = "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2"
 
 
 class StubOcr:
@@ -142,6 +149,7 @@ def test_fixtures_are_real_decodable_pngs_with_pinned_bytes_and_pdf_provenance()
             assert image.format == "PNG"
             image.load()
     assert (FIXTURE / "pdf-page-1-source.pdf").read_bytes().startswith(b"%PDF-")
+    assert (FIXTURE / "image-1-source.pdf").read_bytes().startswith(b"%PDF-")
 
 
 def test_non_png_bytes_are_rejected_before_generic_ocr(monkeypatch) -> None:
@@ -153,3 +161,19 @@ def test_non_png_bytes_are_rejected_before_generic_ocr(monkeypatch) -> None:
     report = evaluate_final_pixels(rendered=(RenderedPixels("image-1", bad),), ocr=ocr, fixture_directory=FIXTURE)
     assert report["status"] == EvaluationStatus.BLOCKED.value
     assert ocr.calls == []
+
+
+@pytest.mark.skipif(os.environ.get("RUN_D07_TESSERACT_INTEGRATION") != "1" or not (LOCAL_TESSERACT.is_file() and (LOCAL_TESSDATA / "eng.traineddata").is_file()),
+                    reason="set RUN_D07_TESSERACT_INTEGRATION=1 with the pinned local Tesseract runtime")
+def test_opt_in_pinned_tesseract_reads_exact_fictional_final_pngs_only() -> None:
+    environment = {"TESSDATA_PREFIX": str(LOCAL_TESSDATA), "SystemRoot": os.environ["SystemRoot"]}
+    version = subprocess.run([str(LOCAL_TESSERACT), "--version"], check=True, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, env=environment, timeout=5).stdout.decode("utf-8")
+    runtime_identity = hashlib.sha256(f"tesseract-cli-stdin-psm6-v1\n{version.strip()}".encode()).hexdigest()
+    verifier = TesseractCliVerifier(executable=LOCAL_TESSERACT, allowed_executables=(LOCAL_TESSERACT,),
+        expected_executable_sha256=LOCAL_EXECUTABLE_SHA256, expected_runtime_identity=runtime_identity,
+        tessdata_directory=LOCAL_TESSDATA, allowed_tessdata_directories=(LOCAL_TESSDATA,),
+        expected_eng_traineddata_sha256=LOCAL_ENG_SHA256)
+    report = evaluate_final_pixels(rendered=pixels(), ocr=TesseractPixelOcr(verifier), fixture_directory=FIXTURE)
+    assert report["status"] == EvaluationStatus.SYNTHETIC_CANARIES_CONFIRMED.value
+    assert report["qualification"] == "NOT_QUALIFIED"

@@ -21,7 +21,7 @@ from app.tesseract_verifier import TesseractCliVerifier
 
 VERSION = "d07-synthetic-media-final-pixels-v1"
 _FIXTURE_DIRECTORY = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "d07_media_holdout"
-_MANIFEST_SHA256 = "8ceeffdad535192b675ef554162e083239016b8953c82c006618c4ba3dca1941"
+_MANIFEST_SHA256 = "9d297e44ec83700c038dc95c8d45952311f3ddf60abd81aa1c0b779546dec8f4"
 _MAX_CASES = 16
 _MAX_MANIFEST_BYTES = 16_384
 _MAX_PIXELS_PER_CASE = 10_000_000

@@ -151,7 +151,8 @@ supplier data. `Blocked externally` is not the same as done.
     Each fictional fixture now pins its exact final-raster SHA-256 and records
     expected-final/forbidden-source synthetic canaries. The optional adapter
     consumes only an already provisioned, hash- and runtime-pinned Tesseract
-    verifier; it has no PATH fallback and remains unavailable by default. The
+    verifier, with a pinned allowlisted tessdata directory and `eng.traineddata`
+    SHA-256; it has no PATH or ambient-model fallback and remains unavailable by default. The
     final rasters are bounded, decoded PNG fixtures (including a tiny
     PDF-rendered fictional page with adjacent source provenance), not opaque
     placeholder bytes or real-media evidence.

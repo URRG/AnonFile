@@ -3,6 +3,6 @@
   "fixture_id": "d07-synthetic-media-final-pixels-v1",
   "cases": [
     {"case_id": "pdf-page-1", "kind": "pdf_rendered_page", "final_raster_sha256": "1ae407bd196dc90b3dc929cf9e6f976d984f20794622fe1fa7919aa6423faeb6", "expected_final_markers": ["D07-FINAL-ALPHA-91"], "forbidden_markers": ["D07-SOURCE-ALPHA-91"]},
-    {"case_id": "image-1", "kind": "image", "final_raster_sha256": "23343631ff16ee35b85b5f3aa861626a7de13cd53fed6d6de38571f2ced35fbd", "expected_final_markers": ["D07-FINAL-BRAVO-27"], "forbidden_markers": ["D07-SOURCE-BRAVO-27"]}
+    {"case_id": "image-1", "kind": "image", "final_raster_sha256": "b8adc41938d0329331203332fb8531c0d943b9c0ce884a26fe1a48ac681761db", "expected_final_markers": ["D07-FINAL-BRAVO-27"], "forbidden_markers": ["D07-SOURCE-BRAVO-27"]}
   ]
 }
