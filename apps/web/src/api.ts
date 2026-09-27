@@ -161,6 +161,14 @@ export type BatchAggregateScorecard = { status: 'OBSERVATIONAL_ONLY'; classifica
 export type BatchGraphReviewBinding = { snapshotRef: string; nodes: { graphNodeId: string; nodeRef: string }[];
   claims: { graphEdgeId: string; claimRef: string }[];
   posture: 'DEVELOPMENT_BINDING_ONLY_NO_ADJUDICATION_OR_RELEASE' }
+export type RecordedGraphDecision = { claimRef: string; decision: 'ACCEPT' | 'REJECT' }
+export type RecordedGraphReview = { snapshotRef: string; revision: number; decisions: RecordedGraphDecision[];
+  posture: 'REVIEW_ONLY_NO_RELEASE_OR_DELIVERY' }
+
+/** Source-safe failure for the optional encrypted development review seam. */
+export class GraphReviewFailure extends Error {
+  constructor(message: string, readonly status?: number) { super(message); this.name = 'GraphReviewFailure' }
+}
 export type BatchInspection = { posture: 'SYNTHETIC_DEMO_ONLY'; releaseAuthorized: false; exportAvailable: false;
   documents: BatchDocument[]; entities: BatchEntity[]; relationships: BatchRelationship[]; entityGraph: EntityGraph;
   graphReview: BatchGraphReviewBinding | null;
@@ -1107,4 +1115,82 @@ export async function runControlPlane(request: ControlPlaneRequest): Promise<Con
     clearTimeout(timer)
     request.signal?.removeEventListener('abort', cancel)
   }
+}
+
+const GRAPH_REVIEW_REF = /^graph(?:snap|node|claim):v1:[A-Za-z0-9_-]{43}$/
+
+function graphReviewInvalid(): never {
+  throw new GraphReviewFailure('The recorded review response was invalid. No decision was applied.')
+}
+
+function graphReviewPath(snapshotRef: string, suffix = ''): string {
+  if (!GRAPH_REVIEW_REF.test(snapshotRef) || !snapshotRef.startsWith('graphsnap:')) graphReviewInvalid()
+  return `/graph-reviews/${encodeURIComponent(snapshotRef)}${suffix}`
+}
+
+function parseRecordedGraphReview(value: unknown, binding: BatchGraphReviewBinding, graph: EntityGraph): RecordedGraphReview {
+  if (!object(value) || Object.keys(value).length !== 8 || value.snapshot_ref !== binding.snapshotRef ||
+      !Number.isSafeInteger(value.revision) || (value.revision as number) < 0 ||
+      value.posture !== 'REVIEW_ONLY_NO_RELEASE_OR_DELIVERY' || !Array.isArray(value.nodes) ||
+      !Array.isArray(value.claims) || !Array.isArray(value.decisions) || !Array.isArray(value.identity_actions) || !Array.isArray(value.conflicts)) graphReviewInvalid()
+  const nodeBindings = new Map(binding.nodes.map(item => [item.nodeRef, item.graphNodeId]))
+  const claimBindings = new Map(binding.claims.map(item => [item.claimRef, item.graphEdgeId]))
+  if (nodeBindings.size !== graph.nodes.length || claimBindings.size !== graph.edges.length) graphReviewInvalid()
+  const remainingNodes = new Set(nodeBindings.keys())
+  for (const raw of value.nodes) {
+    if (!object(raw) || Object.keys(raw).length !== 2 || typeof raw.id !== 'string' || !remainingNodes.delete(raw.id) ||
+        !['person', 'organization', 'project'].includes(String(raw.kind))) graphReviewInvalid()
+    const graphNode = graph.nodes.find(node => node.id === nodeBindings.get(raw.id as string))
+    if (!graphNode || graphNode.kind !== raw.kind) graphReviewInvalid()
+  }
+  const remainingClaims = new Set(claimBindings.keys())
+  for (const raw of value.claims) {
+    if (!object(raw) || Object.keys(raw).length !== 4 || typeof raw.id !== 'string' || !remainingClaims.delete(raw.id) ||
+        typeof raw.relation !== 'string' || typeof raw.source !== 'string' || typeof raw.target !== 'string') graphReviewInvalid()
+    const graphEdge = graph.edges.find(edge => edge.id === claimBindings.get(raw.id as string))
+    if (!graphEdge || graphEdge.type !== raw.relation || nodeBindings.get(raw.source) !== graphEdge.sourceId || nodeBindings.get(raw.target) !== graphEdge.targetId) graphReviewInvalid()
+  }
+  if (remainingNodes.size || remainingClaims.size) graphReviewInvalid()
+  const seen = new Set<string>(); const decisions: RecordedGraphDecision[] = []
+  for (const raw of value.decisions) {
+    if (!object(raw) || Object.keys(raw).length !== 2 || typeof raw.claim_ref !== 'string' || !claimBindings.has(raw.claim_ref) ||
+        !['ACCEPT', 'REJECT'].includes(String(raw.decision)) || seen.has(raw.claim_ref)) graphReviewInvalid()
+    seen.add(raw.claim_ref); decisions.push({ claimRef: raw.claim_ref, decision: raw.decision as 'ACCEPT' | 'REJECT' })
+  }
+  // This narrow panel has no identity editor. Do not even retain a response
+  // containing overlays that it cannot bind and display safely.
+  if (value.identity_actions.length !== 0) graphReviewInvalid()
+  for (const raw of value.conflicts) {
+    if (!object(raw) || Object.keys(raw).length !== 3 || !['POTENTIAL_MULTIPLE_WORKS_AT', 'POTENTIAL_MULTIPLE_ASSIGNED_TO'].includes(String(raw.kind)) ||
+        !Number.isSafeInteger(raw.subjects) || !Number.isSafeInteger(raw.relationships) || (raw.subjects as number) < 1 || (raw.relationships as number) < 2) graphReviewInvalid()
+  }
+  return { snapshotRef: binding.snapshotRef, revision: value.revision as number, decisions, posture: 'REVIEW_ONLY_NO_RELEASE_OR_DELIVERY' }
+}
+
+async function graphReviewRequest(apiBase: string, path: string, token: string, method: 'GET' | 'POST', body: unknown | undefined, signal?: AbortSignal): Promise<unknown> {
+  if (!token.trim()) throw new GraphReviewFailure('A reviewer token is required. It is held only in this page until reload.')
+  let response: Response
+  try {
+    response = await fetch(apiBase.replace(/\/$/, '') + path, { method, credentials: 'omit', redirect: 'error', cache: 'no-store', signal,
+      headers: { Authorization: `Bearer ${token.trim()}`, ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}) },
+      ...(method === 'POST' ? { body: JSON.stringify(body) } : {}) })
+  } catch {
+    throw new GraphReviewFailure('Cannot reach the recorded review service. No decision was applied.')
+  }
+  if (!response.ok) {
+    const messages: Record<number, string> = { 401: 'Reviewer authentication is required.', 403: 'This token is not permitted to review recorded graphs.', 404: 'This recorded graph is unavailable or no longer belongs to this reviewer.', 409: 'This graph changed. Reload it before submitting another decision.' }
+    throw new GraphReviewFailure(messages[response.status] ?? 'The recorded review request failed. No decision was applied.', response.status)
+  }
+  try { return await response.json() } catch { graphReviewInvalid() }
+}
+
+export async function getRecordedGraphReview(request: { apiBase: string; token: string; binding: BatchGraphReviewBinding; graph: EntityGraph; signal?: AbortSignal }): Promise<RecordedGraphReview> {
+  return parseRecordedGraphReview(await graphReviewRequest(request.apiBase, graphReviewPath(request.binding.snapshotRef), request.token, 'GET', undefined, request.signal), request.binding, request.graph)
+}
+
+export async function decideRecordedGraphClaim(request: { apiBase: string; token: string; binding: BatchGraphReviewBinding; graph: EntityGraph; claimRef: string; decision: 'ACCEPT' | 'REJECT'; expectedRevision: number; signal?: AbortSignal }): Promise<RecordedGraphReview> {
+  if (!request.binding.claims.some(item => item.claimRef === request.claimRef) || !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0) graphReviewInvalid()
+  return parseRecordedGraphReview(await graphReviewRequest(request.apiBase, graphReviewPath(request.binding.snapshotRef, '/decisions'), request.token, 'POST', {
+    claim_ref: request.claimRef, decision: request.decision, expected_revision: request.expectedRevision,
+  }, request.signal), request.binding, request.graph)
 }

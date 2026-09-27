@@ -124,12 +124,17 @@ supplier data. `Blocked externally` is not the same as done.
     SQLite storage is configured. At most eight active bridge snapshots are
     admitted per tenant; memory-only demos omit the binding. This does not
     record a reviewer action or change the generated graph.
-  - [ ] User-facing recorded graph review is still unavailable in the synthetic
-    demo. The development-only reviewer API has durable merge/split actions,
-    but the UI does not use the optional snapshot binding or expose recorded
-    decisions. Its node/edge IDs alone remain response-local, not durable
-    correction keys. Conflict resolution, external audit anchoring, and
-    multi-host persistence are also not established.
+  - [x] When an encrypted-SQLite development batch returns its optional
+    binding, the graph UI can hold a reviewer token in React memory, load the
+    reviewer-only source-free snapshot, and submit bound accept/reject claim
+    decisions with its current revision. Strict client validation rejects
+    changed bindings, unknown claims/endpoints, unsafe response fields, and
+    401/403/404/409 responses fail closed. Memory-only demos still show only
+    the temporary controls and never request a recorded review.
+  - [ ] The user-facing recorded panel deliberately has no merge/split editor,
+    conflict-resolution workflow, external audit anchoring, or multi-host
+    persistence. Recorded decisions remain development-only and do not
+    authorize release, delivery, export, or real-world identity resolution.
 - [ ] **D07 — Independent demo scorecard.** Evaluate untouched final pixels and
   text with a different engine/annotated ground truth; separate automatic
   detector scores from reviewer corrections and measure graph/link quality.

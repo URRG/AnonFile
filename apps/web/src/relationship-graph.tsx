@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown, ChevronUp, Focus, Minus, Plus } from 'lucide-react'
-import type { EntityGraph, EntityGraphEdge, EntityGraphEvidence, EntityGraphNode } from './api'
+import { decideRecordedGraphClaim, getRecordedGraphReview, type BatchGraphReviewBinding, type EntityGraph, type EntityGraphEdge, type EntityGraphEvidence, type EntityGraphNode, type RecordedGraphReview } from './api'
 import { isDenseReviewGraph, moveReviewFocus, readableReviewZoom } from './review-navigation'
 import { relationshipConflictCues, reviewStatusFor, selectionForGraph, validateMergeProposal, type EphemeralEdgeReview, type GraphSelection, type RelationshipConflictCue } from './relationship-review'
 import './relationship-graph.css'
@@ -49,7 +49,17 @@ function EdgeReviewControls({ edge, sourceLabel, targetLabel, status, cue, onSta
   </div>
 }
 
-export function RelationshipGraph({ graph, documentNames, onInspectDocument }: { graph: EntityGraph; documentNames: Map<string, string>; onInspectDocument: (id: string, evidence: EntityGraphEvidence) => void }) {
+function RecordedGraphReviewPanel({ graph, binding, apiBase }: { graph: EntityGraph; binding: BatchGraphReviewBinding; apiBase: string }) {
+  const [token, setToken] = useState(''); const [review, setReview] = useState<RecordedGraphReview | null>(null); const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState('Enter a reviewer token, then load the recorded development review.')
+  const claimToEdge = useMemo(() => new Map(binding.claims.map(item => [item.claimRef, graph.edges.find(edge => edge.id === item.graphEdgeId)])), [binding, graph])
+  const load = async () => { if (busy) return; setBusy(true); setMessage('Loading recorded review…'); try { setReview(await getRecordedGraphReview({ apiBase, token, binding, graph })); setMessage('Recorded review loaded. Decisions write only to the configured encrypted development store.') } catch (cause) { setReview(null); setMessage(cause instanceof Error ? cause.message : 'Recorded review could not be loaded.') } finally { setBusy(false) } }
+  const decide = async (claimRef: string, decision: 'ACCEPT' | 'REJECT') => { if (!review || busy) return; setBusy(true); setMessage('Saving recorded decision…'); try { setReview(await decideRecordedGraphClaim({ apiBase, token, binding, graph, claimRef, decision, expectedRevision: review.revision })); setMessage('Recorded decision saved. It is not a release, delivery, export, or identity-resolution decision.') } catch (cause) { setMessage(cause instanceof Error ? cause.message : 'Recorded decision could not be saved.') } finally { setBusy(false) } }
+  const decisionFor = (claimRef: string) => review?.decisions.find(item => item.claimRef === claimRef)?.decision ?? 'UNDECIDED'
+  return <section className="recorded-graph-review" aria-label="Recorded graph review"><div className="recorded-graph-heading"><div><p className="overline">RECORDED DEVELOPMENT REVIEW</p><h3>Reviewer decisions</h3></div><span className="recorded-status">{review ? `Recorded · revision ${review.revision}` : 'Not loaded'}</span></div><p>This optional panel is available only for the graph recorded with this inspection. It shows generated aliases and typed claims only; it does not show source evidence.</p><label className="recorded-token">Reviewer token<input type="password" value={token} autoComplete="off" spellCheck={false} onChange={event => { setToken(event.target.value); setReview(null); setMessage('Token changed. Reload the recorded review before making a decision.') }} /></label><button type="button" className="recorded-load" disabled={busy || !token.trim()} onClick={() => void load()}>{busy ? 'Working…' : review ? 'Reload recorded review' : 'Load recorded review'}</button><p className="recorded-message" role="status" aria-live="polite">{message}</p>{review && <div className="recorded-claim-list"><p className="recorded-scope">Claims are bound to this graph response. A stale revision fails closed; reload before retrying.</p>{binding.claims.map(item => { const edge = claimToEdge.get(item.claimRef); if (!edge) return null; const source = graph.nodes.find(node => node.id === edge.sourceId)?.label ?? 'Unavailable alias'; const target = graph.nodes.find(node => node.id === edge.targetId)?.label ?? 'Unavailable alias'; const state = decisionFor(item.claimRef); return <article key={item.claimRef}><div><strong>{source} {edgeLabel[edge.type]} {target}</strong><span className={`recorded-decision is-${state.toLowerCase()}`}>Recorded: {state}</span></div><div className="recorded-actions"><button type="button" disabled={busy} onClick={() => void decide(item.claimRef, 'ACCEPT')}>Accept claim</button><button type="button" disabled={busy} onClick={() => void decide(item.claimRef, 'REJECT')}>Reject claim</button></div></article> })}</div>}<p className="recorded-limit">No merge or split editor is included. Recorded decisions do not authorize release, delivery, export, or an identity claim.</p></section>
+}
+
+export function RelationshipGraph({ graph, documentNames, onInspectDocument, graphReview, apiBase }: { graph: EntityGraph; documentNames: Map<string, string>; onInspectDocument: (id: string, evidence: EntityGraphEvidence) => void; graphReview?: BatchGraphReviewBinding | null; apiBase?: string }) {
   const [selectionState, setSelectionState] = useState<GraphSelection>({ graph, nodeId: graph.nodes[0]?.id ?? null, edgeId: null })
   const selection = selectionForGraph(graph, selectionState)
   const selectedId = selection.nodeId
@@ -125,6 +135,7 @@ export function RelationshipGraph({ graph, documentNames, onInspectDocument }: {
         <button type="button" onClick={focusGraph}><Focus aria-hidden="true" size={16} /> Fit map</button>
       </div>
     </div>
+    {graphReview && apiBase && <RecordedGraphReviewPanel graph={graph} binding={graphReview} apiBase={apiBase} />}
     <section className="relationship-identity-review" aria-label="Temporary identity merge proposal">
       <div><strong>Identity review · proposal only</strong><p>Compare two generated person aliases. A proposal does not merge nodes, rewrite evidence, or authorize release.</p></div>
       <div className="relationship-identity-controls">
