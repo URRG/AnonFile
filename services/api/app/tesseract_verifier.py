@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 from io import BytesIO
+import os
 from pathlib import Path
 import queue
 import re
@@ -26,7 +27,7 @@ TESSERACT_TIMEOUT_SECONDS = 5
 _READ_CHUNK_BYTES = 4_096
 _CLEANUP_TIMEOUT_SECONDS = 1
 _MAX_EXECUTABLE_BYTES = 100_000_000
-_TESSERACT_CONFIG_IDENTITY = "tesseract-cli-stdin-psm6-v1"
+_TESSERACT_CONFIG_IDENTITY = "tesseract-cli-stdin-psm6-tessdata-eng-v2"
 
 
 class FinalOcrVerificationError(ValueError):
@@ -41,6 +42,17 @@ class IndependentFinalOcrVerifier(Protocol):
 
     def verify_pdf(self, pdf_bytes: bytes, absent_values: Sequence[str]) -> None:
         """Verify rerasterized final PDF bytes, not pre-PDF working pixels."""
+
+
+class FinalPngTranscriptVerifier(Protocol):
+    """Provisioned checker that can transcribe one exact final PNG.
+
+    The transcript is intentionally a low-level, caller-owned value.  This
+    module never log it or turn it into an authorization decision.
+    """
+
+    def extract_final_png_text(self, png_bytes: bytes) -> str:
+        """Return bounded OCR text or raise a fixed verification error."""
 
 
 def _reject(message: str) -> None:
@@ -127,11 +139,15 @@ class TesseractCliVerifier:
     allowed_executables: tuple[Path, ...] = ()
     expected_executable_sha256: str | None = None
     expected_runtime_identity: str | None = None
+    tessdata_directory: Path | None = None
+    allowed_tessdata_directories: tuple[Path, ...] = ()
+    expected_eng_traineddata_sha256: str | None = None
     timeout_seconds: int = TESSERACT_TIMEOUT_SECONDS
     max_stdout_bytes: int = MAX_TESSERACT_OUTPUT_BYTES
     popen_factory: Callable[..., Any] = subprocess.Popen
     version_popen_factory: Callable[..., Any] = subprocess.Popen
     executable_digest_reader: Callable[[Path], str] = _sha256_file
+    traineddata_digest_reader: Callable[[Path], str] = _sha256_file
     pdf_rasterizer: Callable[[bytes], Sequence[bytes]] | None = None
 
     def _read_version(self) -> str:
@@ -140,7 +156,7 @@ class TesseractCliVerifier:
         reader: Thread | None = None
         try:
             process = self.version_popen_factory([str(self.executable), "--version"], stdout=subprocess.PIPE,
-                                                 stderr=subprocess.DEVNULL)
+                                                 stderr=subprocess.DEVNULL, env=self._subprocess_environment())
             if process.stdout is None:
                 _reject("Independent final OCR verifier is unavailable; inspect the candidate manually.")
             output = bytearray()
@@ -182,15 +198,19 @@ class TesseractCliVerifier:
     def _assert_provisioned(self) -> None:
         """Bind executable bits and runtime semantics before candidate OCR."""
         if (not isinstance(self.allowed_executables, tuple) or
+                not isinstance(self.allowed_tessdata_directories, tuple) or
                 self.timeout_seconds != TESSERACT_TIMEOUT_SECONDS or
                 self.max_stdout_bytes != MAX_TESSERACT_OUTPUT_BYTES):
             _reject("Independent final OCR verifier configuration is invalid.")
-        if self.expected_executable_sha256 is None or self.expected_runtime_identity is None:
+        if (self.expected_executable_sha256 is None or self.expected_runtime_identity is None or
+                self.expected_eng_traineddata_sha256 is None):
             _reject("Independent final OCR verifier is unavailable; inspect the candidate manually.")
         if (not isinstance(self.expected_executable_sha256, str) or
                 not _digest(self.expected_executable_sha256) or
                 not isinstance(self.expected_runtime_identity, str) or
-                not _digest(self.expected_runtime_identity)):
+                not _digest(self.expected_runtime_identity) or
+                not isinstance(self.expected_eng_traineddata_sha256, str) or
+                not _digest(self.expected_eng_traineddata_sha256)):
             _reject("Independent final OCR verifier configuration is invalid.")
         if self.executable is None or not isinstance(self.executable, Path) or not self.executable.is_absolute():
             _reject("Independent final OCR verifier is unavailable; inspect the candidate manually.")
@@ -198,8 +218,17 @@ class TesseractCliVerifier:
                    if isinstance(path, Path) and path.is_absolute()}
         if str(self.executable) not in allowed:
             _reject("Independent final OCR verifier is unavailable; inspect the candidate manually.")
+        if (self.tessdata_directory is None or not isinstance(self.tessdata_directory, Path) or
+                not self.tessdata_directory.is_absolute()):
+            _reject("Independent final OCR verifier is unavailable; inspect the candidate manually.")
+        allowed_tessdata = {str(path) for path in self.allowed_tessdata_directories
+                            if isinstance(path, Path) and path.is_absolute()}
+        if str(self.tessdata_directory) not in allowed_tessdata:
+            _reject("Independent final OCR verifier is unavailable; inspect the candidate manually.")
         try:
             if self.executable_digest_reader(self.executable) != self.expected_executable_sha256:
+                _reject("Independent final OCR verifier is unavailable; inspect the candidate manually.")
+            if self.traineddata_digest_reader(self.tessdata_directory / "eng.traineddata") != self.expected_eng_traineddata_sha256:
                 _reject("Independent final OCR verifier is unavailable; inspect the candidate manually.")
             if _runtime_identity(self._read_version()) != self.expected_runtime_identity:
                 _reject("Independent final OCR verifier is unavailable; inspect the candidate manually.")
@@ -208,6 +237,18 @@ class TesseractCliVerifier:
         except (OSError, UnicodeError, ValueError):
             _reject("Independent final OCR verifier is unavailable; inspect the candidate manually.")
 
+    def _subprocess_environment(self) -> dict[str, str]:
+        """Do not inherit ambient TESSDATA_PREFIX or language-model selection."""
+        if self.tessdata_directory is None:
+            _reject("Independent final OCR verifier is unavailable; inspect the candidate manually.")
+        environment = {"TESSDATA_PREFIX": str(self.tessdata_directory)}
+        if os.name == "nt":
+            system_root = os.environ.get("SystemRoot")
+            if not system_root:
+                _reject("Independent final OCR verifier is unavailable; inspect the candidate manually.")
+            environment["SystemRoot"] = system_root
+        return environment
+
     def _run_png(self, png_bytes: bytes) -> str:
         if not isinstance(png_bytes, bytes) or not png_bytes or len(png_bytes) > 2_500_000:
             _reject("Independent final OCR verification input is invalid.")
@@ -215,8 +256,10 @@ class TesseractCliVerifier:
         writer: Thread | None = None
         reader: Thread | None = None
         try:
-            process = self.popen_factory([str(self.executable), "stdin", "stdout", "--psm", "6"],
-                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            process = self.popen_factory([str(self.executable), "stdin", "stdout", "--psm", "6",
+                                          "--tessdata-dir", str(self.tessdata_directory), "-l", "eng"],
+                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                         env=self._subprocess_environment())
             if process.stdin is None or process.stdout is None:
                 _reject("Independent final OCR verification failed; inspect the candidate manually.")
             output = bytearray()
@@ -292,6 +335,16 @@ class TesseractCliVerifier:
         for png_bytes in png_pages:
             if _contains_source_value(self._run_png(png_bytes), values):
                 _reject("Independent final OCR verifier found residual content; inspect the candidate manually.")
+
+    def extract_final_png_text(self, png_bytes: bytes) -> str:
+        """Transcribe one exact final PNG after the provisioning gate.
+
+        There is no executable discovery or RapidOCR/PATH fallback here.  A
+        caller must have supplied the same absolute, allowlisted, hash-pinned
+        Tesseract executable used by the final verifier.
+        """
+        self._assert_provisioned()
+        return self._run_png(png_bytes)
 
     def verify_pdf(self, pdf_bytes: bytes, absent_values: Sequence[str]) -> None:
         if not isinstance(pdf_bytes, bytes) or not pdf_bytes or self.pdf_rasterizer is None:
