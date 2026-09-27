@@ -84,3 +84,26 @@ development control-plane seam, not UI wiring or a graph editor. The production
 route guard still blocks this API; no release authority follows from any graph
 review action. SQLite is not external audit anchoring, KMS custody, or
 multi-host persistence.
+
+## Development batch binding
+
+When encrypted `DurableStore` is configured, the development-only synthetic
+batch inspection route may register a source-free snapshot from the graph it
+just produced and return `graph_review`. This optional object maps that
+response's graph node and edge IDs to fresh opaque node and claim references,
+plus the opaque snapshot reference. It contains no source values, evidence
+bindings, source hashes, or token-derived identifiers. The request cannot
+supply any graph or tenant reference.
+
+This is a server-issued navigation seam for a later reviewer UI, **not
+user-facing adjudication**. It has no UI control, no new authority, and no
+release, delivery, qualification, or identity-resolution effect. Empty,
+invalid, or unavailable durable graph state simply omits the optional binding
+and leaves the current synthetic demo response unchanged.
+
+To keep this optional development seam from consuming shared control capacity,
+at most eight active bridge-created snapshots may exist per tenant. The cap is
+checked and inserted with its audit event in one encrypted-store transaction.
+When saturated, the batch response simply omits `graph_review`; existing
+trusted-server graph snapshots and unrelated controls are not subject to this
+bridge-only cap.

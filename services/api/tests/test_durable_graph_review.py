@@ -10,11 +10,26 @@ from fastapi.testclient import TestClient
 
 from app.durable_graph_review import DurableGraphReviewAdapter, _snapshot_dict
 from app.durable_repository import DurableStore
+from app.demo_graph_review_binding import snapshot_binding
 from app.main import create_app
 from app.revisioned_graph_review import (GraphClaimSnapshot, GraphIdentityMerge, GraphIdentitySplit,
     GraphNodeSnapshot, GraphReviewConflict, GraphSnapshot, GraphSplitEndpointAssignment)
 from test_access import TOKENS, auth
 from test_control_plane_api import setup
+
+
+def demo_batch_payload():
+    def file(identifier, name, content):
+        return {"id": identifier, "name": name,
+                "content_base64": base64.b64encode(content.encode()).decode()}
+    return {"synthetic_only": True, "files": [
+        file("mail", "mail.txt", "From: Riya <riya@example.test>\nTo: Sita <sita@example.test>\n"),
+        file("roles", "roles.json", '[{"person_name":"Riya","works_at":"Harborline Systems"}]'),
+    ]}
+
+
+def enable_demo(monkeypatch):
+    monkeypatch.setenv("ANONFLOW_DEMO_MODE", "enabled")
 
 
 def ref(kind, value):
@@ -181,3 +196,93 @@ def test_identity_routes_are_reviewer_only_cas_and_source_free(tmp_path, monkeyp
         assert merged.status_code == 200 and merged.json()["revision"] == 1
         assert "graphevidence" not in merged.text
         assert client.post(path, headers=auth("reviewer"), json=body).status_code == 409
+
+
+def test_batch_server_binds_only_its_graph_to_encrypted_review_and_survives_restart(tmp_path, monkeypatch):
+    setup(monkeypatch, tmp_path, "sqlite"); enable_demo(monkeypatch)
+    app = create_app()
+    with TestClient(app) as client:
+        response = client.post("/demo/batch/inspect", headers=auth(), json=demo_batch_payload())
+        assert response.status_code == 200, response.text
+        body = response.json(); binding = body["graph_review"]
+        assert binding["posture"] == "DEVELOPMENT_BINDING_ONLY_NO_ADJUDICATION_OR_RELEASE"
+        assert set(binding) == {"snapshot_ref", "nodes", "claims", "posture"}
+        assert len(binding["nodes"]) == len(body["entity_graph"]["nodes"])
+        assert len(binding["claims"]) == len(body["entity_graph"]["edges"])
+        rendered = json.dumps(binding)
+        for forbidden in ("Riya", "Sita", "Harborline", "example.test", "graphevidence", TOKENS["processor"]):
+            assert forbidden not in rendered
+        review = client.get("/graph-reviews/" + binding["snapshot_ref"], headers=auth("reviewer"))
+        assert review.status_code == 200 and review.json()["revision"] == 0
+        assert "graphevidence" not in review.text
+        tenant_ref = ref("tenantref", "tenant-a")
+        stored = app.state.store.get_control("graph_review", binding["snapshot_ref"], tenant_ref)
+        assert "Riya" not in json.dumps(stored) and "Harborline" not in json.dumps(stored)
+
+    # A fresh encrypted-store instance can read the same immutable snapshot.
+    with TestClient(create_app()) as reopened:
+        assert reopened.get("/graph-reviews/" + binding["snapshot_ref"], headers=auth("reviewer")).status_code == 200
+
+
+def test_batch_binding_is_tenant_bound_and_optional_for_empty_invalid_or_unavailable_graph(tmp_path, monkeypatch):
+    setup(monkeypatch, tmp_path, "sqlite"); enable_demo(monkeypatch)
+    principals = json.loads(os.environ["ANONFLOW_DEV_PRINCIPALS"])
+    principals.append({"token": "tenant-b-reviewer".ljust(40, "-"), "subject": "tenant-b-reviewer",
+                       "tenant": "tenant-b", "roles": ["reviewer"]})
+    monkeypatch.setenv("ANONFLOW_DEV_PRINCIPALS", json.dumps(principals))
+    app = create_app()
+    with TestClient(app) as client:
+        bound = client.post("/demo/batch/inspect", headers=auth(), json=demo_batch_payload()).json()["graph_review"]
+        assert client.get("/graph-reviews/" + bound["snapshot_ref"], headers={
+            "Authorization": "Bearer " + "tenant-b-reviewer".ljust(40, "-")}).status_code == 404
+        empty = client.post("/demo/batch/inspect", headers=auth(), json={"synthetic_only": True, "files": [
+            {"id": "one", "name": "one.txt", "content_base64": base64.b64encode(b"ordinary text").decode()},
+            {"id": "two", "name": "two.txt", "content_base64": base64.b64encode(b"another ordinary text").decode()},
+        ]})
+        assert empty.status_code == 200 and "graph_review" not in empty.json()
+
+        import app.main as main
+        original = main.analyze_batch
+        def invalid(payload):
+            value = original(payload); value["entity_graph"] = {"nodes": [{"id": "bad", "kind": "person"}], "edges": []}; return value
+        monkeypatch.setattr(main, "analyze_batch", invalid)
+        assert "graph_review" not in client.post("/demo/batch/inspect", headers=auth(), json=demo_batch_payload()).json()
+        monkeypatch.setattr(main, "analyze_batch", original)
+        monkeypatch.setattr(app.state.graph_reviews, "create_demo_batch_snapshot", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError()))
+        assert "graph_review" not in client.post("/demo/batch/inspect", headers=auth(), json=demo_batch_payload()).json()
+
+
+def test_demo_batch_snapshot_cap_is_atomic_and_does_not_consume_unrelated_control_capacity(tmp_path, monkeypatch):
+    setup(monkeypatch, tmp_path, "sqlite"); enable_demo(monkeypatch)
+    app = create_app(); tenant = ref("tenantref", "tenant-a")
+    with TestClient(app) as client:
+        replies = [client.post("/demo/batch/inspect", headers=auth(), json=demo_batch_payload()) for _ in range(9)]
+        assert all(reply.status_code == 200 for reply in replies)
+        assert all("graph_review" in reply.json() for reply in replies[:8])
+        assert "graph_review" not in replies[8].json()
+        demo_records = app.state.store.list_controls("graph_review", tenant)
+        assert len(demo_records) == 8
+
+        # Generic trusted-server graph registration retains its existing limit,
+        # and an unrelated control still has normal shared capacity available.
+        original = snapshot(tenant)
+        app.state.graph_reviews.create_snapshot(GraphSnapshot(
+            tenant, ref("graphsnap", "generic-after-demo-cap"), original.nodes, original.claims))
+        app.state.store.add_control({"id": "unrelated-control", "kind": "policy_snapshot", "tenant": tenant,
+                                     "created_at": "server", "expires_at": time.time() + 60, "size_bytes": 0,
+                                     "payload": {"test": "unrelated"}}, "test")
+        assert len(app.state.store.list_controls("graph_review", tenant)) == 9
+        assert len(app.state.store.list_controls("policy_snapshot", tenant)) == 1
+
+
+def test_demo_binding_rejects_oversized_graph_before_generating_snapshot_references():
+    tenant = ref("tenantref", "oversized")
+    nodes = [{"id": f"node-{index}", "kind": "person", "label": "Alias", "document_ids": []}
+             for index in range(101)]
+    assert snapshot_binding(tenant_ref=tenant, graph={"nodes": nodes, "edges": [{
+        "id": "edge", "type": "sent_to", "source_id": "node-0", "target_id": "node-1", "evidence": [{}]}]}) is None
+    nodes = [{"id": "person", "kind": "person", "label": "Alias", "document_ids": []},
+             {"id": "organization", "kind": "organization", "label": "Organization 1", "document_ids": []}]
+    edges = [{"id": f"edge-{index}", "type": "works_at", "source_id": "person", "target_id": "organization",
+              "evidence": [{}]} for index in range(201)]
+    assert snapshot_binding(tenant_ref=tenant, graph={"nodes": nodes, "edges": edges}) is None
