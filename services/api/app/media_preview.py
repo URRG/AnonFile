@@ -169,25 +169,33 @@ def _assert_ocr_line_has_no_separate_ink_island(source_gray: Any, line: dict[str
     A non-flat box is not necessarily tight. A same-engine OCR result can
     describe one value while its geometry also covers an unrecognised value;
     then no second OCR line exists for the repaint-neighbour guard to compare.
-    A material blank run between substantial ink columns is conservative
-    evidence of separate regions, so abstain rather than erase both. This is a
-    bounded geometry guard, not text recognition or an OCR-coverage claim.
+    A material blank run between substantial ink columns *or rows* is
+    conservative evidence of separate regions, so abstain rather than erase
+    both. This is a bounded geometry guard, not text recognition or an
+    OCR-coverage claim.
     """
     import numpy as np
 
     x0, y0, x1, y1 = _line_ink_box(line)
     line_gray = source_gray[y0:y1, x0:x1]
-    height, _ = line_gray.shape
+    height, width = line_gray.shape
     # Substantial support avoids letting antialiasing/noise bridge a blank gap.
     # An uncertain raster abstains; this guard never tightens a repaint box.
-    dark_support = np.count_nonzero(line_gray <= 245, axis=0)
-    active = dark_support >= max(1, height // 8)
-    active_positions = np.flatnonzero(active)
-    if active_positions.size < 2:
-        return
-    gap_limit = max(MIN_OCR_LINE_SEPARATE_INK_GAP, height // 2)
-    gaps = np.diff(active_positions) - 1
-    if gaps.size and int(gaps.max()) >= gap_limit:
+    column_support = np.count_nonzero(line_gray <= 245, axis=0)
+    active_columns = np.flatnonzero(column_support >= max(1, height // 8))
+    horizontal_gap_limit = max(MIN_OCR_LINE_SEPARATE_INK_GAP, height // 2)
+    horizontal_gaps = np.diff(active_columns) - 1
+    if horizontal_gaps.size and int(horizontal_gaps.max()) >= horizontal_gap_limit:
+        raise PayloadError("OCR line spans separate source-ink regions; inspect the source manually.")
+    # The horizontal projection alone misses two vertically stacked source
+    # strings at the same x-position. Keep the row threshold small but bounded:
+    # it must retain thin glyph strokes while rejecting only a material blank
+    # band, never attempting to split or tighten the OCR claim.
+    row_support = np.count_nonzero(line_gray <= 245, axis=1)
+    active_rows = np.flatnonzero(row_support >= max(1, min(4, width // 20)))
+    vertical_gap_limit = max(6, height // 5)
+    vertical_gaps = np.diff(active_rows) - 1
+    if vertical_gaps.size and int(vertical_gaps.max()) >= vertical_gap_limit:
         raise PayloadError("OCR line spans separate source-ink regions; inspect the source manually.")
 
 

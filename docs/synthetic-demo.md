@@ -121,7 +121,9 @@ isolated two-cell/column layouts, and a
 replacement that cannot fit its line cause an abstention instead of a guessed
 reading order or an unreadable whole-line mark. This is deliberately partial:
 larger tables, forms, screenshots and multi-column reading order are not
-qualified, and close line padding can still affect nearby content. Inspect
+qualified, and close line padding can still affect nearby content. Widely
+tracked or justified lines can abstain when their gap resembles a separate ink
+region; this is intentional fail-closed behavior. Inspect
 the original and candidate at native pixels before using even synthetic
 review copies; see the [fictional layout corpus](media-layout-corpus.md).
 Input OCR lines below 0.60 confidence reject the batch. A lower-confidence

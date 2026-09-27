@@ -195,6 +195,46 @@ def test_ocr_geometry_rejects_one_overbroad_line_that_hides_adjacent_source_ink(
     assert hidden not in str(error.value)
 
 
+def test_ocr_geometry_rejects_one_overbroad_line_that_hides_stacked_source_ink(monkeypatch):
+    """A vertical ink island must not bypass the horizontal-gap guard."""
+    from types import SimpleNamespace
+    from app import media_preview
+
+    source = "Maya Patel"
+    hidden = "ACCOUNT 4932"
+    image = Image.new("RGB", (260, 130), "white")
+    draw = ImageDraw.Draw(image)
+    draw.text((25, 25), source, fill="black")
+    draw.text((25, 70), hidden, fill="black")
+    # One same-engine OCR claim spans both aligned strings. There is no
+    # horizontal gap between their ink extents, so only 2D geometry catches it.
+    box = [(20, 15), (180, 15), (180, 90), (20, 90)]
+    monkeypatch.setattr(media_preview, "_engine", lambda: lambda _: SimpleNamespace(
+        txts=[source], boxes=[box], scores=[0.99]))
+
+    with pytest.raises(PayloadError, match="separate source-ink regions") as error:
+        _ocr_lines(image)
+    assert source not in str(error.value)
+    assert hidden not in str(error.value)
+
+
+def test_ocr_geometry_intentionally_abstains_on_widely_tracked_single_line(monkeypatch):
+    """Wide tracking is an accepted false abstention, never a guessed repaint."""
+    from types import SimpleNamespace
+    from app import media_preview
+
+    image = Image.new("RGB", (220, 100), "white")
+    draw = ImageDraw.Draw(image)
+    for index, character in enumerate("Maya"):
+        draw.text((20 + index * 28, 40), character, fill="black")
+    box = [(15, 30), (125, 30), (125, 65), (15, 65)]
+    monkeypatch.setattr(media_preview, "_engine", lambda: lambda _: SimpleNamespace(
+        txts=["Maya"], boxes=[box], scores=[0.99]))
+
+    with pytest.raises(PayloadError, match="separate source-ink regions"):
+        _ocr_lines(image)
+
+
 def test_ocr_geometry_accepts_one_tight_line_with_ordinary_word_spacing(monkeypatch):
     from types import SimpleNamespace
     from app import media_preview

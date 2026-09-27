@@ -78,10 +78,13 @@ supplier data. `Blocked externally` is not the same as done.
     It is held unavailable by default until a provisioned, immutable executable
     allowlist, executable SHA-256 and Tesseract-version/config identity are
     installed and its behavior is calibrated; no current demo route enables it.
-  - [ ] **Known P1 remains:** an overbroad same-engine OCR line can still hide
-    adjacent source content. The optional second-engine final-byte check does
-    not establish source geometry or coverage, does not run by default, and
-    must not be represented as verified/safe media output.
+  - [x] A same-engine OCR line with materially separated horizontal or vertical
+    source-ink islands now abstains before repaint. Wide tracking or justified
+    single lines can also abstain; that intentional false-abstention tradeoff
+    prevents guessing whether a gap is a second source region. The optional
+    second-engine final-byte check does not establish source geometry or
+    coverage, does not run by default, and must not be represented as
+    verified/safe media output.
 - [ ] **D06 — Graph provenance and adjudication.** Link an edge to exact
   page/line/span evidence, support reviewer accept/reject and identity
   merge/split, and flag conflicts. Exit: evidence navigation and graph
