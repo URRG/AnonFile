@@ -77,13 +77,14 @@ Stale revisions return 409; expired or cross-tenant snapshots cannot be
 updated. The original expiry is not renewed and a failed action rolls its
 record and audit append back together.
 
-This is not a graph editor in the synthetic demo: only trusted server code can
-register a snapshot, and the existing UI has no durable snapshot binding or
-action. The reviewer-only `/merges` and `/splits` endpoints are a narrow local
-development control-plane seam, not UI wiring or a graph editor. The production
-route guard still blocks this API; no release authority follows from any graph
-review action. SQLite is not external audit anchoring, KMS custody, or
-multi-host persistence.
+Only trusted server code can register a snapshot. In development, the synthetic
+demo's opt-in reviewer panel can load its own server-issued binding using an
+in-memory reviewer token and submit the existing decision, merge, and split
+CAS actions. It displays only generated aliases and typed, bound claims; it
+never displays source evidence. This narrow reviewer control does not make the
+demo a general graph editor. The production route guard still blocks this API;
+no release authority follows from any graph review action. SQLite is not
+external audit anchoring, KMS custody, or multi-host persistence.
 
 ## Development batch binding
 
@@ -95,11 +96,23 @@ plus the opaque snapshot reference. It contains no source values, evidence
 bindings, source hashes, or token-derived identifiers. The request cannot
 supply any graph or tenant reference.
 
-This is a server-issued navigation seam for a later reviewer UI, **not
-user-facing adjudication**. It has no UI control, no new authority, and no
+This is a server-issued binding for the development-only reviewer panel, **not
+user-facing release adjudication**. It grants no new authority and has no
 release, delivery, qualification, or identity-resolution effect. Empty,
 invalid, or unavailable durable graph state simply omits the optional binding
 and leaves the current synthetic demo response unchanged.
+
+## Development conflict projection
+
+The reviewer-only durable read response also includes `conflict_groups` only
+when the existing accepted-claim cardinality semantics produce a prompt. Each
+group contains its fixed conflict type, an opaque effective subject reference,
+and the sorted opaque identifiers of the accepted claims that support it. It
+contains no evidence binding, source text, document ID, label, or release
+claim. The client verifies every group against the batch-local opaque binding
+and recalculates the same grouping before rendering generated aliases and the
+existing accept/reject CAS controls. This remains development-only encrypted
+SQLite state; it is not external audit anchoring or multi-host persistence.
 
 To keep this optional development seam from consuming shared control capacity,
 at most eight active bridge-created snapshots may exist per tenant. The cap is

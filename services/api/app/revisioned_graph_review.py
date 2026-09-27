@@ -167,6 +167,31 @@ class GraphReviewView:
     conflicts: tuple[tuple[str, int, int], ...]
 
 
+def conflict_groups(view: GraphReviewView) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
+    """Return source-free, claim-bound detail for the aggregate prompts.
+
+    This is intentionally a display/control projection, not a new decision
+    type: every listed claim is an already accepted immutable snapshot claim.
+    """
+    endpoints, _ = _effective_people(view.snapshot, view.decisions, view.identity_actions)
+    decision_by_claim = dict(view.decisions)
+    grouped: dict[str, dict[str, dict[str, set[str]]]] = {"works_at": {}, "assigned_to": {}}
+    for claim in view.snapshot.claims:
+        if decision_by_claim.get(claim.identifier) != "ACCEPT" or claim.relation not in grouped:
+            continue
+        source = endpoints.get((claim.identifier, "source"), claim.source_node_ref)
+        target = endpoints.get((claim.identifier, "target"), claim.target_node_ref)
+        subject, object_ = (source, target) if claim.relation == "works_at" else (target, source)
+        grouped[claim.relation].setdefault(subject, {}).setdefault(object_, set()).add(claim.identifier)
+    result: list[tuple[str, str, tuple[str, ...]]] = []
+    for relation, kind in (("works_at", "POTENTIAL_MULTIPLE_WORKS_AT"),
+                           ("assigned_to", "POTENTIAL_MULTIPLE_ASSIGNED_TO")):
+        for subject, objects in grouped[relation].items():
+            if len(objects) > 1:
+                result.append((kind, subject, tuple(sorted(claim for claims in objects.values() for claim in claims))))
+    return tuple(result)
+
+
 def _view(state: _GraphReviewState) -> GraphReviewView:
     snapshot = state.snapshot
     return GraphReviewView(

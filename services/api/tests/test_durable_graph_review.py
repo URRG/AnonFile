@@ -75,6 +75,26 @@ def test_durable_adapter_persists_source_free_cas_state(tmp_path):
             expected_revision=0, decision="REJECT", reviewer_ref=ref("reviewerref", "r"))
 
 
+def test_conflict_projection_contains_only_bound_accepted_claims_and_no_evidence(tmp_path):
+    tenant = ref("tenantref", "conflict"); person = ref("graphnode", "person")
+    first, second = ref("graphnode", "org-one"), ref("graphnode", "org-two")
+    claims = (
+        GraphClaimSnapshot(ref("graphclaim", "one"), "works_at", person, first, ref("graphevidence", "one")),
+        GraphClaimSnapshot(ref("graphclaim", "two"), "works_at", person, second, ref("graphevidence", "two")),
+    )
+    item = GraphSnapshot(tenant, ref("graphsnap", "conflict"),
+        (GraphNodeSnapshot(person, "person"), GraphNodeSnapshot(first, "organization"), GraphNodeSnapshot(second, "organization")), claims)
+    service = adapter(tmp_path); service.create_snapshot(item)
+    first_view = service.decide(tenant_ref=tenant, snapshot_ref=item.snapshot_ref, claim_ref=claims[0].identifier,
+        expected_revision=0, decision="ACCEPT", reviewer_ref=ref("reviewerref", "r"))
+    assert first_view["conflict_groups"] == []
+    view = service.decide(tenant_ref=tenant, snapshot_ref=item.snapshot_ref, claim_ref=claims[1].identifier,
+        expected_revision=1, decision="ACCEPT", reviewer_ref=ref("reviewerref", "r"))
+    assert view["conflict_groups"] == [{"kind": "POTENTIAL_MULTIPLE_WORKS_AT", "subject_ref": person,
+                                        "claim_refs": sorted([claims[0].identifier, claims[1].identifier])}]
+    assert "graphevidence" not in json.dumps(view)
+
+
 def test_expired_review_cannot_be_revived_by_decision(tmp_path, monkeypatch):
     tenant = ref("tenantref", "a"); item = snapshot(tenant); service = adapter(tmp_path)
     service.create_snapshot(item)
@@ -214,6 +234,7 @@ def test_batch_server_binds_only_its_graph_to_encrypted_review_and_survives_rest
             assert forbidden not in rendered
         review = client.get("/graph-reviews/" + binding["snapshot_ref"], headers=auth("reviewer"))
         assert review.status_code == 200 and review.json()["revision"] == 0
+        assert review.json()["conflict_groups"] == []
         assert "graphevidence" not in review.text
         tenant_ref = ref("tenantref", "tenant-a")
         stored = app.state.store.get_control("graph_review", binding["snapshot_ref"], tenant_ref)

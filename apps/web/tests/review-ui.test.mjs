@@ -80,6 +80,16 @@ test('recorded graph panel is opt-in, memory-only, and keeps durable actions dis
   assert.match(graphSource, /setMessage\(cause\.message\)/)
 })
 
+test('recorded conflict groups render generated aliases without graph source labels', () => {
+  const panel = graphSource.slice(graphSource.indexOf('function RecordedGraphReviewPanel'), graphSource.indexOf('export function RelationshipGraph'))
+  assert.match(panel, /const aliases = useMemo/)
+  assert.match(panel, /\$\{kindLabel\[kind\]\} alias \$\{counts\[kind\]\}/)
+  assert.match(panel, /review\.conflictGroups\.length > 0/)
+  assert.match(panel, /className="recorded-conflict-groups"/)
+  assert.match(panel, /group\.claimRefs\.map\(claimControl\)/)
+  assert.doesNotMatch(panel, /\.label/)
+})
+
 test('three-document synthetic graph keeps review state ephemeral and cues only typed conflicts', () => {
   const edges = [
     { id: 'edge_a', type: 'works_at', sourceId: 'alias_person_01', targetId: 'alias_org_01', evidence: [{ documentId: 'document_01' }] },
