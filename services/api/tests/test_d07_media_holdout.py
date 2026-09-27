@@ -13,10 +13,20 @@ from app.tesseract_verifier import TesseractCliVerifier
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "d07_media_holdout"
-LOCAL_TESSERACT = Path("C:/Users/utkar/Documents/Codex/2026-09-19/ca/tools/tesseract-5.5.3/runtime/tesseract.exe")
-LOCAL_TESSDATA = LOCAL_TESSERACT.parent / "tessdata"
 LOCAL_EXECUTABLE_SHA256 = "c66f0f12ed76f6aa455dac97684bbc86756d6a732380bee09122454cfda3f420"
 LOCAL_ENG_SHA256 = "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2"
+
+
+def _opt_in_tesseract_paths() -> tuple[Path, Path] | None:
+    """Return only explicit absolute runtime paths; default tests never probe PATH."""
+    executable_raw = os.environ.get("D07_TESSERACT_EXECUTABLE")
+    tessdata_raw = os.environ.get("D07_TESSDATA_DIRECTORY")
+    if not executable_raw or not tessdata_raw:
+        return None
+    executable, tessdata = Path(executable_raw), Path(tessdata_raw)
+    if not executable.is_absolute() or not tessdata.is_absolute() or not executable.is_file() or not (tessdata / "eng.traineddata").is_file():
+        return None
+    return executable, tessdata
 
 
 class StubOcr:
@@ -163,16 +173,19 @@ def test_non_png_bytes_are_rejected_before_generic_ocr(monkeypatch) -> None:
     assert ocr.calls == []
 
 
-@pytest.mark.skipif(os.environ.get("RUN_D07_TESSERACT_INTEGRATION") != "1" or not (LOCAL_TESSERACT.is_file() and (LOCAL_TESSDATA / "eng.traineddata").is_file()),
-                    reason="set RUN_D07_TESSERACT_INTEGRATION=1 with the pinned local Tesseract runtime")
+@pytest.mark.skipif(os.environ.get("RUN_D07_TESSERACT_INTEGRATION") != "1" or _opt_in_tesseract_paths() is None,
+                    reason="set RUN_D07_TESSERACT_INTEGRATION=1 and explicit pinned runtime paths")
 def test_opt_in_pinned_tesseract_reads_exact_fictional_final_pngs_only() -> None:
-    environment = {"TESSDATA_PREFIX": str(LOCAL_TESSDATA), "SystemRoot": os.environ["SystemRoot"]}
-    version = subprocess.run([str(LOCAL_TESSERACT), "--version"], check=True, stdout=subprocess.PIPE,
+    configured = _opt_in_tesseract_paths()
+    assert configured is not None
+    executable, tessdata = configured
+    environment = {"TESSDATA_PREFIX": str(tessdata), "SystemRoot": os.environ["SystemRoot"]}
+    version = subprocess.run([str(executable), "--version"], check=True, stdout=subprocess.PIPE,
                              stderr=subprocess.DEVNULL, env=environment, timeout=5).stdout.decode("utf-8")
-    runtime_identity = hashlib.sha256(f"tesseract-cli-stdin-psm6-v1\n{version.strip()}".encode()).hexdigest()
-    verifier = TesseractCliVerifier(executable=LOCAL_TESSERACT, allowed_executables=(LOCAL_TESSERACT,),
+    runtime_identity = hashlib.sha256(f"tesseract-cli-stdin-psm6-tessdata-eng-v2\n{version.strip()}".encode()).hexdigest()
+    verifier = TesseractCliVerifier(executable=executable, allowed_executables=(executable,),
         expected_executable_sha256=LOCAL_EXECUTABLE_SHA256, expected_runtime_identity=runtime_identity,
-        tessdata_directory=LOCAL_TESSDATA, allowed_tessdata_directories=(LOCAL_TESSDATA,),
+        tessdata_directory=tessdata, allowed_tessdata_directories=(tessdata,),
         expected_eng_traineddata_sha256=LOCAL_ENG_SHA256)
     report = evaluate_final_pixels(rendered=pixels(), ocr=TesseractPixelOcr(verifier), fixture_directory=FIXTURE)
     assert report["status"] == EvaluationStatus.SYNTHETIC_CANARIES_CONFIRMED.value

@@ -27,7 +27,7 @@ TESSERACT_TIMEOUT_SECONDS = 5
 _READ_CHUNK_BYTES = 4_096
 _CLEANUP_TIMEOUT_SECONDS = 1
 _MAX_EXECUTABLE_BYTES = 100_000_000
-_TESSERACT_CONFIG_IDENTITY = "tesseract-cli-stdin-psm6-v1"
+_TESSERACT_CONFIG_IDENTITY = "tesseract-cli-stdin-psm6-tessdata-eng-v2"
 
 
 class FinalOcrVerificationError(ValueError):

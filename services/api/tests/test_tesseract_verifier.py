@@ -15,7 +15,7 @@ EXECUTABLE = (Path("C:/Program Files/Tesseract-OCR/tesseract.exe") if os.name ==
 TESSDATA = (Path("C:/Program Files/Tesseract-OCR/tessdata") if os.name == "nt"
             else Path("/opt/tesseract/tessdata"))
 VERSION = "tesseract 5.4.0"
-RUNTIME_IDENTITY = hashlib.sha256(f"tesseract-cli-stdin-psm6-v1\n{VERSION}".encode()).hexdigest()
+RUNTIME_IDENTITY = hashlib.sha256(f"tesseract-cli-stdin-psm6-tessdata-eng-v2\n{VERSION}".encode()).hexdigest()
 
 
 class FakeProcess:
