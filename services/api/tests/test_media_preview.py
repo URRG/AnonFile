@@ -90,6 +90,12 @@ def test_ocr_geometry_accepts_unambiguous_single_column(monkeypatch):
     [[(10, 20), (38, 20), (38, 40), (10, 40)],
      [(60, 20), (170, 20), (170, 40), (60, 40)],
      [(190, 20), (280, 20), (280, 40), (190, 40)]],
+    # Columns can be vertically staggered, so matching baselines are not a
+    # safe prerequisite for rejecting their invented interleaved transcript.
+    [[(10, 20), (100, 20), (100, 40), (10, 40)],
+     [(160, 35), (260, 35), (260, 55), (160, 55)],
+     [(10, 50), (100, 50), (100, 70), (10, 70)],
+     [(160, 65), (260, 65), (260, 85), (160, 85)]],
     # OCR boxes that physically overlap cannot be safely repainted separately.
     [[(10, 20), (180, 20), (180, 45), (10, 45)],
      [(120, 35), (280, 35), (280, 60), (120, 60)]],
@@ -100,7 +106,7 @@ def test_ocr_geometry_abstains_on_ambiguous_layout_without_source_leak(monkeypat
 
     secret = "Maya Patel private value"
     monkeypatch.setattr(media_preview, "_engine", lambda: lambda _: SimpleNamespace(
-        txts=[secret, "ordinary adjacent value", "third cell"][:len(boxes)], boxes=boxes,
+        txts=[secret, "ordinary adjacent value", "third cell", "fourth cell"][:len(boxes)], boxes=boxes,
         scores=[0.99] * len(boxes)))
 
     with pytest.raises(PayloadError, match="OCR layout is ambiguous") as error:

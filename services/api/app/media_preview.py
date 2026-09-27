@@ -54,6 +54,12 @@ def _line_ink_box(line: dict[str, Any]) -> tuple[int, int, int, int]:
     return tuple(value)  # type: ignore[return-value]
 
 
+def _same_column_band(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> bool:
+    """Return whether two OCR boxes materially occupy the same vertical band."""
+    overlap = min(left[2], right[2]) - max(left[0], right[0])
+    return overlap >= max(3, min(left[2] - left[0], right[2] - right[0]) // 2)
+
+
 def _assert_unambiguous_ocr_layout(lines: list[dict[str, Any]]) -> None:
     """Reject layouts for which top-to-bottom, then left-to-right is a guess.
 
@@ -84,6 +90,27 @@ def _assert_unambiguous_ocr_layout(lines: list[dict[str, Any]]) -> None:
             if (vertical_overlap >= max(3, min(left[3] - left[1], right[3] - right[1]) // 2)
                     and horizontal_gap >= 8 and same_baseline
                     and same_row_count >= 2):
+                raise PayloadError("OCR layout is ambiguous for conservative visual review.")
+
+    # Columns need not have matching baselines: a sidebar, a table whose rows
+    # are vertically offset, or a multi-column scan can otherwise be sorted
+    # into an invented alternating transcript.  Repeated, disjoint horizontal
+    # bands are enough evidence of columns; do not infer their reading order.
+    for index, first in enumerate(lines):
+        first_box = _line_ink_box(first)
+        for second in lines[index + 1:]:
+            second_box = _line_ink_box(second)
+            if first_box[2] <= second_box[0]:
+                left, right = first_box, second_box
+            elif second_box[2] <= first_box[0]:
+                left, right = second_box, first_box
+            else:
+                continue
+            if right[0] - left[2] < 8:
+                continue
+            left_track = [candidate for candidate in lines if _same_column_band(left, _line_ink_box(candidate))]
+            right_track = [candidate for candidate in lines if _same_column_band(right, _line_ink_box(candidate))]
+            if len(left_track) >= 2 and len(right_track) >= 2:
                 raise PayloadError("OCR layout is ambiguous for conservative visual review.")
 
 
