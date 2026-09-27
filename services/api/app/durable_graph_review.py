@@ -45,18 +45,33 @@ class DurableGraphReviewAdapter:
                expected_revision: int, decision: str, reviewer_ref: str) -> dict[str, Any]:
         # Direct use of the durable store transaction makes the read/CAS/write
         # indivisible across processes sharing the SQLite database.
-        with self._store._transaction():
-            raw = self._store._control("graph_review", snapshot_ref, tenant_ref)
-            engine = _load(raw)
-            view = engine.decide(tenant_ref=tenant_ref, snapshot_ref=snapshot_ref,
-                                 claim_ref=claim_ref, expected_revision=expected_revision,
-                                 decision=decision, reviewer_ref=reviewer_ref)
-            replacement = _record(tenant=tenant_ref, snapshot=engine._states[(tenant_ref, snapshot_ref)].snapshot,
-                state={"snapshot": raw["payload"]["snapshot"], "events": _events(engine)})
-            self._store._validate_control(replacement)
-            self._store._append_event(tenant_ref, "graph_review.updated", snapshot_ref, reviewer_ref, record=replacement)
-            self._store.controls["graph_review"][snapshot_ref] = replacement
-            return _public(engine)
+        try:
+            with self._store._transaction():
+                raw = self._store._control("graph_review", snapshot_ref, tenant_ref)
+                if raw["expires_at"] <= time.time():
+                    raise HTTPException(404, "Control record not found")
+                engine = _load(raw)
+                try:
+                    engine.decide(tenant_ref=tenant_ref, snapshot_ref=snapshot_ref,
+                                  claim_ref=claim_ref, expected_revision=expected_revision,
+                                  decision=decision, reviewer_ref=reviewer_ref)
+                except GraphReviewConflict:
+                    # DurableStore rolls back and preserves HTTPException, but
+                    # normalizes other exceptions to a storage failure.
+                    raise HTTPException(409, "Graph review revision is stale") from None
+                except GraphReviewError:
+                    raise HTTPException(404, "Graph review unavailable") from None
+                replacement = copy.deepcopy(raw)
+                replacement["size_bytes"] = 0
+                replacement["payload"]["events"] = _events(engine)
+                self._store._validate_control(replacement)
+                self._store._append_event(tenant_ref, "graph_review.updated", snapshot_ref, reviewer_ref, record=replacement)
+                self._store.controls["graph_review"][snapshot_ref] = replacement
+                return _public(engine)
+        except HTTPException as error:
+            if error.status_code == 409 and error.detail == "Graph review revision is stale":
+                raise GraphReviewConflict() from None
+            raise
 
 
 def _snapshot_dict(s: GraphSnapshot) -> dict[str, Any]:

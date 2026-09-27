@@ -78,6 +78,7 @@ from app.delivery_readiness import (DeliveryReadiness, DeliveryReadinessError,
 from app.policies import TAXONOMY_CATEGORIES
 from app.durable_repository import DurableStore
 from app.durable_graph_review import DurableGraphReviewAdapter
+from app.revisioned_graph_review import GraphReviewConflict, GraphReviewError
 
 MAX_BODY_BYTES = 2_100_000
 MAX_PAYLOAD_BYTES = 2_000_000
@@ -1110,8 +1111,10 @@ def create_app() -> FastAPI:
                 tenant_ref = "tenantref:v1:" + base64.urlsafe_b64encode(hashlib.sha256(
                     principal.tenant.encode()).digest()).decode().rstrip("=")
                 return app.state.graph_reviews.read(tenant_ref=tenant_ref, snapshot_ref=snapshot_ref)
-            except HTTPException:
-                raise HTTPException(404, "Graph review unavailable") from None
+            except HTTPException as error:
+                if error.status_code == 404:
+                    raise HTTPException(404, "Graph review unavailable") from None
+                raise
 
         @app.post("/graph-reviews/{snapshot_ref}/decisions")
         def decide_graph_review(snapshot_ref: str, request: GraphReviewDecisionCreate,
@@ -1125,8 +1128,12 @@ def create_app() -> FastAPI:
                         hashlib.sha256((principal.tenant + "\\x1f" + principal.subject).encode()).digest()).decode().rstrip("="))
             except GraphReviewConflict:
                 raise HTTPException(409, "Graph review revision is stale") from None
-            except (GraphReviewError, HTTPException):
+            except GraphReviewError:
                 raise HTTPException(404, "Graph review unavailable") from None
+            except HTTPException as error:
+                if error.status_code == 404:
+                    raise HTTPException(404, "Graph review unavailable") from None
+                raise
 
     @app.middleware("http")
     async def production_route_guard(request: Request, call_next):
