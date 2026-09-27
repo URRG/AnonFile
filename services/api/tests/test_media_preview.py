@@ -4,6 +4,7 @@ import hashlib
 from io import BytesIO
 
 from PIL import Image
+from PIL import ImageDraw, ImageFilter, ImageFont
 from pypdf import PdfReader
 import pytest
 
@@ -73,8 +74,28 @@ def test_ocr_geometry_accepts_unambiguous_single_column(monkeypatch):
                [(20, 80), (220, 80), (220, 95), (20, 95)]],
         scores=[0.99, 0.99, 0.99]))
 
-    lines = _ocr_lines(Image.new("RGB", (320, 180), "white"))
+    image = Image.new("RGB", (320, 180), "white")
+    ImageDraw.Draw(image).text((20, 10), "first confidential line", fill="black")
+    ImageDraw.Draw(image).text((20, 45), "second confidential line", fill="black")
+    ImageDraw.Draw(image).text((20, 80), "third confidential line", fill="black")
+    lines = _ocr_lines(image)
     assert [line["text"] for line in lines] == ["first confidential line", "second confidential line", "third confidential line"]
+
+
+def test_ocr_line_without_measurable_raster_edge_abstains_on_catastrophic_blur(monkeypatch):
+    from types import SimpleNamespace
+    from app import media_preview
+
+    image = Image.new("RGB", (320, 120), "white")
+    font = ImageFont.load_default()
+    ImageDraw.Draw(image).text((20, 35), "Maya Patel", font=font, fill="black")
+    box = [(20, 30), (120, 30), (120, 55), (20, 55)]
+    monkeypatch.setattr(media_preview, "_engine", lambda: lambda _: SimpleNamespace(
+        txts=["Maya Patel"], boxes=[box], scores=[0.99]))
+    assert _ocr_lines(image)[0]["text"] == "Maya Patel"
+    with pytest.raises(PayloadError, match="lacks measurable source-raster edge detail") as error:
+        _ocr_lines(image.filter(ImageFilter.GaussianBlur(radius=12)))
+    assert "Maya Patel" not in str(error.value)
 
 
 @pytest.mark.parametrize("boxes", [

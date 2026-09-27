@@ -57,6 +57,10 @@ supplier data. `Blocked externally` is not the same as done.
   - [x] The rich PDF/PDF/TXT batch remains usable with a single-column Slack
     transcript and labelled signature; a real-OCR screenshot replacement has
     an outside-mask pixel oracle. The focused D05 suite passed 102 tests.
+  - [x] An OCR-reported source line must contain a measurable local raster edge
+    in its own reported ink box; a catastrophically blurred/flat line abstains
+    before preview construction. This is a geometry sanity check only, not a
+    readability, completeness, or visual-coverage score.
   - [ ] General multi-column/table/form reading-order mapping, real OCR blur and
     coverage qualification, and visual utility thresholds remain open. These
     synthetic controls do not prove completeness or production fidelity.
