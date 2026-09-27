@@ -173,6 +173,8 @@ test('batch client binds raster image previews to staged media and PNG dimension
 
 test('graph media locators bind source, page and approximate OCR boxes before navigation', async t => {
   const png = 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAI0lEQVR4nGP8//8/AymAiSTVDKMaiANMRKqDg1ENxACSQwkAVW0DHeN02ZEAAAAASUVORK5CYII='
+  const blackPng = 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAEUlEQVR4nGNgGAWjYBQwQAEAAxAAAXyL/2UAAAAASUVORK5CYII='
+  const rasterHash = createHash('sha256').update(Buffer.from(png, 'base64')).digest('hex')
   const mediaRequest = { ...request, files: [files[0], { ...files[1], name: 'b.png' }] }
   const response = valid()
   const sourceHash = createHash('sha256').update(Buffer.from(files[1].contentBase64, 'base64')).digest('hex')
@@ -180,11 +182,12 @@ test('graph media locators bind source, page and approximate OCR boxes before na
   response.documents[1].source_sha256 = sourceHash
   response.documents[1].media_preview = { pages: [{ number: 1, width: 16, height: 16,
     source_png_base64: png, candidate_png_base64: png,
+    source_png_sha256: rasterHash,
     candidate_png_sha256: createHash('sha256').update(Buffer.from(png, 'base64')).digest('hex'), ocr_lines: 1 }],
     fallback_lines: 0, self_ocr_residual_sources: 0, candidate_low_confidence_lines: 0,
     pdf_raster_evidence: null, candidate_pdf_base64: null }
   const locator = { status: 'SUPPORTED', kind: 'ocr_line_boxes', precision: 'OCR_LINE_BOX_APPROXIMATE',
-    source_sha256: sourceHash, page: 1, width: 16, height: 16,
+    source_sha256: sourceHash, source_png_sha256: rasterHash, page: 1, width: 16, height: 16,
     line_boxes: [{ x0: 1, y0: 2, x1: 8, y1: 9 }] }
   response.entity_graph = { nodes: [{ id: 'E1', kind: 'person', label: 'Gita', document_ids: ['f1'] },
     { id: 'organization_1', kind: 'organization', label: 'Organization 1', document_ids: ['f2'] }],
@@ -193,11 +196,14 @@ test('graph media locators bind source, page and approximate OCR boxes before na
   t.mock.method(globalThis, 'fetch', async () => Response.json(response))
   const result = await inspectSyntheticBatch(mediaRequest)
   assert.deepEqual(result.entityGraph.edges[0].evidence[0].locator, { status: 'SUPPORTED', kind: 'ocr_line_boxes',
-    precision: 'OCR_LINE_BOX_APPROXIMATE', sourceSha256: sourceHash, page: 1, width: 16, height: 16,
+    precision: 'OCR_LINE_BOX_APPROXIMATE', sourceSha256: sourceHash, sourcePngSha256: rasterHash, page: 1, width: 16, height: 16,
     lineBoxes: [{ x0: 1, y0: 2, x1: 8, y1: 9 }] })
   t.mock.restoreAll()
   for (const change of [
     value => { value.entity_graph.edges[0].evidence[0].locator.source_sha256 = '0'.repeat(64) },
+    value => { value.entity_graph.edges[0].evidence[0].locator.source_png_sha256 = '0'.repeat(64) },
+    value => { value.documents[1].media_preview.pages[0].source_png_sha256 = '0'.repeat(64) },
+    value => { value.documents[1].media_preview.pages[0].source_png_base64 = blackPng },
     value => { value.documents[1].source_sha256 = '0'.repeat(64); value.entity_graph.edges[0].evidence[0].locator.source_sha256 = '0'.repeat(64) },
     value => { value.entity_graph.edges[0].evidence[0].locator.page = 2 },
     value => { value.entity_graph.edges[0].evidence[0].locator.width = 17 },
