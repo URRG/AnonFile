@@ -158,15 +158,24 @@ supplier data. `Blocked externally` is not the same as done.
     rasters and an independent OCR adapter, and reports aggregate-only outcomes.
     It is not wired into the demo or release path; no actual independent OCR,
     renderer qualification, or media recall claim follows from this scaffold.
+    Each fictional fixture now pins its exact final-raster SHA-256 and records
+    expected-final/forbidden-source synthetic canaries. The optional adapter
+    consumes only an already provisioned, hash- and runtime-pinned Tesseract
+    verifier, with a pinned allowlisted tessdata directory and `eng.traineddata`
+    SHA-256; it has no PATH or ambient-model fallback and remains unavailable by default. The
+    final rasters are bounded, decoded PNG fixtures (including a tiny
+    PDF-rendered fictional page with adjacent source provenance), not opaque
+    placeholder bytes or real-media evidence.
   - [ ] Freeze an independently annotated holdout, validate untouched final
     pixels/text with a different executable checker, and measure reviewed
     graph links and identity adjudication. No production qualification exists.
 - [ ] **D08 — Accessible, scalable review UI.** Test keyboard, screen-reader,
   zoom, responsive layout and a larger batch; keep a navigable table fallback
   when a graph is too dense. Exit: automated checks plus a human walkthrough.
-  - [x] Keyboard focus movement, live announcements, visible focus states,
-    reduced-motion handling, responsive/zoom-oriented layout rules and the
-    dense-batch table threshold have automated coverage. Evidence:
+  - [x] Roving graph-node, result-view and document-tab keyboard focus, concise status
+    announcements, durable document-level evidence focus fallback, visible
+    focus states, reduced-motion handling, responsive/zoom-oriented layout
+    rules and the dense-batch table threshold have automated coverage. Evidence:
     [D08 review UI notes](d08-accessible-review-ui.md) and
     `apps/web/tests/review-ui.test.mjs`.
   - [ ] A human keyboard, screen-reader, 200–400% zoom and dense synthetic

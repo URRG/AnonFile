@@ -10,13 +10,18 @@ import json
 import re
 from dataclasses import dataclass
 from enum import Enum
+from io import BytesIO
 from pathlib import Path
 from typing import Protocol
+
+from PIL import Image, UnidentifiedImageError
+
+from app.tesseract_verifier import TesseractCliVerifier
 
 
 VERSION = "d07-synthetic-media-final-pixels-v1"
 _FIXTURE_DIRECTORY = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "d07_media_holdout"
-_MANIFEST_SHA256 = "a8817d7da262e7a877b48af062a3953adaa0288f03d804df4312f3e1cc754dd1"
+_MANIFEST_SHA256 = "9d297e44ec83700c038dc95c8d45952311f3ddf60abd81aa1c0b779546dec8f4"
 _MAX_CASES = 16
 _MAX_MANIFEST_BYTES = 16_384
 _MAX_PIXELS_PER_CASE = 10_000_000
@@ -36,8 +41,7 @@ class MediaKind(str, Enum):
 
 class EvaluationStatus(str, Enum):
     BLOCKED = "BLOCKED"
-    INCONCLUSIVE = "INCONCLUSIVE"
-    SYNTHETIC_MARKERS_OBSERVED = "SYNTHETIC_MARKERS_OBSERVED"
+    SYNTHETIC_CANARIES_CONFIRMED = "SYNTHETIC_CANARIES_CONFIRMED"
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,29 @@ class RenderedPixels:
 
 class PixelOcr(Protocol):
     def extract_text(self, *, pixels: bytes, kind: MediaKind) -> str: ...
+
+
+@dataclass(frozen=True)
+class TesseractPixelOcr:
+    """D07 adapter for an already provisioned Tesseract final-PNG verifier.
+
+    It deliberately accepts a verifier instance rather than an executable path:
+    D07 cannot discover a binary through PATH or relax its provisioned hash and
+    runtime-identity checks.  It is opt-in and has no product or release wiring.
+    """
+
+    verifier: TesseractCliVerifier
+
+    def __post_init__(self) -> None:
+        # This named adapter cannot be satisfied by a structural/mock OCR
+        # object.  Generic test adapters remain supported through PixelOcr.
+        if type(self.verifier) is not TesseractCliVerifier:
+            raise TypeError("D07 Tesseract adapter requires a provisioned TesseractCliVerifier.")
+
+    def extract_text(self, *, pixels: bytes, kind: MediaKind) -> str:
+        if not isinstance(kind, MediaKind):
+            _reject()
+        return self.verifier.extract_final_png_text(pixels)
 
 
 def _reject() -> None:
@@ -96,7 +123,7 @@ def _canonical_manifest_bytes(directory: Path) -> bytes:
         _reject()
 
 
-def _load_cases(directory: Path) -> tuple[tuple[str, MediaKind, tuple[str, ...]], ...]:
+def _load_cases(directory: Path) -> tuple[tuple[str, MediaKind, str, tuple[str, ...], tuple[str, ...]], ...]:
     """Load minimally-normalized source-pinned bytes without returning markers."""
     try:
         raw = _canonical_manifest_bytes(directory)
@@ -110,29 +137,35 @@ def _load_cases(directory: Path) -> tuple[tuple[str, MediaKind, tuple[str, ...]]
         cases = manifest["cases"]
         if not isinstance(cases, list) or not 1 <= len(cases) <= _MAX_CASES:
             _reject()
-        result: list[tuple[str, MediaKind, tuple[str, ...]]] = []
+        result: list[tuple[str, MediaKind, str, tuple[str, ...], tuple[str, ...]]] = []
         seen: set[str] = set()
         for item in cases:
-            if not isinstance(item, dict) or set(item) != {"case_id", "kind", "expected_markers"}:
+            if not isinstance(item, dict) or set(item) != {"case_id", "kind", "final_raster_sha256", "expected_final_markers", "forbidden_markers"}:
                 _reject()
-            case_id, kind, markers = item["case_id"], item["kind"], item["expected_markers"]
+            case_id, kind = item["case_id"], item["kind"]
+            digest, expected_final, forbidden = (item["final_raster_sha256"], item["expected_final_markers"],
+                                                  item["forbidden_markers"])
             if not isinstance(case_id, str) or not _CASE_ID.fullmatch(case_id) or case_id in seen:
                 _reject()
             if not isinstance(kind, str) or kind not in {value.value for value in MediaKind}:
                 _reject()
-            if (not isinstance(markers, list) or not 1 <= len(markers) <= 8 or
-                    any(not isinstance(marker, str) or not 3 <= len(marker) <= 160 for marker in markers) or
-                    len(set(markers)) != len(markers)):
+            if (not isinstance(digest, str) or not _DIGEST.fullmatch(digest) or
+                    not isinstance(expected_final, list) or not 1 <= len(expected_final) <= 8 or
+                    not isinstance(forbidden, list) or not 1 <= len(forbidden) <= 8 or
+                    any(not isinstance(marker, str) or not 3 <= len(marker) <= 160
+                        for marker in (*expected_final, *forbidden)) or
+                    len(set(expected_final)) != len(expected_final) or len(set(forbidden)) != len(forbidden) or
+                    set(expected_final).intersection(forbidden)):
                 _reject()
             seen.add(case_id)
-            result.append((case_id, MediaKind(kind), tuple(markers)))
+            result.append((case_id, MediaKind(kind), digest, tuple(expected_final), tuple(forbidden)))
         return tuple(result)
     except (OSError, D07MediaHoldoutError, TypeError, ValueError, RecursionError):
         _reject()
 
 
-def _blocked(reason: str) -> dict[str, object]:
-    return {
+def _blocked(reason: str, aggregate: dict[str, object] | None = None) -> dict[str, object]:
+    report: dict[str, object] = {
         "schema_version": VERSION,
         "classification": "SYNTHETIC_FINAL_PIXEL_HOLDOUT",
         "qualification": "NOT_QUALIFIED",
@@ -141,6 +174,9 @@ def _blocked(reason: str) -> dict[str, object]:
         "measurement_status": {"pdf_final_pixels": "NOT_MEASURED", "image_final_pixels": "NOT_MEASURED", "ocr": "UNAVAILABLE"},
         "limitations": _limitations(),
     }
+    if aggregate is not None:
+        report["aggregate"] = aggregate
+    return report
 
 
 def _limitations() -> list[str]:
@@ -149,6 +185,19 @@ def _limitations() -> list[str]:
         "Only final raster pixels supplied to this evaluator are inspected; PDF text layers and source metadata are excluded.",
         "This report is not a release authorization, legal determination, or compliance decision.",
     ]
+
+
+def _validate_final_png(pixels: bytes) -> None:
+    """Require a bounded, decodable PNG before it reaches an OCR adapter."""
+    try:
+        with Image.open(BytesIO(pixels)) as image:
+            if image.format != "PNG":
+                _reject()
+            if image.width < 16 or image.height < 16 or image.width * image.height > 2_000_000:
+                _reject()
+            image.load()
+    except (OSError, ValueError, UnidentifiedImageError, D07MediaHoldoutError):
+        _reject()
 
 
 def evaluate_final_pixels(*, rendered: tuple[RenderedPixels, ...], ocr: PixelOcr | None,
@@ -171,31 +220,51 @@ def evaluate_final_pixels(*, rendered: tuple[RenderedPixels, ...], ocr: PixelOcr
             if item.case_id in supplied or not isinstance(item.pixels, bytes) or not 1 <= len(item.pixels) <= _MAX_PIXELS_PER_CASE:
                 _reject()
             supplied[item.case_id] = item.pixels
-        if set(supplied) != {case_id for case_id, _, _ in cases}:
+        if set(supplied) != {case[0] for case in cases}:
             _reject()
 
-        observed = missing = expected = 0
-        by_kind: dict[str, dict[str, int]] = {kind.value: {"cases": 0, "expected_markers": 0, "observed_markers": 0, "missing_markers": 0} for kind in MediaKind}
-        for case_id, kind, markers in cases:
+        expected_final = observed_final = missing_final = expected_forbidden = observed_forbidden = 0
+        by_kind: dict[str, dict[str, int]] = {
+            kind.value: {"cases": 0, "expected_final_markers": 0, "observed_final_markers": 0,
+                         "missing_final_markers": 0, "forbidden_markers": 0,
+                         "observed_forbidden_markers": 0}
+            for kind in MediaKind
+        }
+        for case_id, kind, digest, expected, forbidden in cases:
+            if hashlib.sha256(supplied[case_id]).hexdigest() != digest:
+                _reject()
+            _validate_final_png(supplied[case_id])
             text = ocr.extract_text(pixels=supplied[case_id], kind=kind)
             if not isinstance(text, str) or len(text) > _MAX_OCR_CHARACTERS:
                 _reject()
-            found = sum(marker.casefold() in text.casefold() for marker in markers)
-            expected += len(markers)
-            observed += found
-            missing += len(markers) - found
+            folded = text.casefold()
+            final_found = sum(marker.casefold() in folded for marker in expected)
+            forbidden_found = sum(marker.casefold() in folded for marker in forbidden)
+            expected_final += len(expected)
+            observed_final += final_found
+            missing_final += len(expected) - final_found
+            expected_forbidden += len(forbidden)
+            observed_forbidden += forbidden_found
             aggregates = by_kind[kind.value]
             aggregates["cases"] += 1
-            aggregates["expected_markers"] += len(markers)
-            aggregates["observed_markers"] += found
-            aggregates["missing_markers"] += len(markers) - found
+            aggregates["expected_final_markers"] += len(expected)
+            aggregates["observed_final_markers"] += final_found
+            aggregates["missing_final_markers"] += len(expected) - final_found
+            aggregates["forbidden_markers"] += len(forbidden)
+            aggregates["observed_forbidden_markers"] += forbidden_found
+        aggregate = {"cases": len(cases), "expected_final_markers": expected_final,
+                     "observed_final_markers": observed_final, "missing_final_markers": missing_final,
+                     "forbidden_markers": expected_forbidden,
+                     "observed_forbidden_markers": observed_forbidden, "by_kind": by_kind}
+        if missing_final or observed_forbidden:
+            return _blocked("SYNTHETIC_CANARY_EXPECTATION_MISMATCH", aggregate)
         return {
             "schema_version": VERSION,
             "classification": "SYNTHETIC_FINAL_PIXEL_HOLDOUT",
             "qualification": "NOT_QUALIFIED",
-            "status": EvaluationStatus.SYNTHETIC_MARKERS_OBSERVED.value if observed else EvaluationStatus.INCONCLUSIVE.value,
-            "reason": "SYNTHETIC_MARKERS_OBSERVED" if observed else "NO_DECLARED_SYNTHETIC_MARKERS_OBSERVED",
-            "aggregate": {"cases": len(cases), "expected_markers": expected, "observed_markers": observed, "missing_markers": missing, "by_kind": by_kind},
+            "status": EvaluationStatus.SYNTHETIC_CANARIES_CONFIRMED.value,
+            "reason": "SYNTHETIC_FINAL_CANARIES_CONFIRMED",
+            "aggregate": aggregate,
             "measurement_status": {"pdf_final_pixels": "MEASURED_SYNTHETIC_MARKERS", "image_final_pixels": "MEASURED_SYNTHETIC_MARKERS", "ocr": "INDEPENDENT_ADAPTER_SUPPLIED"},
             "limitations": _limitations(),
         }

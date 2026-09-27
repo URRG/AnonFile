@@ -5,7 +5,7 @@ import ts from 'typescript'
 
 const navigationSource = readFileSync(new URL('../src/review-navigation.ts', import.meta.url), 'utf8')
 const navigationCompiled = ts.transpileModule(navigationSource, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText
-const { isDenseReviewGraph, moveReviewFocus, readableReviewZoom } = await import(`data:text/javascript;base64,${Buffer.from(navigationCompiled).toString('base64')}`)
+const { isDenseReviewGraph, moveReviewFocus, moveReviewTabFocus, readableReviewZoom } = await import(`data:text/javascript;base64,${Buffer.from(navigationCompiled).toString('base64')}`)
 const reviewSource = readFileSync(new URL('../src/relationship-review.ts', import.meta.url), 'utf8')
 const reviewCompiled = ts.transpileModule(reviewSource, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText
 const { relationshipConflictCues, reviewStatusFor, selectionForGraph, validateMergeProposal } = await import(`data:text/javascript;base64,${Buffer.from(reviewCompiled).toString('base64')}`)
@@ -36,9 +36,32 @@ test('narrow layouts scroll a readable map instead of shrinking node text to an 
   assert.equal(readableReviewZoom(1200, 1100), 1)
 })
 
-test('review graph exposes accessible navigation, live updates, and evidence controls', () => {
-  for (const required of ['aria-live="polite"', 'aria-atomic="true"', 'relationship-map-instructions', 'moveReviewFocus', 'onKeyDown', 'aria-controls="relationship-table"', '<table className="relationship-fallback-table">', 'onInspectDocument(item.documentId, item)', 'relationship-edge-review', 'relationship-review-select', 'sourceLabel} ${edgeLabel[edge.type]} ${targetLabel}', 'relationship-review-note', "typeof ResizeObserver === 'undefined'", "window.addEventListener('resize', update)"]) {
+test('review graph exposes roving keyboard navigation, concise updates, and evidence controls', () => {
+  for (const required of ['role="status" aria-live="polite"', 'tabIndex={isSelected ? 0 : -1}', 'relationship-map-instructions', 'moveReviewFocus', 'onKeyDown', 'aria-controls="relationship-table"', '<table className="relationship-fallback-table">', 'onInspectDocument(item.documentId, item)', 'relationship-edge-review', 'relationship-review-select', 'sourceLabel} ${edgeLabel[edge.type]} ${targetLabel}', 'relationship-review-note', "typeof ResizeObserver === 'undefined'", "window.addEventListener('resize', update)"]) {
     assert.match(graphSource, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  }
+  assert.doesNotMatch(graphSource, /<aside className="relationship-map-detail" aria-live/)
+  assert.doesNotMatch(graphSource, /aria-atomic="true"/)
+})
+
+test('document tabs select and focus the adjacent document with horizontal keyboard navigation', () => {
+  assert.equal(moveReviewTabFocus(0, 3, 'ArrowRight'), 1)
+  assert.equal(moveReviewTabFocus(2, 3, 'ArrowRight'), 0)
+  assert.equal(moveReviewTabFocus(0, 3, 'ArrowLeft'), 2)
+  assert.equal(moveReviewTabFocus(1, 3, 'Home'), 0)
+  assert.equal(moveReviewTabFocus(1, 3, 'End'), 2)
+  assert.equal(moveReviewTabFocus(0, 3, 'ArrowDown'), null)
+})
+
+test('document selector implements roving ARIA tabs and document-level evidence returns focus to status', () => {
+  for (const required of ['role="tab"', 'aria-controls="document-comparison-panel"', 'tabIndex={isSelected ? 0 : -1}', 'moveReviewTabFocus(index, inspection.documents.length, event.key)', 'selectDocument(inspection.documents[nextIndex].id, true)', 'role="tabpanel"', 'aria-labelledby={`document-tab-${selected.id}`}', 'const provenanceStatus = useRef<HTMLParagraphElement | null>(null)', 'provenanceStatus.current', 'tabIndex={-1}', "provenanceTarget.locator.status === 'SUPPORTED'"]) {
+    assert.match(batchSource, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  }
+})
+
+test('top-level result views use the same roving ARIA tab behavior with labelled panels', () => {
+  for (const required of ['const resultTabs = useRef(new Map<ResultTab, HTMLButtonElement>())', 'id={`result-tab-${key}`}', 'aria-controls={`result-tabpanel-${key}`}', 'tabIndex={isSelected ? 0 : -1}', 'moveReviewTabFocus(index, tabs.length, event.key)', 'selectResultTab(tabs[nextIndex][0], true)', 'id="result-tabpanel-documents" role="tabpanel" aria-labelledby="result-tab-documents"', 'id="result-tabpanel-relationships" role="tabpanel" aria-labelledby="result-tab-relationships"', 'id="result-tabpanel-verification" role="tabpanel" aria-labelledby="result-tab-verification"']) {
+    assert.match(batchSource, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   }
 })
 

@@ -7,6 +7,7 @@ import { inspectSyntheticBatch, readBatchFile, readBatchReferenceManifest, type 
   type EntityGraphEvidence, BATCH_MAX_TOTAL_BYTES, DemoInspectionFailure } from './api'
 import { downloadDemoCandidate } from './demo-download'
 import { RelationshipGraph } from './relationship-graph'
+import { moveReviewTabFocus } from './review-navigation'
 import './batch.css'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
@@ -187,15 +188,20 @@ export default function BatchDemo() {
   const [provenanceTarget, setProvenanceTarget] = useState<EntityGraphEvidence | null>(null)
   const sourcePane = useRef<HTMLDivElement | null>(null)
   const candidatePane = useRef<HTMLDivElement | null>(null)
+  const resultTabs = useRef(new Map<ResultTab, HTMLButtonElement>())
+  const documentTabs = useRef(new Map<string, HTMLButtonElement>())
+  const provenanceStatus = useRef<HTMLParagraphElement | null>(null)
   const sequence = useRef(0)
   const request = useRef<AbortController | null>(null)
   const intakeEpoch = useRef(0)
 
   useEffect(() => () => { request.current?.abort(); intakeEpoch.current += 1 }, [])
   useEffect(() => {
-    if (resultTab !== 'documents' || !provenanceTarget || provenanceTarget.locator.status !== 'SUPPORTED') return
+    if (resultTab !== 'documents' || !provenanceTarget) return
     const frame = requestAnimationFrame(() => {
-      const target = sourcePane.current?.querySelector<HTMLElement>('[data-provenance-target="true"]')
+      const target = provenanceTarget.locator.status === 'SUPPORTED'
+        ? sourcePane.current?.querySelector<HTMLElement>('[data-provenance-target="true"]')
+        : provenanceStatus.current
       const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
       target?.scrollIntoView({ block: 'center', behavior: reduceMotion ? 'auto' : 'smooth' })
       target?.focus({ preventScroll: true })
@@ -420,6 +426,17 @@ export default function BatchDemo() {
     if (Math.abs(target.scrollLeft - source.scrollLeft) > 1) target.scrollLeft = source.scrollLeft
   }
 
+  function selectDocument(id: string, focus = false) {
+    setProvenanceTarget(null)
+    setSelectedDoc(id)
+    if (focus) requestAnimationFrame(() => documentTabs.current.get(id)?.focus())
+  }
+
+  function selectResultTab(tab: ResultTab, focus = false) {
+    setResultTab(tab)
+    if (focus) requestAnimationFrame(() => resultTabs.current.get(tab)?.focus())
+  }
+
   function toggleExclusion(entityId: string) {
     setExcludedIds(current => current.includes(entityId) ? current.filter(id => id !== entityId) : [...current, entityId])
     setAliasOverrides(current => { const next = { ...current }; delete next[entityId]; return next })
@@ -495,11 +512,11 @@ export default function BatchDemo() {
           <div className="result-alert"><CircleAlert size={21} /><div><strong>Review required · not anonymous or export-ready</strong><span>This is a synthetic review preview. OCR coverage, residual visual content, privacy risk, layout fidelity, and release eligibility are not certified.</span></div></div>
           <div className="metrics-grid"><div className="metric-card"><span>Files processed</span><strong>{inspection.summary.files}</strong><small>In this batch</small></div><div className="metric-card"><span>Mentions transformed</span><strong>{inspection.summary.transformedMentions}</strong><small>Selected spans only</small></div><div className="metric-card"><span>Unique signals</span><strong>{visibleEntities.length}</strong><small>Tracked across files</small></div><div className="metric-card"><span>Source values retained</span><strong>{inspection.verification.sourceValueResiduals}</strong><small>Detected exact values only</small></div></div>
           {inspection.summary.suppressedMentions > 0 && <div className="result-alert exclusion-result"><CircleAlert size={19} /><div><strong>{inspection.summary.suppressedMentions} detected {inspection.summary.suppressedMentions === 1 ? 'mention was' : 'mentions were'} retained after reviewer exclusion</strong><span>Those original values remain in the proposed text. This preview cannot be exported or treated as anonymized.</span></div></div>}
-          <div className="result-tabs" role="tablist" aria-label="Batch result views">{([['documents', 'Documents', Files], ['relationships', 'Entities & relationships', Link2], ['verification', 'Verification scorecard', ShieldCheck]] as const).map(([key, label, Icon]) => <button key={key} type="button" role="tab" aria-selected={resultTab === key} className={resultTab === key ? 'selected' : ''} onClick={() => setResultTab(key)}><Icon size={17} /> {label}</button>)}</div>
-          {resultTab === 'documents' && selected && <section className="batch-card result-panel">
+          <div className="result-tabs" role="tablist" aria-label="Batch result views">{([['documents', 'Documents', Files], ['relationships', 'Entities & relationships', Link2], ['verification', 'Verification scorecard', ShieldCheck]] as const).map(([key, label, Icon], index, tabs) => { const isSelected = resultTab === key; return <button key={key} type="button" role="tab" id={`result-tab-${key}`} aria-controls={`result-tabpanel-${key}`} aria-selected={isSelected} tabIndex={isSelected ? 0 : -1} className={isSelected ? 'selected' : ''} ref={element => { if (element) resultTabs.current.set(key, element); else resultTabs.current.delete(key) }} onClick={() => selectResultTab(key)} onKeyDown={event => { const nextIndex = moveReviewTabFocus(index, tabs.length, event.key); if (nextIndex === null) return; event.preventDefault(); selectResultTab(tabs[nextIndex][0], true) }}><Icon size={17} /> {label}</button> })}</div>
+          {resultTab === 'documents' && selected && <section id="result-tabpanel-documents" role="tabpanel" aria-labelledby="result-tab-documents" className="batch-card result-panel">
             <div className="card-header"><div><p className="overline">DOCUMENT COMPARISON</p><h2>Inspect the source and proposed candidate</h2></div><span className="quiet-tag">{selected.matches.length} matches in this file</span></div>
-            <div className="doc-selector" role="tablist" aria-label="Documents">{inspection.documents.map(document => <button type="button" role="tab" aria-selected={selected.id === document.id} className={selected.id === document.id ? 'selected' : ''} key={document.id} onClick={() => { setProvenanceTarget(null); setSelectedDoc(document.id) }}>{fileIcon(document.name)}<span>{document.name}</span><small>{document.matches.length}</small></button>)}</div>
-            {provenanceTarget?.documentId === selected.id && <p className={`provenance-navigation ${provenanceTarget.locator.status === 'SUPPORTED' ? 'is-precise' : ''}`} role="status">{provenanceTarget.locator.status !== 'SUPPORTED' ? <>Graph evidence supports this document only. No defensible text span, PDF page, or bounding box is available for this relationship.</> : provenanceTarget.locator.kind === 'ocr_line_boxes' ? <>Opened page {provenanceTarget.locator.page} at approximate OCR line boxes. These boxes locate recognized text, not exact glyphs or independently verified relationship proof.</> : <>Opened graph evidence at source lines {provenanceTarget.locator.lineStart}{provenanceTarget.locator.lineEnd === provenanceTarget.locator.lineStart ? '' : `–${provenanceTarget.locator.lineEnd}`}. The highlighted text is a navigation aid, not a release-safety finding.</>}</p>}
+            <div className="doc-selector" role="tablist" aria-label="Documents">{inspection.documents.map((document, index) => { const isSelected = selected.id === document.id; return <button type="button" role="tab" id={`document-tab-${document.id}`} aria-controls="document-comparison-panel" aria-selected={isSelected} tabIndex={isSelected ? 0 : -1} className={isSelected ? 'selected' : ''} key={document.id} ref={element => { if (element) documentTabs.current.set(document.id, element); else documentTabs.current.delete(document.id) }} onClick={() => selectDocument(document.id)} onKeyDown={event => { const nextIndex = moveReviewTabFocus(index, inspection.documents.length, event.key); if (nextIndex === null) return; event.preventDefault(); selectDocument(inspection.documents[nextIndex].id, true) }}>{fileIcon(document.name)}<span>{document.name}</span><small>{document.matches.length}</small></button> })}</div>
+            {provenanceTarget?.documentId === selected.id && <p ref={provenanceStatus} tabIndex={-1} className={`provenance-navigation ${provenanceTarget.locator.status === 'SUPPORTED' ? 'is-precise' : ''}`} role="status">{provenanceTarget.locator.status !== 'SUPPORTED' ? <>Graph evidence supports this document only. No defensible text span, PDF page, or bounding box is available for this relationship.</> : provenanceTarget.locator.kind === 'ocr_line_boxes' ? <>Opened page {provenanceTarget.locator.page} at approximate OCR line boxes. These boxes locate recognized text, not exact glyphs or independently verified relationship proof.</> : <>Opened graph evidence at source lines {provenanceTarget.locator.lineStart}{provenanceTarget.locator.lineEnd === provenanceTarget.locator.lineStart ? '' : `–${provenanceTarget.locator.lineEnd}`}. The highlighted text is a navigation aid, not a release-safety finding.</>}</p>}
             <div className="comparison-toolbar">
               <div className="comparison-layout" role="group" aria-label="Comparison layout">
                 {([['split', 'Side by side'], ['original', 'Original only'], ['candidate', 'Candidate only']] as const).map(([mode, label]) =>
@@ -530,7 +547,7 @@ export default function BatchDemo() {
               {coordinateCorrections.length > 0 && <div className="pending-regions"><strong>{coordinateCorrections.length} staged · not applied</strong>{coordinateCorrections.map((region, index) => <span key={`${region.documentId}-${region.page}-${region.x0}-${index}`}>Page {region.page}: ({region.x0}, {region.y0})–({region.x1}, {region.y1}) {shortType(region.kind)} <button type="button" aria-label={`Remove staged region ${index + 1}`} disabled={busy || coordinateRescanRequired} onClick={() => setCoordinateCorrections(current => current.filter((_, itemIndex) => itemIndex !== index))}><X size={14} /></button></span>)}<button type="button" className="primary-button" disabled={busy || coordinateRescanRequired} onClick={() => rescanCoordinates()}>{busy ? 'Rescanning…' : 'Rescan and apply staged regions'}</button></div>}
               {coordinateRescanRequired && <div className="coordinate-rescan-warning"><CircleAlert size={16} /><span>The prior candidate remains visible. Retry the exact coordinate change, or keep the previous candidate before making another edit.</span><button type="button" className="secondary-button" disabled={busy || !coordinateRescanTarget} onClick={retryCoordinateRescan}>Retry rescan</button><button type="button" className="text-button" disabled={busy} onClick={keepPreviousCoordinateCandidate}>Keep previous candidate</button></div>}
             </section>}
-            <div className={`comparison ${comparisonMode !== 'split' ? 'is-single' : ''}`}>
+            <div id="document-comparison-panel" role="tabpanel" aria-labelledby={`document-tab-${selected.id}`} className={`comparison ${comparisonMode !== 'split' ? 'is-single' : ''}`}>
               {comparisonMode !== 'candidate' && <div className="comparison-column"><div className="pane-heading"><span>ORIGINAL · SYNTHETIC INPUT</span><span>{selected.matches.length} highlighted matches</span></div>
                 <div className="document-pane" ref={sourcePane} onScroll={event => syncPaneScroll(event.currentTarget, candidatePane.current)}>
                   {selected.mediaPreview && <MediaPages document={selected} candidate={false} zoom={mediaZoom} pending={coordinateCorrections} provenance={provenanceTarget?.documentId === selected.id ? provenanceTarget : null} onDraw={(page, x0, y0, x1, y1) => stageCoordinate(selected.id, page, x0, y0, x1, y1)} />}
@@ -555,12 +572,12 @@ export default function BatchDemo() {
             </div>
             {(demoDownloadBlockReason || coordinateCorrections.length > 0 || coordinateRescanRequired) && <p className="download-blocked">{coordinateRescanRequired ? 'Download is blocked until the coordinate rescan succeeds. Previous applied regions remain visible while you retry.' : coordinateCorrections.length > 0 ? 'Download is disabled while coordinate regions are staged. Rescan to apply or remove them.' : demoDownloadBlockReason}</p>}
           </section>}
-          {resultTab === 'relationships' && <section className="batch-card result-panel relationship-panel">
+          {resultTab === 'relationships' && <section id="result-tabpanel-relationships" role="tabpanel" aria-labelledby="result-tab-relationships" className="batch-card result-panel relationship-panel">
             <div className="card-header"><div><p className="overline">CROSS-DOCUMENT CONTEXT</p><h2>Entity relationship map</h2></div><span className="quiet-tag">Explicit evidence only</span></div>
             <p className="panel-intro">This map separates people, organizations, and projects. Arrows carry a typed relationship; it never derives a tie from proximity or co-mentions.</p>
             <RelationshipGraph key={inspectionEpoch} graph={inspection.entityGraph} graphReview={inspection.graphReview} apiBase={API_BASE} documentNames={new Map(inspection.documents.map((document, index) => [document.id, `Document ${String(index + 1).padStart(2, '0')} · ${document.kind.toUpperCase()}`]))} onInspectDocument={(id, evidence) => { setProvenanceTarget(evidence); setSelectedDoc(id); setComparisonMode('split'); setResultTab('documents') }} />
           </section>}
-          {resultTab === 'verification' && <section className="batch-card result-panel"><div className="card-header"><div><p className="overline">EVIDENCE, NOT A VANITY SCORE</p><h2>Verification scorecard</h2></div><span className="status-pill">REVIEW REQUIRED</span></div>
+          {resultTab === 'verification' && <section id="result-tabpanel-verification" role="tabpanel" aria-labelledby="result-tab-verification" className="batch-card result-panel"><div className="card-header"><div><p className="overline">EVIDENCE, NOT A VANITY SCORE</p><h2>Verification scorecard</h2></div><span className="status-pill">REVIEW REQUIRED</span></div>
             <p className="panel-intro">These are observable checks for this run. Reference-label agreement appears only when complete synthetic labels were supplied; it does not measure anonymity or performance on other datasets.</p>
             {inspection.verification.annotationScore ? (() => { const score = inspection.verification.annotationScore; return <div className="annotation-panel"><div className="annotation-heading"><div><span className="overline">EXACT-SPAN AGREEMENT</span><h3>Reviewed candidate vs reference labels</h3></div><span className="quiet-tag">{score.basis === 'CURATED_SYNTHETIC_SAMPLE' ? 'Demo-authored sample' : 'Reviewer-attested labels'}</span></div>
               <div className="automatic-baseline"><div><strong>Automatic baseline</strong><span>Before manual additions or false-positive exclusions</span></div><div><span>Precision</span><strong>{percent(score.automaticExact.truePositives, score.automaticExact.truePositives + score.automaticExact.falsePositives)}</strong></div><div><span>Recall</span><strong>{percent(score.automaticExact.truePositives, score.automaticExact.truePositives + score.automaticExact.falseNegatives)}</strong></div></div>
