@@ -83,6 +83,13 @@ supplier data. `Blocked externally` is not the same as done.
   text with a different engine/annotated ground truth; separate automatic
   detector scores from reviewer corrections and measure graph/link quality.
   Exit: reproducible per-format/per-type false-negative report and abstention.
+  - [x] Aggregate-only synthetic evaluator separates automatic and
+    reviewer-corrected exact-span errors by format and entity type. When
+    complete synthetic labels are supplied, the demo displays bounded totals
+    and explicitly abstains from independent final-artifact and graph claims.
+  - [ ] Freeze an independently annotated holdout, validate untouched final
+    pixels/text with a different executable checker, and measure reviewed
+    graph links and identity adjudication. No production qualification exists.
 - [ ] **D08 — Accessible, scalable review UI.** Test keyboard, screen-reader,
   zoom, responsive layout and a larger batch; keep a navigable table fallback
   when a graph is too dense. Exit: automated checks plus a human walkthrough.

@@ -1117,6 +1117,7 @@ def test_reference_labels_measure_exact_reviewed_spans_without_approval(demo_cli
     assert response.status_code == 200, response.text
     body = response.json()
     score = body["verification"]["annotation_score"]
+    aggregate = body["verification"]["aggregate_scorecard"]
     assert score["basis"] == "REVIEWER_ATTESTED_EXHAUSTIVE"
     assert score["status"] == "OBSERVATIONAL_ONLY"
     assert score["labelled_documents"] == 2 and score["gold_annotations"] == 8
@@ -1128,6 +1129,14 @@ def test_reference_labels_measure_exact_reviewed_spans_without_approval(demo_cli
             "entity_type": "OTHER_SENSITIVE"} in score["per_document"][0]["missed"]
     assert body["release_authorized"] is False and body["export_available"] is False
     assert next(check for check in body["verification"]["checks"] if check["name"] == "Reference-label agreement")["status"] == "REVIEW"
+    assert aggregate == {
+        "status": "OBSERVATIONAL_ONLY", "classification": "SYNTHETIC_INTERNAL_EVALUATION_ONLY",
+        "qualification": "NOT_QUALIFIED", "automatic_exact": score["automatic_exact"],
+        "reviewer_corrected_exact": score["exact"],
+        "final_artifact_validation": {"status": "ABSTAINED", "reason": "INDEPENDENT_ENGINE_UNAVAILABLE"},
+        "relationship_review": "NO_GRAPH_GOLD_OR_REVIEW_STATE",
+    }
+    assert "email" not in str(aggregate) and "riya@example.test" not in str(aggregate)
 
 
 @pytest.mark.parametrize("change", [

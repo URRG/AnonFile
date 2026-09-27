@@ -23,6 +23,7 @@ from app.contracts import PayloadError
 from app.demo_contextual import contextual_spans
 from app.demo_contextual_surrogates import contextual_alias
 from app.demo_surrogates import SSN_SHAPE, demo_field_kind, typed_alias
+from app.d07_scorecard import ScorecardError, scorecard
 from app.evaluation import EvaluationError, evaluate, parse_gold, parse_predictions
 from app.media_preview import extract_media, render_candidate
 from app.processing import _field_type, detect_text
@@ -140,14 +141,14 @@ def _verify_curated_sample(labelled: list[dict[str, Any]], documents: list[dict[
             raise PayloadError("Curated sample labels do not match the built-in reference.")
 
 
-def _score_reference_annotations(value: object, documents: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _score_reference_annotations(value: object, documents: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """Score reviewed spans only against explicitly supplied synthetic labels.
 
     The caller's exhaustiveness assertion is not verified. This measures
     agreement with those labels, not independent detector quality or anonymity.
     """
     if value is None:
-        return None
+        return None, None
     if (not isinstance(value, dict) or set(value) != {"basis", "documents"}
             or value["basis"] not in {"REVIEWER_ATTESTED_EXHAUSTIVE", "CURATED_SYNTHETIC_SAMPLE"}):
         raise PayloadError("Invalid synthetic reference annotations.")
@@ -167,15 +168,21 @@ def _score_reference_annotations(value: object, documents: list[dict[str, Any]])
                             "annotations": item["annotations"]} for item in labelled])
         if value["basis"] == "CURATED_SYNTHETIC_SAMPLE":
             _verify_curated_sample(labelled, documents)
-        predictions = parse_predictions([{"id": document["id"], "annotations": [
+        reviewed_rows = [{"id": document["id"], "annotations": [
             {"start": match["start"], "end": match["end"], "entity_type": match["kind"]}
-            for match in document["matches"] if match["applied"]]} for document in documents], gold)
-        automatic_predictions = parse_predictions([{"id": document["id"], "annotations": [
+            for match in document["matches"] if match["applied"]]} for document in documents]
+        automatic_rows = [{"id": document["id"], "annotations": [
             {"start": match["start"], "end": match["end"], "entity_type": match["kind"]}
-            for match in document["matches"] if match["origin"] == "AUTOMATIC"]} for document in documents], gold)
+            for match in document["matches"] if match["origin"] == "AUTOMATIC"]} for document in documents]
+        predictions = parse_predictions(reviewed_rows, gold)
+        automatic_predictions = parse_predictions(automatic_rows, gold)
         report = evaluate(gold, predictions)
         automatic_report = evaluate(gold, automatic_predictions)
-    except EvaluationError:
+        aggregate = scorecard(documents=gold, formats={document["id"]: document["kind"] for document in documents},
+                              automatic=automatic_rows, reviewer_corrected=reviewed_rows, abstentions={},
+                              graph_gold=None, graph_automatic=None, graph_reviewer_corrected=None,
+                              primary_engine="bounded_synthetic_rules")
+    except (EvaluationError, ScorecardError):
         raise PayloadError("Invalid synthetic reference annotations.") from None
     exact = report["exact"]
     def counts(item: dict[str, Any]) -> dict[str, int]:
@@ -192,12 +199,20 @@ def _score_reference_annotations(value: object, documents: list[dict[str, Any]])
                                        "false_negatives": len(missed)},
                              "missed": [{"start": span.start, "end": span.end, "entity_type": span.entity_type}
                                         for span in missed]})
-    return {"basis": value["basis"], "status": "OBSERVATIONAL_ONLY",
-            "labelled_documents": len(documents), "gold_annotations": exact["corpus"]["gold_annotations"],
-            "exact": counts(exact["corpus"]),
-            "automatic_exact": counts(automatic_report["exact"]["corpus"]),
-            "per_type": {kind: counts(item) for kind, item in exact["per_entity"].items()},
-            "per_document": per_document}
+    public_aggregate = {
+        "status": "OBSERVATIONAL_ONLY", "classification": aggregate["classification"],
+        "qualification": aggregate["qualification"],
+        "automatic_exact": counts(aggregate["automatic"]["exact"]["corpus"]),
+        "reviewer_corrected_exact": counts(aggregate["reviewer_corrected"]["exact"]["corpus"]),
+        "final_artifact_validation": aggregate["final_artifact_validation"],
+        "relationship_review": aggregate["graph"]["automatic"]["reason"],
+    }
+    return ({"basis": value["basis"], "status": "OBSERVATIONAL_ONLY",
+             "labelled_documents": len(documents), "gold_annotations": exact["corpus"]["gold_annotations"],
+             "exact": counts(exact["corpus"]),
+             "automatic_exact": counts(automatic_report["exact"]["corpus"]),
+             "per_type": {kind: counts(item) for kind, item in exact["per_entity"].items()},
+             "per_document": per_document}, public_aggregate)
 
 
 def _validate_structured(format_name: str, content: str) -> None:
@@ -1231,7 +1246,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
            for item in manual_findings):
         raise PayloadError("A manual finding cannot override an existing detected span.")
     structure_failures = sum(doc["structure_check"] == "fail" for doc in documents)
-    annotation_score = _score_reference_annotations(payload.get("reference_annotations"), documents)
+    annotation_score, aggregate_scorecard = _score_reference_annotations(payload.get("reference_annotations"), documents)
     return {
         "posture": "SYNTHETIC_DEMO_ONLY", "release_authorized": False, "export_available": False,
         "documents": documents, "entities": entities, "relationships": relationships,
@@ -1250,6 +1265,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
             "status": "REVIEW_REQUIRED", "known_rule_residual_matches": residual,
             "source_value_residuals": source_value_residuals,
             "structure_failures": structure_failures, "annotation_score": annotation_score,
+            "aggregate_scorecard": aggregate_scorecard,
             "checks": [
                 {"name": "Selected-span application", "status": "PASS" if total_mentions and transformed_mentions == total_mentions else "REVIEW",
                  "detail": f"{transformed_mentions} of {total_mentions} selected matches received a proposed replacement. Reviewer exclusions retain source values and require further review."},
@@ -1267,6 +1283,9 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
                 {"name": "Reference-label agreement", "status": "REVIEW" if annotation_score else "NOT_MEASURED",
                  "detail": "Exact-span counts compare the reviewed candidate with supplied synthetic labels; they are not an independent model benchmark."
                  if annotation_score else "No complete reference labels were supplied for this batch."},
+                {"name": "Aggregate synthetic scorecard", "status": "REVIEW" if aggregate_scorecard else "NOT_MEASURED",
+                 "detail": "Automatic and reviewer-corrected exact-span counts are aggregate-only. Final-artifact validation is abstained; this does not authorize release."
+                 if aggregate_scorecard else "No complete synthetic labels were supplied, so aggregate scoring is not measured."},
             ],
         },
         "limitations": [
