@@ -43,6 +43,17 @@ class IndependentFinalOcrVerifier(Protocol):
         """Verify rerasterized final PDF bytes, not pre-PDF working pixels."""
 
 
+class FinalPngTranscriptVerifier(Protocol):
+    """Provisioned checker that can transcribe one exact final PNG.
+
+    The transcript is intentionally a low-level, caller-owned value.  This
+    module never log it or turn it into an authorization decision.
+    """
+
+    def extract_final_png_text(self, png_bytes: bytes) -> str:
+        """Return bounded OCR text or raise a fixed verification error."""
+
+
 def _reject(message: str) -> None:
     raise FinalOcrVerificationError(message)
 
@@ -292,6 +303,16 @@ class TesseractCliVerifier:
         for png_bytes in png_pages:
             if _contains_source_value(self._run_png(png_bytes), values):
                 _reject("Independent final OCR verifier found residual content; inspect the candidate manually.")
+
+    def extract_final_png_text(self, png_bytes: bytes) -> str:
+        """Transcribe one exact final PNG after the provisioning gate.
+
+        There is no executable discovery or RapidOCR/PATH fallback here.  A
+        caller must have supplied the same absolute, allowlisted, hash-pinned
+        Tesseract executable used by the final verifier.
+        """
+        self._assert_provisioned()
+        return self._run_png(png_bytes)
 
     def verify_pdf(self, pdf_bytes: bytes, absent_values: Sequence[str]) -> None:
         if not isinstance(pdf_bytes, bytes) or not pdf_bytes or self.pdf_rasterizer is None:

@@ -64,6 +64,18 @@ def test_tesseract_uses_exact_final_png_bytes_without_rapidocr_fallback():
     assert process.waited == 1
 
 
+def test_tesseract_exposes_bounded_transcript_only_after_provisioning_gate():
+    process = FakeProcess(stdout=b"fictional final canary\n")
+    text = verifier(lambda *_args, **_kwargs: process).extract_final_png_text(b"exact-final-png")
+    assert text == "fictional final canary\n"
+    assert process.stdin.getvalue() == b"exact-final-png"
+
+
+def test_transcript_unavailable_without_an_explicit_pinned_executable():
+    with pytest.raises(FinalOcrVerificationError, match="verifier is unavailable"):
+        TesseractCliVerifier().extract_final_png_text(b"exact-final-png")
+
+
 @pytest.mark.parametrize("failure, expected", [
     (FileNotFoundError(), "verifier is unavailable"),
     (OSError(), "verification failed"),

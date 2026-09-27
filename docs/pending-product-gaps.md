@@ -148,6 +148,10 @@ supplier data. `Blocked externally` is not the same as done.
     rasters and an independent OCR adapter, and reports aggregate-only outcomes.
     It is not wired into the demo or release path; no actual independent OCR,
     renderer qualification, or media recall claim follows from this scaffold.
+    Each fictional fixture now pins its exact final-raster SHA-256 and records
+    expected-final/forbidden-source synthetic canaries. The optional adapter
+    consumes only an already provisioned, hash- and runtime-pinned Tesseract
+    verifier; it has no PATH fallback and remains unavailable by default.
   - [ ] Freeze an independently annotated holdout, validate untouched final
     pixels/text with a different executable checker, and measure reviewed
     graph links and identity adjudication. No production qualification exists.
