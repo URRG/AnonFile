@@ -53,6 +53,26 @@ test('recorded review fails closed on an unbound claim, changed endpoint, or uns
     t.mock.restoreAll()
   }
 })
+
+test('recorded review has one 30-second deadline and propagates caller cancellation', { timeout: 2000 }, async t => {
+  const original = globalThis.setTimeout; const delays = []
+  t.mock.method(globalThis, 'setTimeout', (callback, delay, ...args) => { delays.push(delay); return original(callback, 0, ...args) })
+  let transportSignal
+  t.mock.method(globalThis, 'fetch', async (_url, options) => { transportSignal = options.signal; return new Promise(() => {}) })
+  await assert.rejects(getRecordedGraphReview({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding: recordedBinding, graph: recordedGraph }), /Recorded review timed out after 30 seconds/)
+  assert.deepEqual(delays, [30000]); assert.equal(transportSignal.aborted, true)
+  const controller = new AbortController(); let secondSignal
+  t.mock.restoreAll(); t.mock.method(globalThis, 'fetch', async (_url, options) => { secondSignal = options.signal; return new Promise(() => {}) })
+  const pending = getRecordedGraphReview({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding: recordedBinding, graph: recordedGraph, signal: controller.signal })
+  await new Promise(resolve => setImmediate(resolve)); controller.abort()
+  await assert.rejects(pending, /request was cancelled/); assert.equal(secondSignal.aborted, true)
+})
+
+test('recorded review bounds a streamed response before JSON parsing', async t => {
+  const oversized = new Uint8Array(64_001)
+  t.mock.method(globalThis, 'fetch', async () => new Response(oversized, { status: 200, headers: { 'content-type': 'application/json' } }))
+  await assert.rejects(getRecordedGraphReview({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding: recordedBinding, graph: recordedGraph }), GraphReviewFailure)
+})
 test('authenticated metadata-only path binds recipient, dataset, mode and policy', async t => {
   let calls = 0
   const mock = t.mock.method(globalThis, 'fetch', async (_url, options) => {

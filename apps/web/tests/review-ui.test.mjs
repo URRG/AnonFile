@@ -48,6 +48,10 @@ test('recorded graph panel is opt-in, memory-only, and keeps durable decisions d
   }
   assert.doesNotMatch(graphSource, /localStorage|sessionStorage|console\.log/)
   assert.match(batchSource, /graphReview=\{inspection\.graphReview\} apiBase=\{API_BASE\}/)
+  assert.match(graphSource, /const recordedMode = Boolean\(graphReview && apiBase\)/)
+  assert.match(graphSource, /!recordedMode && <section className="relationship-identity-review"/)
+  assert.match(graphSource, /\{!recordedMode && <EdgeReviewControls/)
+  assert.match(graphSource, /Recorded decision outcome may be unverified\. Reload the graph before retrying\./)
 })
 
 test('three-document synthetic graph keeps review state ephemeral and cues only typed conflicts', () => {

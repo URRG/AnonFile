@@ -1118,6 +1118,7 @@ export async function runControlPlane(request: ControlPlaneRequest): Promise<Con
 }
 
 const GRAPH_REVIEW_REF = /^graph(?:snap|node|claim):v1:[A-Za-z0-9_-]{43}$/
+const GRAPH_REVIEW_MAX_RESPONSE_BYTES = 64_000
 
 function graphReviewInvalid(): never {
   throw new GraphReviewFailure('The recorded review response was invalid. No decision was applied.')
@@ -1167,21 +1168,53 @@ function parseRecordedGraphReview(value: unknown, binding: BatchGraphReviewBindi
   return { snapshotRef: binding.snapshotRef, revision: value.revision as number, decisions, posture: 'REVIEW_ONLY_NO_RELEASE_OR_DELIVERY' }
 }
 
+async function boundedGraphReviewJson(response: Response, signal: AbortSignal): Promise<unknown> {
+  const declared = response.headers.get('content-length')
+  if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > GRAPH_REVIEW_MAX_RESPONSE_BYTES)) graphReviewInvalid()
+  const reader = response.body?.getReader()
+  if (!reader) graphReviewInvalid()
+  const chunks: Uint8Array[] = []; let bytes = 0
+  try {
+    while (true) {
+      signal.throwIfAborted()
+      const next = await reader.read()
+      if (next.done) break
+      bytes += next.value.byteLength
+      if (bytes > GRAPH_REVIEW_MAX_RESPONSE_BYTES) { await reader.cancel(); graphReviewInvalid() }
+      chunks.push(next.value)
+    }
+  } catch (cause) {
+    if (cause instanceof GraphReviewFailure || signal.aborted) throw cause
+    graphReviewInvalid()
+  }
+  const payload = new Uint8Array(bytes); let offset = 0
+  for (const chunk of chunks) { payload.set(chunk, offset); offset += chunk.byteLength }
+  try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(payload)) } catch { graphReviewInvalid() }
+}
+
 async function graphReviewRequest(apiBase: string, path: string, token: string, method: 'GET' | 'POST', body: unknown | undefined, signal?: AbortSignal): Promise<unknown> {
   if (!token.trim()) throw new GraphReviewFailure('A reviewer token is required. It is held only in this page until reload.')
-  let response: Response
+  const controller = new AbortController(); let timedOut = false
+  const cancel = () => controller.abort()
+  signal?.addEventListener('abort', cancel, { once: true }); if (signal?.aborted) cancel()
+  const timer = setTimeout(() => { if (!controller.signal.aborted) { timedOut = true; controller.abort() } }, REQUEST_TIMEOUT_MS)
   try {
-    response = await fetch(apiBase.replace(/\/$/, '') + path, { method, credentials: 'omit', redirect: 'error', cache: 'no-store', signal,
-      headers: { Authorization: `Bearer ${token.trim()}`, ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}) },
-      ...(method === 'POST' ? { body: JSON.stringify(body) } : {}) })
-  } catch {
-    throw new GraphReviewFailure('Cannot reach the recorded review service. No decision was applied.')
-  }
-  if (!response.ok) {
-    const messages: Record<number, string> = { 401: 'Reviewer authentication is required.', 403: 'This token is not permitted to review recorded graphs.', 404: 'This recorded graph is unavailable or no longer belongs to this reviewer.', 409: 'This graph changed. Reload it before submitting another decision.' }
-    throw new GraphReviewFailure(messages[response.status] ?? 'The recorded review request failed. No decision was applied.', response.status)
-  }
-  try { return await response.json() } catch { graphReviewInvalid() }
+    return await abortable(async () => {
+      let response: Response
+      try { response = await fetch(apiBase.replace(/\/$/, '') + path, { method, credentials: 'omit', redirect: 'error', cache: 'no-store', signal: controller.signal,
+        headers: { Authorization: `Bearer ${token.trim()}`, ...(method === 'POST' ? { 'Content-Type': 'application/json' } : {}) },
+        ...(method === 'POST' ? { body: JSON.stringify(body) } : {}) })
+      } catch { throw new GraphReviewFailure(method === 'POST' ? 'Recorded decision outcome may be unverified. Reload the graph before retrying.' : 'Cannot reach the recorded review service.') }
+      if (!response.ok) {
+        const messages: Record<number, string> = { 401: 'Reviewer authentication is required.', 403: 'This token is not permitted to review recorded graphs.', 404: 'This recorded graph is unavailable or no longer belongs to this reviewer.', 409: 'This graph changed. Reload it before submitting another decision.' }
+        throw new GraphReviewFailure(messages[response.status] ?? (method === 'POST' ? 'Recorded decision outcome may be unverified. Reload the graph before retrying.' : 'The recorded review request failed.'), response.status)
+      }
+      return await boundedGraphReviewJson(response, controller.signal)
+    }, controller.signal)
+  } catch (cause) {
+    if (controller.signal.aborted) throw new GraphReviewFailure(timedOut ? 'Recorded review timed out after 30 seconds.' : method === 'POST' ? 'Recorded decision outcome may be unverified. Reload the graph before retrying.' : 'Recorded review request was cancelled.')
+    throw cause
+  } finally { clearTimeout(timer); signal?.removeEventListener('abort', cancel) }
 }
 
 export async function getRecordedGraphReview(request: { apiBase: string; token: string; binding: BatchGraphReviewBinding; graph: EntityGraph; signal?: AbortSignal }): Promise<RecordedGraphReview> {
