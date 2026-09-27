@@ -41,8 +41,9 @@ def test_existing_crlf_worktree_fixture_has_same_locked_content(tmp_path):
     copied.mkdir()
     for source in FIXTURE.iterdir():
         raw = source.read_bytes()
-        assert b"\r" not in raw
-        (copied / source.name).write_bytes(raw.replace(b"\n", b"\r\n"))
+        assert b"\r" not in raw.replace(b"\r\n", b"")
+        canonical = raw.replace(b"\r\n", b"\n")
+        (copied / source.name).write_bytes(canonical.replace(b"\n", b"\r\n"))
     assert run_fixture(copied) == run_fixture(FIXTURE)
     assert run_live_detector_fixture(copied) == run_live_detector_fixture(FIXTURE)
 
