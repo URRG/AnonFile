@@ -58,6 +58,15 @@ def test_graph_container_type_and_bounds_fail_closed():
         assert False
 
 
+def test_missing_graph_gold_and_review_state_abstains():
+    values = inputs(); values.update(graph_gold=None, graph_automatic=None, graph_reviewer_corrected=None)
+    report = scorecard(**values)
+    assert report["graph"] == {
+        "automatic": {"status": "ABSTAINED", "reason": "NO_GRAPH_GOLD_OR_REVIEW_STATE"},
+        "reviewer_corrected": {"status": "ABSTAINED", "reason": "NO_GRAPH_GOLD_OR_REVIEW_STATE"},
+    }
+
+
 def test_graph_relation_ontology_and_opaque_endpoint_ids_fail_closed():
     for claim in [("Ada", "E1", "organization_1"), ("works_at", "Ada", "organization_1"),
                   ("works_at", "E1", "Ada")]:

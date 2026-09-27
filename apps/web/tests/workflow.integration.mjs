@@ -68,6 +68,8 @@ test('real HTTP intake, withholding, independent review and isolation', { timeou
     assert.equal(batch.verification.status, 'REVIEW_REQUIRED')
     assert.equal(batch.verification.annotationScore.goldAnnotations, 2)
     assert.equal(batch.verification.annotationScore.exact.truePositives, 2)
+    assert.equal(batch.verification.aggregateScorecard.qualification, 'NOT_QUALIFIED')
+    assert.equal(batch.verification.aggregateScorecard.finalArtifactValidation.status, 'ABSTAINED')
     const excluded = await inspectSyntheticBatch({ apiBase: base, token: processor, files: [
       { id: 'mail', name: 'mail.txt', size: Buffer.byteLength(mailText), contentBase64: Buffer.from(mailText).toString('base64') },
       { id: 'record', name: 'record.json', size: Buffer.byteLength(recordText), contentBase64: Buffer.from(recordText).toString('base64') },

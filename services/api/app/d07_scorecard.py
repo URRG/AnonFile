@@ -68,9 +68,14 @@ def _abstentions(documents: tuple[GoldDocument, ...], value: dict[str, str]) -> 
             "by_reason": {reason: counts[reason] for reason in sorted(counts)}}
 
 
-def _graph_metrics(gold: set[tuple[str, str, str]], predicted: set[tuple[str, str, str]]) -> dict[str, Any]:
+def _graph_metrics(gold: set[tuple[str, str, str]] | None,
+                   predicted: set[tuple[str, str, str]] | None) -> dict[str, Any]:
     # Validate both containers before any set operation.  Direct callers must
     # get the same fixed error rather than a type-dependent exception.
+    if gold is None and predicted is None:
+        return {"status": "ABSTAINED", "reason": "NO_GRAPH_GOLD_OR_REVIEW_STATE"}
+    if gold is None or predicted is None:
+        _reject()
     if (type(gold) is not set or type(predicted) is not set or len(gold) > _MAX_GRAPH_CLAIMS
             or len(predicted) > _MAX_GRAPH_CLAIMS
             or any(not isinstance(edge, tuple) or len(edge) != 3
@@ -126,8 +131,8 @@ def _validated_documents(value: Any) -> tuple[GoldDocument, ...]:
 
 def scorecard(*, documents: tuple[GoldDocument, ...], formats: dict[str, str], automatic: list[dict[str, Any]],
               reviewer_corrected: list[dict[str, Any]], abstentions: dict[str, str],
-              graph_gold: set[tuple[str, str, str]], graph_automatic: set[tuple[str, str, str]],
-              graph_reviewer_corrected: set[tuple[str, str, str]], primary_engine: str,
+              graph_gold: set[tuple[str, str, str]] | None, graph_automatic: set[tuple[str, str, str]] | None,
+              graph_reviewer_corrected: set[tuple[str, str, str]] | None, primary_engine: str,
               final_validation: dict[str, Any] | None = None) -> dict[str, Any]:
     """Create a deterministic, aggregate-only synthetic D07 report."""
     if not isinstance(primary_engine, str) or not primary_engine:

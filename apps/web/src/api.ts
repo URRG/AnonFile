@@ -150,12 +150,16 @@ export type BatchAnnotationScore = { basis: BatchReferenceManifest['basis']; sta
   labelledDocuments: number; goldAnnotations: number; exact: BatchAnnotationCounts; automaticExact: BatchAnnotationCounts;
   perType: Record<string, BatchAnnotationCounts>;
   perDocument: BatchFileScore[] }
+export type BatchAggregateScorecard = { status: 'OBSERVATIONAL_ONLY'; classification: 'SYNTHETIC_INTERNAL_EVALUATION_ONLY';
+  qualification: 'NOT_QUALIFIED'; automaticExact: BatchAnnotationCounts; reviewerCorrectedExact: BatchAnnotationCounts;
+  finalArtifactValidation: { status: 'ABSTAINED'; reason: 'INDEPENDENT_ENGINE_UNAVAILABLE' | 'NO_EXECUTABLE_BOUND_INDEPENDENT_VALIDATOR' };
+  relationshipReview: 'NO_GRAPH_GOLD_OR_REVIEW_STATE' }
 export type BatchInspection = { posture: 'SYNTHETIC_DEMO_ONLY'; releaseAuthorized: false; exportAvailable: false;
   documents: BatchDocument[]; entities: BatchEntity[]; relationships: BatchRelationship[]; entityGraph: EntityGraph;
   summary: { files: number; detectedMentions: number; transformedMentions: number; suppressedMentions: number;
     linkedEntities: number; explicitRelationships: number };
   verification: { status: 'REVIEW_REQUIRED'; knownRuleResidualMatches: number; sourceValueResiduals: number; structureFailures: number;
-    annotationScore: BatchAnnotationScore | null; checks: BatchCheck[] };
+    annotationScore: BatchAnnotationScore | null; aggregateScorecard: BatchAggregateScorecard | null; checks: BatchCheck[] };
   limitations: string[] }
 
 const BATCH_EXTENSIONS = new Set(['txt', 'csv', 'json', 'jsonl', 'pdf', 'png', 'jpg', 'jpeg'])
@@ -564,8 +568,11 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
       !safeCount(verification.source_value_residuals) || !safeCount(verification.structure_failures) ||
       !Array.isArray(verification.checks) || verification.checks.length < 3 || verification.checks.length > 10) batchInvalid()
   const rawScore = verification.annotation_score
+  const rawAggregate = verification.aggregate_scorecard
   if (reference === null && rawScore != null) batchInvalid()
   if (reference !== null && !object(rawScore)) batchInvalid()
+  if (reference === null && rawAggregate != null) batchInvalid()
+  if (reference !== null && !object(rawAggregate)) batchInvalid()
   let annotationScore: BatchAnnotationScore | null = null
   if (object(rawScore)) {
     const countTriple = (raw: unknown): BatchAnnotationCounts => {
@@ -633,6 +640,26 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
       labelledDocuments: documents.length, goldAnnotations: rawScore.gold_annotations as number, exact, automaticExact,
       perType, perDocument }
   }
+  let aggregateScorecard: BatchAggregateScorecard | null = null
+  if (object(rawAggregate)) {
+    const countTriple = (raw: unknown): BatchAnnotationCounts => {
+      if (!object(raw) || !safeCount(raw.true_positives) || !safeCount(raw.false_positives) || !safeCount(raw.false_negatives)) batchInvalid()
+      return { truePositives: raw.true_positives as number, falsePositives: raw.false_positives as number,
+        falseNegatives: raw.false_negatives as number }
+    }
+    if (!annotationScore || rawAggregate.status !== 'OBSERVATIONAL_ONLY' || rawAggregate.classification !== 'SYNTHETIC_INTERNAL_EVALUATION_ONLY' ||
+        rawAggregate.qualification !== 'NOT_QUALIFIED' || rawAggregate.relationship_review !== 'NO_GRAPH_GOLD_OR_REVIEW_STATE' ||
+        !object(rawAggregate.final_artifact_validation) || rawAggregate.final_artifact_validation.status !== 'ABSTAINED' ||
+        !['INDEPENDENT_ENGINE_UNAVAILABLE', 'NO_EXECUTABLE_BOUND_INDEPENDENT_VALIDATOR'].includes(String(rawAggregate.final_artifact_validation.reason))) batchInvalid()
+    const automaticExact = countTriple(rawAggregate.automatic_exact)
+    const reviewerCorrectedExact = countTriple(rawAggregate.reviewer_corrected_exact)
+    if (JSON.stringify(automaticExact) !== JSON.stringify(annotationScore.automaticExact) ||
+        JSON.stringify(reviewerCorrectedExact) !== JSON.stringify(annotationScore.exact)) batchInvalid()
+    aggregateScorecard = { status: 'OBSERVATIONAL_ONLY', classification: 'SYNTHETIC_INTERNAL_EVALUATION_ONLY', qualification: 'NOT_QUALIFIED',
+      automaticExact, reviewerCorrectedExact,
+      finalArtifactValidation: { status: 'ABSTAINED', reason: rawAggregate.final_artifact_validation.reason as BatchAggregateScorecard['finalArtifactValidation']['reason'] },
+      relationshipReview: 'NO_GRAPH_GOLD_OR_REVIEW_STATE' }
+  }
   const checks: BatchCheck[] = verification.checks.map(raw => {
     if (!object(raw) || !safeText(raw.name, 100) || !BATCH_CHECK.has(String(raw.status)) || !safeText(raw.detail, 600)) batchInvalid()
     return { name: raw.name, status: raw.status as BatchCheck['status'], detail: raw.detail }
@@ -644,7 +671,7 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
       linkedEntities: summary.linked_entities as number, explicitRelationships: summary.explicit_relationships as number },
     verification: { status: 'REVIEW_REQUIRED', knownRuleResidualMatches: verification.known_rule_residual_matches as number,
       sourceValueResiduals: verification.source_value_residuals as number,
-      structureFailures: verification.structure_failures as number, annotationScore, checks }, limitations: value.limitations as string[] }
+      structureFailures: verification.structure_failures as number, annotationScore, aggregateScorecard, checks }, limitations: value.limitations as string[] }
 }
 
 export async function inspectSyntheticBatch(request: { apiBase: string; token: string; files: BatchUpload[]; manualNames: string[];

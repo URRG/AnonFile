@@ -416,10 +416,17 @@ test('batch client binds annotation-score counts to submitted labels and detecto
       { id: 'f2', exact: { true_positives: 0, false_positives: 0, false_negatives: 1 },
         missed: [{ start: 0, end: 4, entity_type: 'OTHER_SENSITIVE' }] },
     ] }
+  response.verification.aggregate_scorecard = { status: 'OBSERVATIONAL_ONLY', classification: 'SYNTHETIC_INTERNAL_EVALUATION_ONLY',
+    qualification: 'NOT_QUALIFIED', automatic_exact: { true_positives: 1, false_positives: 0, false_negatives: 1 },
+    reviewer_corrected_exact: { true_positives: 1, false_positives: 0, false_negatives: 1 },
+    final_artifact_validation: { status: 'ABSTAINED', reason: 'INDEPENDENT_ENGINE_UNAVAILABLE' },
+    relationship_review: 'NO_GRAPH_GOLD_OR_REVIEW_STATE' }
   const mock = t.mock.method(globalThis, 'fetch', async () => Response.json(response))
   const result = await inspectSyntheticBatch({ ...request, referenceManifest })
   assert.equal(result.verification.annotationScore.exact.falseNegatives, 1)
   assert.equal(result.verification.annotationScore.automaticExact.falseNegatives, 1)
+  assert.equal(result.verification.aggregateScorecard.qualification, 'NOT_QUALIFIED')
+  assert.equal(result.verification.aggregateScorecard.finalArtifactValidation.status, 'ABSTAINED')
   assert.deepEqual(result.verification.annotationScore.perDocument[1].missed,
     [{ start: 0, end: 4, entity_type: 'OTHER_SENSITIVE' }])
   const sent = JSON.parse(mock.mock.calls[0].arguments[1].body)
@@ -433,6 +440,9 @@ test('batch client binds annotation-score counts to submitted labels and detecto
     value => { value.verification.annotation_score.per_document[1].missed[0].end = 3 },
     value => { value.verification.annotation_score.per_document[0].exact.true_positives = 0 },
     value => { value.verification.annotation_score.automatic_exact.false_negatives = 0 },
+    value => { value.verification.aggregate_scorecard.qualification = 'QUALIFIED' },
+    value => { value.verification.aggregate_scorecard.automatic_exact.false_negatives = 0 },
+    value => { value.verification.aggregate_scorecard.relationship_review = 'SCORED' },
   ]) {
     const tampered = structuredClone(response); change(tampered)
     t.mock.method(globalThis, 'fetch', async () => Response.json(tampered))
