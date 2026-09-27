@@ -112,7 +112,14 @@ def _load(raw: dict[str, Any]) -> RevisionedGraphReviewStore:
                     or isinstance(event["revision"], bool) or event["revision"] < 1
                     or type(event.get("reviewer")) is not str):
                 raise GraphReviewError()
-            _apply(engine, event, tenant_ref=snapshot.tenant_ref, snapshot_ref=snapshot.snapshot_ref,
+            # PR108 persisted terminal decisions before action tags existed.
+            # Retain exactly that authenticated on-disk representation, and no
+            # broader guesswork, so unknown stored shapes still fail closed.
+            if set(event) == {"claim", "revision", "decision", "reviewer"}:
+                replay = {"type": "decision", "claim": event["claim"], "decision": event["decision"]}
+            else:
+                replay = event
+            _apply(engine, replay, tenant_ref=snapshot.tenant_ref, snapshot_ref=snapshot.snapshot_ref,
                    expected_revision=event["revision"] - 1, reviewer_ref=event["reviewer"])
         return engine
     except (KeyError, TypeError, ValueError, GraphReviewError):

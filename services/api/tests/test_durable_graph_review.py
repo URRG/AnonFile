@@ -2,12 +2,13 @@ import base64
 import hashlib
 import json
 import os
+import time
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from app.durable_graph_review import DurableGraphReviewAdapter
+from app.durable_graph_review import DurableGraphReviewAdapter, _snapshot_dict
 from app.durable_repository import DurableStore
 from app.main import create_app
 from app.revisioned_graph_review import (GraphClaimSnapshot, GraphIdentityMerge, GraphIdentitySplit,
@@ -86,6 +87,27 @@ def test_durable_merge_replays_after_restart_without_evidence(tmp_path):
     assert "graphevidence" not in str(result)
     restarted = adapter(tmp_path).read(tenant_ref=tenant, snapshot_ref=item.snapshot_ref)
     assert restarted["revision"] == 1 and restarted["identity_actions"] == result["identity_actions"]
+
+
+def test_pr108_legacy_decision_event_reopens_and_preserves_audit_on_new_action(tmp_path):
+    tenant = ref("tenantref", "a"); item = identity_snapshot(tenant); service = adapter(tmp_path)
+    reviewer = ref("reviewerref", "legacy-reviewer")
+    # This is the exact PR108 persisted shape: it intentionally has no type.
+    legacy = {"claim": item.claims[0].identifier, "revision": 1, "decision": "ACCEPT", "reviewer": reviewer}
+    service._store.add_control({"id": item.snapshot_ref, "kind": "graph_review", "tenant": tenant,
+        "created_at": "server", "expires_at": time.time() + 300, "size_bytes": 0,
+        "payload": {"snapshot": _snapshot_dict(item), "events": [legacy]}}, "system")
+    restarted = adapter(tmp_path)
+    assert restarted.read(tenant_ref=tenant, snapshot_ref=item.snapshot_ref)["decisions"] == [
+        {"claim_ref": item.claims[0].identifier, "decision": "ACCEPT"}]
+    first, second = item.nodes[0].identifier, item.nodes[1].identifier
+    result = restarted.merge_identities(tenant_ref=tenant, snapshot_ref=item.snapshot_ref,
+        merge=GraphIdentityMerge(first, (first, second)), expected_revision=1, reviewer_ref=reviewer)
+    assert result["revision"] == 2 and result["decisions"][0]["decision"] == "ACCEPT"
+    persisted = restarted._store.get_control("graph_review", item.snapshot_ref, tenant)
+    assert [event["revision"] for event in persisted["payload"]["events"]] == [1, 2]
+    assert [event["action"] for event in restarted._store.audit_events(tenant)] == [
+        "graph_review.created", "graph_review.updated"]
 
 
 def test_durable_split_is_atomic_and_replays_after_restart(tmp_path):
