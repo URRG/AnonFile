@@ -49,6 +49,7 @@ def test_candidate_low_confidence_is_reported_without_weakening_input_ocr(monkey
     from app import media_preview
 
     image = Image.new("RGB", (320, 180), "white")
+    ImageDraw.Draw(image).text((10, 10), "John Singh", fill="black")
     monkeypatch.setattr(media_preview, "_engine", lambda: lambda _: SimpleNamespace(
         txts=["John Singh"], boxes=[[(10, 10), (120, 10), (120, 35), (10, 35)]], scores=[0.55]))
     with pytest.raises(PayloadError, match="confidence is too low"):
