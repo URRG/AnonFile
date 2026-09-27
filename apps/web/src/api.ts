@@ -1193,17 +1193,24 @@ function parseRecordedGraphReview(value: unknown, binding: BatchGraphReviewBindi
       if (Object.keys(raw).length !== 4 || typeof raw.source !== 'string' || !Array.isArray(raw.replacements) || raw.replacements.length < 2 || raw.replacements.length > 100 ||
           raw.replacements.some(item => typeof item !== 'string') || new Set(raw.replacements).size !== raw.replacements.length || raw.replacements.includes(raw.source) ||
           nodeKinds.get(raw.source) !== 'person' || !activePeople.has(raw.source) || raw.replacements.some(item => nodeKinds.get(item) !== 'person' || !activePeople.has(item)) || !Array.isArray(raw.assignments) || raw.assignments.length > 200) graphReviewInvalid()
-      const required = new Set([...effectivePeople].filter(([key, person]) => person === raw.source && !rejected.has(key.slice(0, key.lastIndexOf(':')))).map(([key]) => key))
+      // Public projections separate decisions from identity actions and omit
+      // their interleaved audit order. A final REJECT may therefore follow a
+      // legitimate split assignment. Require every endpoint still active in
+      // the final projection, while allowing only incident endpoints that may
+      // have been assigned before a later rejection; never accept an
+      // unbound/fabricated endpoint assignment.
+      const incident = new Set([...effectivePeople].filter(([, person]) => person === raw.source).map(([key]) => key))
+      const required = new Set([...incident].filter(key => !rejected.has(key.slice(0, key.lastIndexOf(':')))))
       const assigned = new Set<string>(); const endpointAssignments: RecordedGraphSplitAssignment[] = []
       for (const assignment of raw.assignments) {
         if (!object(assignment) || Object.keys(assignment).length !== 3 || typeof assignment.claim_ref !== 'string' ||
             (assignment.endpoint !== 'source' && assignment.endpoint !== 'target') || typeof assignment.replacement !== 'string' ||
             !raw.replacements.includes(assignment.replacement)) graphReviewInvalid()
         const key = `${assignment.claim_ref}:${assignment.endpoint}`
-        if (!required.has(key) || assigned.has(key)) graphReviewInvalid()
+        if (!incident.has(key) || assigned.has(key)) graphReviewInvalid()
         assigned.add(key); endpointAssignments.push({ claimRef: assignment.claim_ref, endpoint: assignment.endpoint, replacementPersonRef: assignment.replacement })
       }
-      if (assigned.size !== required.size) graphReviewInvalid()
+      if ([...required].some(key => !assigned.has(key))) graphReviewInvalid()
       for (const assignment of endpointAssignments) effectivePeople.set(`${assignment.claimRef}:${assignment.endpoint}`, assignment.replacementPersonRef)
       activePeople.delete(raw.source); for (const replacement of raw.replacements as string[]) activePeople.add(replacement)
       noSelfLinks(); identityActions.push({ action: 'SPLIT', sourcePersonRef: raw.source, replacementPersonRefs: [...raw.replacements] as string[], endpointAssignments })

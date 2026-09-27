@@ -59,6 +59,23 @@ test('recorded review rejects schema-valid inconsistent revision, action cap, an
   }
 })
 
+test('recorded split parser tolerates unavailable decision/action chronology without accepting extra endpoints', async t => {
+  const sourceRef = recordedBinding.nodes[0].nodeRef, firstRef = `${opaque('graphnode').slice(0, -1)}C`, secondRef = `${opaque('graphnode').slice(0, -1)}D`
+  const graph = { nodes: [{ id: 'person_1', kind: 'person', label: 'Person A', documentIds: [] }, { id: 'person_2', kind: 'person', label: 'Person B', documentIds: [] }, { id: 'person_3', kind: 'person', label: 'Person C', documentIds: [] }, { id: 'organization_1', kind: 'organization', label: 'Organization A', documentIds: [] }], edges: [{ id: 'edge_1', type: 'works_at', sourceId: 'person_1', targetId: 'organization_1', evidence: [] }] }
+  const binding = { snapshotRef: recordedBinding.snapshotRef, nodes: [{ graphNodeId: 'person_1', nodeRef: sourceRef }, { graphNodeId: 'person_2', nodeRef: firstRef }, { graphNodeId: 'person_3', nodeRef: secondRef }, recordedBinding.nodes[1]], claims: recordedBinding.claims, posture: recordedBinding.posture }
+  const response = assignments => ({ snapshot_ref: binding.snapshotRef, revision: 2, nodes: [{ id: sourceRef, kind: 'person' }, { id: firstRef, kind: 'person' }, { id: secondRef, kind: 'person' }, { id: recordedBinding.nodes[1].nodeRef, kind: 'organization' }], claims: [{ id: recordedBinding.claims[0].claimRef, relation: 'works_at', source: sourceRef, target: recordedBinding.nodes[1].nodeRef }], decisions: [{ claim_ref: recordedBinding.claims[0].claimRef, decision: 'REJECT' }], identity_actions: [{ action: 'SPLIT', source: sourceRef, replacements: [firstRef, secondRef], assignments }], conflicts: [], posture: 'REVIEW_ONLY_NO_RELEASE_OR_DELIVERY' })
+  // The public view omits audit ordering. These are respectively the
+  // split-then-reject and reject-then-split shapes; both must parse safely.
+  for (const assignments of [[{ claim_ref: recordedBinding.claims[0].claimRef, endpoint: 'source', replacement: firstRef }], []]) {
+    t.mock.method(globalThis, 'fetch', async () => Response.json(response(assignments)))
+    const view = await getRecordedGraphReview({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding, graph })
+    assert.equal(view.identityActions[0].action, 'SPLIT'); t.mock.restoreAll()
+  }
+  const fabricated = response([{ claim_ref: recordedBinding.claims[0].claimRef, endpoint: 'target', replacement: firstRef }])
+  t.mock.method(globalThis, 'fetch', async () => Response.json(fabricated))
+  await assert.rejects(getRecordedGraphReview({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding, graph }), GraphReviewFailure)
+})
+
 test('recorded identity actions post only bound opaque refs and reject malformed post responses as uncertain', async t => {
   const secondRef = `${opaque('graphnode').slice(0, -1)}C`
   const graph = { ...recordedGraph, nodes: [...recordedGraph.nodes, { id: 'person_2', kind: 'person', label: 'Person B', documentIds: ['document_1'] }] }
