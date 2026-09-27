@@ -1,0 +1,4 @@
+{"id":"text-001","annotations":[{"start":6,"end":24,"entity_type":"EMAIL"}]}
+{"id":"text-002","annotations":[]}
+{"id":"text-003","annotations":[{"start":0,"end":4,"entity_type":"PERSON_NAME"}]}
+{"id":"text-004","annotations":[{"start":8,"end":14,"entity_type":"ORGANIZATION"}]}

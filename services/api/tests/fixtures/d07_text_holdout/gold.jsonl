@@ -1,0 +1,4 @@
+{"id":"text-001","group_id":"synthetic-holdout-a","split":"holdout","text":"Email jules@example.test now.","annotations":[{"start":6,"end":24,"entity_type":"EMAIL"}]}
+{"id":"text-002","group_id":"synthetic-holdout-b","split":"holdout","text":"Call +1-555-010-2222 today.","annotations":[{"start":5,"end":20,"entity_type":"PHONE"}]}
+{"id":"text-003","group_id":"synthetic-holdout-c","split":"holdout","text":"Maya Patel submitted a note.","annotations":[{"start":0,"end":10,"entity_type":"PERSON_NAME"}]}
+{"id":"text-004","group_id":"synthetic-holdout-d","split":"holdout","text":"Project Aurora starts Friday.","annotations":[]}
