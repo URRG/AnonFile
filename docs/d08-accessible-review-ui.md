@@ -11,8 +11,9 @@ does not authorize release, export, or processing of real supplier data.
   live region. Zoom percentage, evidence buttons, map controls, and table
   controls have accessible labels.
 - Strong `:focus-visible` outlines are present for the map, node controls,
-  evidence buttons, table scroller, and controls. Motion is disabled when the
-  operating system requests reduced motion.
+  evidence buttons, table scroller, and controls. Every actionable
+  detail/evidence/table control has a 44px minimum target. Motion is disabled
+  or made instant when the operating system requests reduced motion.
 - The layout collapses from the map/detail columns at narrow widths and keeps
   the large map and relationship table horizontally scrollable. Resize-driven
   zoom never shrinks map labels below 80%; narrow views open the table instead
@@ -24,9 +25,10 @@ does not authorize release, export, or processing of real supplier data.
   the detail panel.
 
 Automated evidence: `npm test` includes `tests/review-ui.test.mjs`, which
-checks keyboard focus movement, the dense-batch threshold, and the required
-accessibility and responsive source contracts. `npm run build` type-checks and
-bundles the UI.
+checks the focus helper, dense-batch threshold, target-size and reduced-motion
+contracts, and required accessibility/responsive source contracts. These are
+static source-contract checks, not rendered browser interaction tests. `npm run
+build` type-checks and bundles the UI.
 
 ## Human walkthrough status: NOT PERFORMED
 

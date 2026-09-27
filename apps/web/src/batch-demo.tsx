@@ -195,7 +195,8 @@ export default function BatchDemo() {
     if (resultTab !== 'documents' || !provenanceTarget || provenanceTarget.locator.status !== 'SUPPORTED') return
     const frame = requestAnimationFrame(() => {
       const target = sourcePane.current?.querySelector<HTMLElement>('[data-provenance-target="true"]')
-      target?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
+      target?.scrollIntoView({ block: 'center', behavior: reduceMotion ? 'auto' : 'smooth' })
       target?.focus({ preventScroll: true })
     })
     return () => cancelAnimationFrame(frame)

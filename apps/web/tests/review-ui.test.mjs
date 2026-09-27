@@ -8,6 +8,7 @@ const navigationCompiled = ts.transpileModule(navigationSource, { compilerOption
 const { isDenseReviewGraph, moveReviewFocus, readableReviewZoom } = await import(`data:text/javascript;base64,${Buffer.from(navigationCompiled).toString('base64')}`)
 const graphSource = readFileSync(new URL('../src/relationship-graph.tsx', import.meta.url), 'utf8')
 const graphCss = readFileSync(new URL('../src/relationship-graph.css', import.meta.url), 'utf8')
+const batchSource = readFileSync(new URL('../src/batch-demo.tsx', import.meta.url), 'utf8')
 
 test('graph node keyboard navigation wraps and supports Home and End', () => {
   assert.equal(moveReviewFocus(0, 3, 'ArrowRight'), 1)
@@ -42,4 +43,16 @@ test('review graph preserves visible focus, touch-sized controls, responsive lay
   for (const required of ['min-height:44px', ':focus-visible', '@media (prefers-reduced-motion:reduce)', '@media(max-width:760px)', 'overflow:auto']) {
     assert.match(graphCss, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   }
+})
+
+test('every actionable relationship evidence and table control has a 44px target', () => {
+  for (const selector of ['.relationship-map-detail li>button', '.relationship-evidence-list button', '.relationship-fallback-table button']) {
+    const rule = new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\{[^}]*min-width:44px[^}]*min-height:44px`)
+    assert.match(graphCss, rule)
+  }
+})
+
+test('evidence navigation avoids smooth motion when reduced motion is requested', () => {
+  assert.match(batchSource, /matchMedia\?\.\('\(prefers-reduced-motion: reduce\)'\)\.matches \?\? false/)
+  assert.match(batchSource, /behavior: reduceMotion \? 'auto' : 'smooth'/)
 })
