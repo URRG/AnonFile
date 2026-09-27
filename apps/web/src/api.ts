@@ -166,8 +166,10 @@ export type RecordedGraphIdentityMerge = { action: 'MERGE'; canonicalPersonRef: 
 export type RecordedGraphSplitAssignment = { claimRef: string; endpoint: 'source' | 'target'; replacementPersonRef: string }
 export type RecordedGraphIdentitySplit = { action: 'SPLIT'; sourcePersonRef: string; replacementPersonRefs: string[]; endpointAssignments: RecordedGraphSplitAssignment[] }
 export type RecordedGraphIdentityAction = RecordedGraphIdentityMerge | RecordedGraphIdentitySplit
+export type RecordedGraphConflictGroup = { kind: 'POTENTIAL_MULTIPLE_WORKS_AT' | 'POTENTIAL_MULTIPLE_ASSIGNED_TO'; subjectRef: string; claimRefs: string[] }
 export type RecordedGraphReview = { snapshotRef: string; revision: number; decisions: RecordedGraphDecision[];
-  identityActions: RecordedGraphIdentityAction[]; posture: 'REVIEW_ONLY_NO_RELEASE_OR_DELIVERY' }
+  identityActions: RecordedGraphIdentityAction[]; conflictGroups: RecordedGraphConflictGroup[];
+  posture: 'REVIEW_ONLY_NO_RELEASE_OR_DELIVERY' }
 
 /** Source-safe failure for the optional encrypted development review seam. */
 export class GraphReviewFailure extends Error {
@@ -1134,10 +1136,10 @@ function graphReviewPath(snapshotRef: string, suffix = ''): string {
 }
 
 function parseRecordedGraphReview(value: unknown, binding: BatchGraphReviewBinding, graph: EntityGraph): RecordedGraphReview {
-  if (!object(value) || Object.keys(value).length !== 8 || value.snapshot_ref !== binding.snapshotRef ||
+  if (!object(value) || Object.keys(value).length !== 9 || value.snapshot_ref !== binding.snapshotRef ||
       !Number.isSafeInteger(value.revision) || (value.revision as number) < 0 ||
       value.posture !== 'REVIEW_ONLY_NO_RELEASE_OR_DELIVERY' || !Array.isArray(value.nodes) ||
-      !Array.isArray(value.claims) || !Array.isArray(value.decisions) || !Array.isArray(value.identity_actions) || !Array.isArray(value.conflicts)) graphReviewInvalid()
+      !Array.isArray(value.claims) || !Array.isArray(value.decisions) || !Array.isArray(value.identity_actions) || !Array.isArray(value.conflicts) || !Array.isArray(value.conflict_groups)) graphReviewInvalid()
   const nodeBindings = new Map(binding.nodes.map(item => [item.nodeRef, item.graphNodeId]))
   const claimBindings = new Map(binding.claims.map(item => [item.claimRef, item.graphEdgeId]))
   if (nodeBindings.size !== graph.nodes.length || claimBindings.size !== graph.edges.length) graphReviewInvalid()
@@ -1241,7 +1243,31 @@ function parseRecordedGraphReview(value: unknown, binding: BatchGraphReviewBindi
     return affected.length ? [{ kind, subjects: affected.length, relationships: affected.reduce((total, objects) => total + objects.size, 0) }] : []
   })
   if (JSON.stringify(conflicts) !== JSON.stringify(expectedConflicts)) graphReviewInvalid()
-  return { snapshotRef: binding.snapshotRef, revision: value.revision as number, decisions, identityActions, posture: 'REVIEW_ONLY_NO_RELEASE_OR_DELIVERY' }
+  const expectedConflictGroups = ([['works_at', 'POTENTIAL_MULTIPLE_WORKS_AT'], ['assigned_to', 'POTENTIAL_MULTIPLE_ASSIGNED_TO']] as const).flatMap(([relation, kind]) => {
+    const result: RecordedGraphConflictGroup[] = []
+    for (const [subject, objects] of groups.get(relation)!) {
+      if (objects.size <= 1) continue
+      const claimRefs = [...claims].filter(([claimRef, claim]) => {
+        if (!accepted.has(claimRef) || claim.relation !== relation) return false
+        const source = effectivePeople.get(`${claimRef}:source`) ?? claim.source
+        const target = effectivePeople.get(`${claimRef}:target`) ?? claim.target
+        return (relation === 'works_at' ? source : target) === subject
+      }).map(([claimRef]) => claimRef).sort()
+      result.push({ kind, subjectRef: subject, claimRefs })
+    }
+    return result
+  })
+  const conflictGroups: RecordedGraphConflictGroup[] = []
+  for (const raw of value.conflict_groups) {
+    if (!object(raw) || Object.keys(raw).length !== 3 ||
+        (raw.kind !== 'POTENTIAL_MULTIPLE_WORKS_AT' && raw.kind !== 'POTENTIAL_MULTIPLE_ASSIGNED_TO') ||
+        typeof raw.subject_ref !== 'string' || !nodeBindings.has(raw.subject_ref) || !Array.isArray(raw.claim_refs) ||
+        raw.claim_refs.length < 2 || raw.claim_refs.some(item => typeof item !== 'string' || !claimBindings.has(item)) ||
+        new Set(raw.claim_refs).size !== raw.claim_refs.length || JSON.stringify([...raw.claim_refs].sort()) !== JSON.stringify(raw.claim_refs)) graphReviewInvalid()
+    conflictGroups.push({ kind: raw.kind, subjectRef: raw.subject_ref, claimRefs: raw.claim_refs })
+  }
+  if (JSON.stringify(conflictGroups) !== JSON.stringify(expectedConflictGroups)) graphReviewInvalid()
+  return { snapshotRef: binding.snapshotRef, revision: value.revision as number, decisions, identityActions, conflictGroups, posture: 'REVIEW_ONLY_NO_RELEASE_OR_DELIVERY' }
 }
 
 async function boundedGraphReviewJson(response: Response, signal: AbortSignal): Promise<unknown> {
