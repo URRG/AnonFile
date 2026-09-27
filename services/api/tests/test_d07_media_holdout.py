@@ -2,7 +2,6 @@ import json
 import hashlib
 import os
 from pathlib import Path
-import subprocess
 
 import pytest
 from PIL import Image
@@ -15,6 +14,10 @@ from app.tesseract_verifier import TesseractCliVerifier
 FIXTURE = Path(__file__).parent / "fixtures" / "d07_media_holdout"
 LOCAL_EXECUTABLE_SHA256 = "c66f0f12ed76f6aa455dac97684bbc86756d6a732380bee09122454cfda3f420"
 LOCAL_ENG_SHA256 = "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2"
+# Captured from the approved official 5.5.3.20260724 runtime's raw --version
+# bytes under the v2 stdin/PSM/tessdata/English command identity.  Do not
+# derive this from the executable under test.
+LOCAL_RUNTIME_IDENTITY = "e92d5df1ffa4e7fb2484527902e121ea9adaabe0b99be01ff1fd28118b011e67"
 
 
 def _opt_in_tesseract_paths() -> tuple[Path, Path] | None:
@@ -179,12 +182,8 @@ def test_opt_in_pinned_tesseract_reads_exact_fictional_final_pngs_only() -> None
     configured = _opt_in_tesseract_paths()
     assert configured is not None
     executable, tessdata = configured
-    environment = {"TESSDATA_PREFIX": str(tessdata), "SystemRoot": os.environ["SystemRoot"]}
-    version = subprocess.run([str(executable), "--version"], check=True, stdout=subprocess.PIPE,
-                             stderr=subprocess.DEVNULL, env=environment, timeout=5).stdout.decode("utf-8")
-    runtime_identity = hashlib.sha256(f"tesseract-cli-stdin-psm6-tessdata-eng-v2\n{version.strip()}".encode()).hexdigest()
     verifier = TesseractCliVerifier(executable=executable, allowed_executables=(executable,),
-        expected_executable_sha256=LOCAL_EXECUTABLE_SHA256, expected_runtime_identity=runtime_identity,
+        expected_executable_sha256=LOCAL_EXECUTABLE_SHA256, expected_runtime_identity=LOCAL_RUNTIME_IDENTITY,
         tessdata_directory=tessdata, allowed_tessdata_directories=(tessdata,),
         expected_eng_traineddata_sha256=LOCAL_ENG_SHA256)
     report = evaluate_final_pixels(rendered=pixels(), ocr=TesseractPixelOcr(verifier), fixture_directory=FIXTURE)

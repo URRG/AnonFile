@@ -155,6 +155,21 @@ def test_integrity_or_runtime_pin_mismatch_prevents_candidate_ocr(digest, versio
     assert candidate_calls == []
 
 
+def test_checked_in_runtime_identity_rejects_unexpected_version_before_candidate_ocr():
+    candidate_calls = []
+    checked = TesseractCliVerifier(executable=EXECUTABLE, allowed_executables=(EXECUTABLE,),
+        expected_executable_sha256="a" * 64,
+        expected_runtime_identity="e92d5df1ffa4e7fb2484527902e121ea9adaabe0b99be01ff1fd28118b011e67",
+        tessdata_directory=TESSDATA, allowed_tessdata_directories=(TESSDATA,),
+        expected_eng_traineddata_sha256="b" * 64,
+        executable_digest_reader=lambda _: "a" * 64, traineddata_digest_reader=lambda _: "b" * 64,
+        version_popen_factory=lambda *_args, **_kwargs: FakeProcess(stdout=b"tesseract unexpected\n"),
+        popen_factory=lambda command, **kwargs: candidate_calls.append(command))
+    with pytest.raises(FinalOcrVerificationError, match="verifier is unavailable"):
+        checked.extract_final_png_text(b"exact-final-png")
+    assert candidate_calls == []
+
+
 def test_model_pin_mismatch_or_ambient_tessdata_cannot_reach_candidate_ocr(monkeypatch):
     candidate_calls = []
     monkeypatch.setenv("TESSDATA_PREFIX", "C:/ambient/unpinned/tessdata")
