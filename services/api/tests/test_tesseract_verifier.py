@@ -1,6 +1,7 @@
 """Mock-only coverage for the opt-in independent final OCR adapter."""
 from io import BytesIO
 import hashlib
+import os
 from pathlib import Path
 import subprocess
 
@@ -9,7 +10,8 @@ import pytest
 from app.tesseract_verifier import FinalOcrVerificationError, TesseractCliVerifier
 
 
-EXECUTABLE = Path("C:/Program Files/Tesseract-OCR/tesseract.exe")
+EXECUTABLE = (Path("C:/Program Files/Tesseract-OCR/tesseract.exe") if os.name == "nt"
+              else Path("/opt/tesseract/bin/tesseract"))
 VERSION = "tesseract 5.4.0"
 RUNTIME_IDENTITY = hashlib.sha256(f"tesseract-cli-stdin-psm6-v1\n{VERSION}".encode()).hexdigest()
 
