@@ -159,11 +159,19 @@ supplier data. `Blocked externally` is not the same as done.
     reviewer-corrected exact-span errors by format and entity type. When
     complete synthetic labels are supplied, the demo displays bounded totals
     and explicitly abstains from independent final-artifact and graph claims.
+  - [x] The internal synthetic scorecard now pairs assessed-only recall with
+    eligible, assessed, and abstained gold-positive counts and conservative
+    lower/upper recall bounds overall and by format/entity type. An
+    all-abstained or zero-gold slice cannot appear to have perfect recall.
+    These fictional-label accounting bounds are not independent performance
+    evidence and are not exposed as a production qualification.
   - [x] A separate, non-authorizing final-pixel holdout evaluator has a bounded,
     source-byte-pinned synthetic manifest, accepts only caller-supplied final
     rasters and an independent OCR adapter, and reports aggregate-only outcomes.
-    It is not wired into the demo or release path; no actual independent OCR,
-    renderer qualification, or media recall claim follows from this scaffold.
+    It is not wired into the demo or release path; no renderer qualification
+    or media recall claim follows from this scaffold. An opt-in local test ran
+    pinned Tesseract on the two tiny fictional final rasters only; this is a
+    wiring check, not independent OCR completeness evidence.
     Each fictional fixture now pins its exact final-raster SHA-256 and records
     expected-final/forbidden-source synthetic canaries. The optional adapter
     consumes only an already provisioned, hash- and runtime-pinned Tesseract
