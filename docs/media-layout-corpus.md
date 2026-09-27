@@ -14,7 +14,9 @@ cd services/api
 
 The corpus covers a single-column PDF control, two columns, a ruled table, a
 static form, an interactive AcroForm boundary, a screenshot PNG, a faint
-low-contrast scan, and an EXIF-rotated JPEG. The tests run the installed OCR
+low-contrast scan, a catastrophic-blur provider-claim case, dedicated
+unprocessed-neighbor and material-OCR-overlap rasters, and an EXIF-rotated
+JPEG. The tests run the installed OCR
 engine against the two-column, table, static-form and screenshot inputs. A
 case passes only when it returns bounded page/text output or returns one of the
 explicit review abstentions. The screenshot replacement regression intentionally
@@ -48,3 +50,11 @@ reading order, or general scan quality. The interactive AcroForm is required
 to abstain before OCR. The faint scan's low-confidence response is tested with
 a deterministic provider result because real OCR confidence is
 hardware/model dependent.
+
+The catastrophic-blur fixture separately supplies a confident fictional
+provider claim whose claimed box has no measurable raster edge; it must fail
+closed before a candidate is created. The dedicated unprocessed-neighbor and
+material-overlap fixtures likewise assert fail-closed exceptions before pixel
+mutation or a reading order is invented. These expected `abstain` outcomes are
+not a `NOT_QUALIFIED` measurement, and neither they nor the low-contrast case
+claims OCR completeness.
