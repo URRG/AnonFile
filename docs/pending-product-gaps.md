@@ -80,6 +80,9 @@ supplier data. `Blocked externally` is not the same as done.
     edge markers and narrowly typed multiple-affiliation/assignment cues. They
     reset on reload or graph change and are not stored adjudications, release
     decisions, or identity corrections.
+  - [x] A graph-local two-person merge *proposal* rejects direct self-link
+    collapse and resets on graph change. It does not apply a merge, split an
+    identity, alter evidence, or persist a reviewer decision.
   - [ ] Recorded reviewer accept/reject, identity merge/split and conflict
     adjudication remain unavailable in this stateless synthetic demo.
     Node/edge IDs are response-local, not durable correction keys.

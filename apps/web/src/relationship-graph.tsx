@@ -2,7 +2,7 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 're
 import { ChevronDown, ChevronUp, Focus, Minus, Plus } from 'lucide-react'
 import type { EntityGraph, EntityGraphEdge, EntityGraphEvidence, EntityGraphNode } from './api'
 import { isDenseReviewGraph, moveReviewFocus, readableReviewZoom } from './review-navigation'
-import { relationshipConflictCues, reviewStatusFor, selectionForGraph, type EphemeralEdgeReview, type GraphSelection, type RelationshipConflictCue } from './relationship-review'
+import { relationshipConflictCues, reviewStatusFor, selectionForGraph, validateMergeProposal, type EphemeralEdgeReview, type GraphSelection, type RelationshipConflictCue } from './relationship-review'
 import './relationship-graph.css'
 
 const edgeLabel: Record<EntityGraphEdge['type'], string> = {
@@ -59,9 +59,16 @@ export function RelationshipGraph({ graph, documentNames, onInspectDocument }: {
   const [tableOpen, setTableOpen] = useState(false)
   const [compact, setCompact] = useState(false)
   const [reviewState, setReviewState] = useState<{ graph: EntityGraph; reviews: Record<string, EphemeralEdgeReview> }>({ graph, reviews: {} })
+  const [mergeDraftState, setMergeDraftState] = useState<{ graph: EntityGraph; firstId: string; secondId: string }>({ graph, firstId: '', secondId: '' })
+  const [mergeProposalState, setMergeProposalState] = useState<{ graph: EntityGraph; pair: readonly [string, string] | null }>({ graph, pair: null })
   // Treat an incoming graph object as a new inspection immediately, before
   // effects or paint. Response-local edge IDs may recur for unrelated data.
   const edgeReviews = reviewState.graph === graph ? reviewState.reviews : {}
+  const mergeDraft = mergeDraftState.graph === graph ? mergeDraftState : { graph, firstId: '', secondId: '' }
+  const mergeProposal = mergeProposalState.graph === graph ? mergeProposalState.pair : null
+  const personNodes = graph.nodes.filter(node => node.kind === 'person')
+  const mergeIssue = mergeDraft.firstId && mergeDraft.secondId ? validateMergeProposal(graph, mergeDraft.firstId, mergeDraft.secondId) : null
+  const mergeIssueMessage = mergeIssue === 'SAME_PERSON' ? 'Choose two different people.' : mergeIssue === 'SELF_LINK' ? 'These people have a direct relationship that would become a self-link.' : mergeIssue ? 'Only current person aliases can be proposed.' : null
   const viewport = useRef<HTMLDivElement | null>(null)
   const nodeButtons = useRef(new Map<string, HTMLButtonElement>())
   const visibleEdges = useMemo(() => graph.edges.filter(edge => showCommunication || edge.type !== 'sent_to'), [graph.edges, showCommunication])
@@ -118,6 +125,16 @@ export function RelationshipGraph({ graph, documentNames, onInspectDocument }: {
         <button type="button" onClick={focusGraph}><Focus aria-hidden="true" size={16} /> Fit map</button>
       </div>
     </div>
+    <section className="relationship-identity-review" aria-label="Temporary identity merge proposal">
+      <div><strong>Identity review · proposal only</strong><p>Compare two generated person aliases. A proposal does not merge nodes, rewrite evidence, or authorize release.</p></div>
+      <div className="relationship-identity-controls">
+        <label>First person<select value={mergeDraft.firstId} onChange={event => { setMergeDraftState({ graph, firstId: event.target.value, secondId: mergeDraft.secondId }); setMergeProposalState({ graph, pair: null }) }}><option value="">Choose a person</option>{personNodes.map(node => <option key={node.id} value={node.id}>{node.label}</option>)}</select></label>
+        <label>Second person<select value={mergeDraft.secondId} onChange={event => { setMergeDraftState({ graph, firstId: mergeDraft.firstId, secondId: event.target.value }); setMergeProposalState({ graph, pair: null }) }}><option value="">Choose a person</option>{personNodes.map(node => <option key={node.id} value={node.id}>{node.label}</option>)}</select></label>
+        <button type="button" disabled={!mergeDraft.firstId || !mergeDraft.secondId || mergeIssue !== null} onClick={() => setMergeProposalState({ graph, pair: [mergeDraft.firstId, mergeDraft.secondId] })}>Propose merge</button>
+        {mergeProposal && <button type="button" onClick={() => setMergeProposalState({ graph, pair: null })}>Clear proposal</button>}
+      </div>
+      <p className="relationship-identity-status" role="status" aria-live="polite">{mergeIssueMessage ?? (mergeProposal ? `Proposal only: ${graph.nodes.find(node => node.id === mergeProposal[0])?.label} and ${graph.nodes.find(node => node.id === mergeProposal[1])?.label} may refer to one person. No graph change was made.` : 'No identity merge proposed. Identity split is not available in this preview.')}</p>
+    </section>
     {(dense || compact) && <p className="relationship-density-notice" role="status">{dense ? 'This batch has a dense map.' : 'This view is narrow.'} The accessible relationship table is open below for faster review.</p>}
     <p id="relationship-map-instructions" className="relationship-keyboard-help">Select a node to inspect its facts. Use Left/Right or Up/Down arrow keys to move between map nodes; Home and End jump to the first or last node.</p>
     <div className="relationship-map-layout">
