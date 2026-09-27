@@ -180,6 +180,12 @@ supplier data. `Blocked externally` is not the same as done.
     final rasters are bounded, decoded PNG fixtures (including a tiny
     PDF-rendered fictional page with adjacent source provenance), not opaque
     placeholder bytes or real-media evidence.
+  - [x] The internal fictional-label scorecard reports aggregate typed graph
+    relation precision/recall, opaque evidence-locator agreement, and complete
+    merge/split pair and cluster metrics for automatic and reviewer-corrected
+    results separately. Missing labels abstain; incomplete or contradictory
+    labels fail closed. This is synthetic accounting, not an independent
+    graph-quality or identity-resolution measurement.
   - [ ] Freeze an independently annotated holdout, validate untouched final
     pixels/text with a different executable checker, and measure reviewed
     graph links and identity adjudication. No production qualification exists.
