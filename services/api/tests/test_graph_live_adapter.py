@@ -7,6 +7,10 @@ from app.graph_live_adapter import adjudicate_private_ledger, build_private_grap
 def test_empty_public_graph_builds_private_no_adjudication_ledger():
     ledger = build_private_graph_ledger({"nodes": [], "edges": []})
     assert ledger.nodes == () and ledger.claims_by_edge == ()
+    report = adjudicate_private_ledger(ledger=ledger)
+    assert report["status"] == "ABSTAINED" and report["reason"] == "NO_RELATIONSHIPS"
+    with pytest.raises(GraphAdjudicationError):
+        adjudicate_private_ledger(ledger=ledger, decisions=(("edge_0000000000000000", "ACCEPT"),))
 
 
 def test_evidence_bound_matches_producer_limit():

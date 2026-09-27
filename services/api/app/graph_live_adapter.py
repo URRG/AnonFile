@@ -78,6 +78,14 @@ def adjudicate_private_ledger(*, ledger: PrivateGraphLedger, decisions: tuple[tu
     """Adjudicate producer-owned ledger only; response IDs are never accepted as graph input."""
     try:
         if type(ledger) is not PrivateGraphLedger or type(decisions) is not tuple or len(decisions) > len(ledger.claims_by_edge): raise ValueError
+        if not ledger.claims_by_edge:
+            if decisions:
+                raise ValueError
+            return {"schema_version": "ephemeral-graph-adjudication-v1", "state": "EPHEMERAL_STATELESS",
+                    "release_authorized": False, "status": "ABSTAINED", "reason": "NO_RELATIONSHIPS",
+                    "decisions": {"accepted": 0, "rejected": 0, "pending": 0}, "relationships": {}, "conflicts": [],
+                    "limitations": ["No relationships were produced for this batch; no adjudication was attempted.",
+                                    "This source-free in-process summary does not authorize release or delivery."]}
         edge_claims = dict(ledger.claims_by_edge)
         if len(edge_claims) != len(ledger.claims_by_edge) or any(type(item) is not tuple or len(item) != 2 or not isinstance(item[0], str)
                                                or item[0] not in edge_claims
