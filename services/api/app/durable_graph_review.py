@@ -16,7 +16,7 @@ from app.durable_repository import DurableStore
 from app.repository import detached, unavailable
 from app.revisioned_graph_review import (GraphClaimSnapshot, GraphIdentityMerge,
     GraphIdentitySplit, GraphNodeSnapshot, GraphReviewConflict, GraphReviewError,
-    GraphSnapshot, RevisionedGraphReviewStore)
+    GraphSnapshot, GraphSplitEndpointAssignment, RevisionedGraphReviewStore)
 
 
 def _record(*, tenant: str, snapshot: GraphSnapshot, state: dict[str, Any]) -> dict[str, Any]:
@@ -43,6 +43,29 @@ class DurableGraphReviewAdapter:
 
     def decide(self, *, tenant_ref: str, snapshot_ref: str, claim_ref: str,
                expected_revision: int, decision: str, reviewer_ref: str) -> dict[str, Any]:
+        return self._update(tenant_ref=tenant_ref, snapshot_ref=snapshot_ref,
+                            expected_revision=expected_revision, reviewer_ref=reviewer_ref,
+                            event={"type": "decision", "claim": claim_ref, "decision": decision})
+
+    def merge_identities(self, *, tenant_ref: str, snapshot_ref: str, merge: GraphIdentityMerge,
+                         expected_revision: int, reviewer_ref: str) -> dict[str, Any]:
+        return self._update(tenant_ref=tenant_ref, snapshot_ref=snapshot_ref,
+                            expected_revision=expected_revision, reviewer_ref=reviewer_ref,
+                            event={"type": "merge", "canonical": merge.canonical_person_ref,
+                                   "members": list(merge.member_person_refs)})
+
+    def split_identity(self, *, tenant_ref: str, snapshot_ref: str, split: GraphIdentitySplit,
+                       expected_revision: int, reviewer_ref: str) -> dict[str, Any]:
+        return self._update(tenant_ref=tenant_ref, snapshot_ref=snapshot_ref,
+                            expected_revision=expected_revision, reviewer_ref=reviewer_ref,
+                            event={"type": "split", "source": split.source_person_ref,
+                                   "replacements": list(split.replacement_person_refs),
+                                   "assignments": [{"claim": item.claim_ref, "endpoint": item.endpoint,
+                                                    "replacement": item.replacement_person_ref}
+                                                   for item in split.endpoint_assignments]})
+
+    def _update(self, *, tenant_ref: str, snapshot_ref: str, expected_revision: int,
+                reviewer_ref: str, event: dict[str, Any]) -> dict[str, Any]:
         # Direct use of the durable store transaction makes the read/CAS/write
         # indivisible across processes sharing the SQLite database.
         try:
@@ -52,9 +75,8 @@ class DurableGraphReviewAdapter:
                     raise HTTPException(404, "Control record not found")
                 engine = _load(raw)
                 try:
-                    engine.decide(tenant_ref=tenant_ref, snapshot_ref=snapshot_ref,
-                                  claim_ref=claim_ref, expected_revision=expected_revision,
-                                  decision=decision, reviewer_ref=reviewer_ref)
+                    _apply(engine, event, tenant_ref=tenant_ref, snapshot_ref=snapshot_ref,
+                           expected_revision=expected_revision, reviewer_ref=reviewer_ref)
                 except GraphReviewConflict:
                     # DurableStore rolls back and preserves HTTPException, but
                     # normalizes other exceptions to a storage failure.
@@ -86,16 +108,76 @@ def _load(raw: dict[str, Any]) -> RevisionedGraphReviewStore:
             tuple(GraphClaimSnapshot(*x) for x in s["claims"]))
         engine = RevisionedGraphReviewStore(); engine.create_snapshot(snapshot)
         for event in payload["events"]:
-            engine.decide(tenant_ref=snapshot.tenant_ref, snapshot_ref=snapshot.snapshot_ref,
-                claim_ref=event["claim"], expected_revision=event["revision"] - 1,
-                decision=event["decision"], reviewer_ref=event["reviewer"])
+            if (not isinstance(event, dict) or type(event.get("revision")) is not int
+                    or isinstance(event["revision"], bool) or event["revision"] < 1
+                    or type(event.get("reviewer")) is not str):
+                raise GraphReviewError()
+            # PR108 persisted terminal decisions before action tags existed.
+            # Retain exactly that authenticated on-disk representation, and no
+            # broader guesswork, so unknown stored shapes still fail closed.
+            if set(event) == {"claim", "revision", "decision", "reviewer"}:
+                replay = {"type": "decision", "claim": event["claim"], "decision": event["decision"]}
+            else:
+                replay = event
+            _apply(engine, replay, tenant_ref=snapshot.tenant_ref, snapshot_ref=snapshot.snapshot_ref,
+                   expected_revision=event["revision"] - 1, reviewer_ref=event["reviewer"])
         return engine
     except (KeyError, TypeError, ValueError, GraphReviewError):
         raise unavailable() from None
 
+def _apply(engine: RevisionedGraphReviewStore, event: dict[str, Any], *, tenant_ref: str,
+           snapshot_ref: str, expected_revision: int, reviewer_ref: str) -> None:
+    """Replay exactly the serialized public action vocabulary, fail closed."""
+    if not isinstance(event, dict) or type(event.get("type")) is not str:
+        raise GraphReviewError()
+    # Persisted entries carry immutable replay metadata; newly submitted action
+    # dictionaries do not. Nothing else is accepted in either representation.
+    action = {key: value for key, value in event.items() if key not in {"revision", "reviewer"}}
+    if event["type"] == "decision" and set(action) == {"type", "claim", "decision"}:
+        engine.decide(tenant_ref=tenant_ref, snapshot_ref=snapshot_ref, claim_ref=action["claim"],
+                      expected_revision=expected_revision, decision=action["decision"], reviewer_ref=reviewer_ref)
+        return
+    if event["type"] == "merge" and set(action) == {"type", "canonical", "members"}:
+        members = action["members"]
+        if type(members) is not list:
+            raise GraphReviewError()
+        engine.merge_identities(tenant_ref=tenant_ref, snapshot_ref=snapshot_ref,
+                                merge=GraphIdentityMerge(action["canonical"], tuple(members)),
+                                expected_revision=expected_revision, reviewer_ref=reviewer_ref)
+        return
+    if event["type"] == "split" and set(action) == {"type", "source", "replacements", "assignments"}:
+        replacements, assignments = action["replacements"], action["assignments"]
+        if type(replacements) is not list or type(assignments) is not list:
+            raise GraphReviewError()
+        parsed = []
+        for item in assignments:
+            if not isinstance(item, dict) or set(item) != {"claim", "endpoint", "replacement"}:
+                raise GraphReviewError()
+            parsed.append(GraphSplitEndpointAssignment(item["claim"], item["endpoint"], item["replacement"]))
+        engine.split_identity(tenant_ref=tenant_ref, snapshot_ref=snapshot_ref,
+                              split=GraphIdentitySplit(action["source"], tuple(replacements), tuple(parsed)),
+                              expected_revision=expected_revision, reviewer_ref=reviewer_ref)
+        return
+    raise GraphReviewError()
+
+
 def _events(engine: RevisionedGraphReviewStore) -> list[dict[str, Any]]:
     state = next(iter(engine._states.values()))
-    return [{"claim": x.claim_ref, "revision": x.revision, "decision": x.decision, "reviewer": x.reviewer_ref} for x in state.audit]
+    events: list[dict[str, Any]] = [{"type": "decision", "claim": x.claim_ref, "revision": x.revision,
+                                     "decision": x.decision, "reviewer": x.reviewer_ref} for x in state.audit]
+    for action, audit in zip(state.identity_actions, state.identity_audit):
+        if type(action) is GraphIdentityMerge:
+            events.append({"type": "merge", "canonical": action.canonical_person_ref,
+                           "members": list(action.member_person_refs), "revision": audit.revision,
+                           "reviewer": audit.reviewer_ref})
+        else:
+            events.append({"type": "split", "source": action.source_person_ref,
+                           "replacements": list(action.replacement_person_refs),
+                           "assignments": [{"claim": item.claim_ref, "endpoint": item.endpoint,
+                                            "replacement": item.replacement_person_ref}
+                                           for item in action.endpoint_assignments],
+                           "revision": audit.revision, "reviewer": audit.reviewer_ref})
+    return sorted(events, key=lambda item: item["revision"])
 
 def _public(engine: RevisionedGraphReviewStore) -> dict[str, Any]:
     view = engine.read(tenant_ref=next(iter(engine._states))[0], snapshot_ref=next(iter(engine._states))[1])
@@ -103,5 +185,13 @@ def _public(engine: RevisionedGraphReviewStore) -> dict[str, Any]:
             "nodes": [{"id": x.identifier, "kind": x.kind} for x in view.snapshot.nodes],
             "claims": [{"id": x.identifier, "relation": x.relation, "source": x.source_node_ref, "target": x.target_node_ref} for x in view.snapshot.claims],
             "decisions": [{"claim_ref": x[0], "decision": x[1]} for x in view.decisions],
+            "identity_actions": [{"action": "MERGE", "canonical": item.canonical_person_ref,
+                                  "members": list(item.member_person_refs)} if type(item) is GraphIdentityMerge else
+                                 {"action": "SPLIT", "source": item.source_person_ref,
+                                  "replacements": list(item.replacement_person_refs),
+                                  "assignments": [{"claim_ref": x.claim_ref, "endpoint": x.endpoint,
+                                                   "replacement": x.replacement_person_ref}
+                                                  for x in item.endpoint_assignments]}
+                                 for item in view.identity_actions],
             "conflicts": [{"kind": x[0], "subjects": x[1], "relationships": x[2]} for x in view.conflicts],
             "posture": "REVIEW_ONLY_NO_RELEASE_OR_DELIVERY"}
