@@ -1209,10 +1209,31 @@ function parseRecordedGraphReview(value: unknown, binding: BatchGraphReviewBindi
       noSelfLinks(); identityActions.push({ action: 'SPLIT', sourcePersonRef: raw.source, replacementPersonRefs: [...raw.replacements] as string[], endpointAssignments })
     } else graphReviewInvalid()
   }
+  // The public projection has no audit stream, but its monotonic revision is
+  // exactly the count of terminal decisions and identity overlay events.
+  // Enforce the server's bounded event history before trusting a displayable
+  // state, including the chronological action order above.
+  if (decisions.length + identityActions.length > 200 || value.revision !== decisions.length + identityActions.length) graphReviewInvalid()
+  const conflicts: { kind: string; subjects: number; relationships: number }[] = []
   for (const raw of value.conflicts) {
     if (!object(raw) || Object.keys(raw).length !== 3 || !['POTENTIAL_MULTIPLE_WORKS_AT', 'POTENTIAL_MULTIPLE_ASSIGNED_TO'].includes(String(raw.kind)) ||
         !Number.isSafeInteger(raw.subjects) || !Number.isSafeInteger(raw.relationships) || (raw.subjects as number) < 1 || (raw.relationships as number) < 2) graphReviewInvalid()
+    conflicts.push({ kind: raw.kind as string, subjects: raw.subjects as number, relationships: raw.relationships as number })
   }
+  const accepted = new Set(decisions.filter(item => item.decision === 'ACCEPT').map(item => item.claimRef))
+  const groups = new Map<string, Map<string, Set<string>>>([['works_at', new Map()], ['assigned_to', new Map()]])
+  for (const [claimRef, claim] of claims) {
+    if (!accepted.has(claimRef) || !groups.has(claim.relation)) continue
+    const source = effectivePeople.get(`${claimRef}:source`) ?? claim.source
+    const target = effectivePeople.get(`${claimRef}:target`) ?? claim.target
+    const [subject, object] = claim.relation === 'works_at' ? [source, target] : [target, source]
+    const bySubject = groups.get(claim.relation)!; const objects = bySubject.get(subject) ?? new Set<string>(); objects.add(object); bySubject.set(subject, objects)
+  }
+  const expectedConflicts = ([['works_at', 'POTENTIAL_MULTIPLE_WORKS_AT'], ['assigned_to', 'POTENTIAL_MULTIPLE_ASSIGNED_TO']] as const).flatMap(([relation, kind]) => {
+    const affected = [...groups.get(relation)!.values()].filter(objects => objects.size > 1)
+    return affected.length ? [{ kind, subjects: affected.length, relationships: affected.reduce((total, objects) => total + objects.size, 0) }] : []
+  })
+  if (JSON.stringify(conflicts) !== JSON.stringify(expectedConflicts)) graphReviewInvalid()
   return { snapshotRef: binding.snapshotRef, revision: value.revision as number, decisions, identityActions, posture: 'REVIEW_ONLY_NO_RELEASE_OR_DELIVERY' }
 }
 

@@ -40,9 +40,23 @@ test('recorded review maps all authorization and revision errors to source-safe 
 
 test('recorded decision posts only bound claim and expected revision', async t => {
   let received
-  t.mock.method(globalThis, 'fetch', async (_url, options) => { received = JSON.parse(options.body); return Response.json({ ...recordedPayload(4), decisions: [{ claim_ref: recordedBinding.claims[0].claimRef, decision: 'ACCEPT' }] }) })
-  const view = await decideRecordedGraphClaim({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding: recordedBinding, graph: recordedGraph, claimRef: recordedBinding.claims[0].claimRef, decision: 'ACCEPT', expectedRevision: 3 })
-  assert.deepEqual(received, { claim_ref: recordedBinding.claims[0].claimRef, decision: 'ACCEPT', expected_revision: 3 }); assert.deepEqual(view.decisions, [{ claimRef: recordedBinding.claims[0].claimRef, decision: 'ACCEPT' }])
+  t.mock.method(globalThis, 'fetch', async (_url, options) => { received = JSON.parse(options.body); return Response.json({ ...recordedPayload(1), decisions: [{ claim_ref: recordedBinding.claims[0].claimRef, decision: 'ACCEPT' }] }) })
+  const view = await decideRecordedGraphClaim({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding: recordedBinding, graph: recordedGraph, claimRef: recordedBinding.claims[0].claimRef, decision: 'ACCEPT', expectedRevision: 0 })
+  assert.deepEqual(received, { claim_ref: recordedBinding.claims[0].claimRef, decision: 'ACCEPT', expected_revision: 0 }); assert.deepEqual(view.decisions, [{ claimRef: recordedBinding.claims[0].claimRef, decision: 'ACCEPT' }])
+})
+
+test('recorded review rejects schema-valid inconsistent revision, action cap, and conflicts', async t => {
+  const invalid = [
+    () => ({ ...recordedPayload(1) }),
+    () => ({ ...recordedPayload(2), decisions: [{ claim_ref: recordedBinding.claims[0].claimRef, decision: 'REJECT' }, { claim_ref: recordedBinding.claims[0].claimRef, decision: 'REJECT' }] }),
+    () => ({ ...recordedPayload(0), conflicts: [{ kind: 'POTENTIAL_MULTIPLE_WORKS_AT', subjects: 1, relationships: 2 }] }),
+    () => ({ ...recordedPayload(201), identity_actions: Array.from({ length: 201 }, () => ({ action: 'MERGE', canonical: recordedBinding.nodes[0].nodeRef, members: [recordedBinding.nodes[0].nodeRef, recordedBinding.nodes[0].nodeRef] })) }),
+  ]
+  for (const makePayload of invalid) {
+    t.mock.method(globalThis, 'fetch', async () => Response.json(makePayload()))
+    await assert.rejects(getRecordedGraphReview({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding: recordedBinding, graph: recordedGraph }), GraphReviewFailure)
+    t.mock.restoreAll()
+  }
 })
 
 test('recorded identity actions post only bound opaque refs and reject malformed post responses as uncertain', async t => {
