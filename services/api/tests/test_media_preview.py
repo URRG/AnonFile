@@ -82,6 +82,14 @@ def test_ocr_geometry_accepts_unambiguous_single_column(monkeypatch):
     # not proof of the intended reading order.
     [[(10, 20), (100, 20), (100, 40), (10, 40)],
      [(160, 20), (280, 20), (280, 40), (160, 40)]],
+    # A third cell must not make an ambiguous row look safe by changing its count.
+    [[(10, 20), (100, 20), (100, 40), (10, 40)],
+     [(115, 20), (205, 20), (205, 40), (115, 40)],
+     [(220, 20), (310, 20), (310, 40), (220, 40)]],
+    # A narrow count cell is still a table cell; width is no reason to guess.
+    [[(10, 20), (38, 20), (38, 40), (10, 40)],
+     [(60, 20), (170, 20), (170, 40), (60, 40)],
+     [(190, 20), (280, 20), (280, 40), (190, 40)]],
     # OCR boxes that physically overlap cannot be safely repainted separately.
     [[(10, 20), (180, 20), (180, 45), (10, 45)],
      [(120, 35), (280, 35), (280, 60), (120, 60)]],
@@ -92,7 +100,8 @@ def test_ocr_geometry_abstains_on_ambiguous_layout_without_source_leak(monkeypat
 
     secret = "Maya Patel private value"
     monkeypatch.setattr(media_preview, "_engine", lambda: lambda _: SimpleNamespace(
-        txts=[secret, "ordinary adjacent value"], boxes=boxes, scores=[0.99, 0.99]))
+        txts=[secret, "ordinary adjacent value", "third cell"][:len(boxes)], boxes=boxes,
+        scores=[0.99] * len(boxes)))
 
     with pytest.raises(PayloadError, match="OCR layout is ambiguous") as error:
         _ocr_lines(Image.new("RGB", (320, 180), "white"))

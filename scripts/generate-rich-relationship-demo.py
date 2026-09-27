@@ -61,7 +61,6 @@ def footer(pdf: canvas.Canvas) -> None:
     pdf.setFillColor(MUTED)
     pdf.setFont("Helvetica", 8)
     pdf.drawString(LEFT, 30, "SYNTHETIC TEST DATA ONLY  |  Do not treat as a real incident or contact list")
-    pdf.drawRightString(RIGHT, 30, "1 / 1")
 
 
 EMAILS = (
@@ -76,7 +75,7 @@ EMAILS = (
      "To: Isha Rao <isha.rao@bluebird-air.test>",
      "Subject: Re: P0-7421 - incident bridge opened",
      "Duplicate dispatch is paused. Arjun Mehta (HS-EMP-1042) and Neha Kapoor (HS-EMP-1057) trace retries.",
-     ("Maya Patel | Incident Lead | Harborline Systems",), ()),
+     ("Name: Maya Patel", "Title: Incident Lead", "Company: Harborline Systems"), ()),
     ("03  /  01 OCT 2026  09:17 UTC  /  MITIGATION",
      "From: Kabir Sen <kabir.sen@harborline.test>",
      "To: Isha Rao <isha.rao@bluebird-air.test>",
@@ -154,7 +153,7 @@ MESSAGES = (
     ("09:07", "Neha Kapoor", "Expired route trace: https://confluence.example.test/x/P0-7421."),
     ("09:11", "Owen Blake", "Queue depth drops. On-call: +1 415 555 0184."),
     ("09:14", "Lina Chen", "Added a failing repeated-dispatch test."),
-    ("09:19", "Dev Shah", "Flag off; runbook: https://confluence.example.test/x/MAIL-28."),
+    ("09:19", "Dev Shah", "Flag off. Runbook checked in Confluence case MAIL-28."),
     ("09:26", "Arjun Mehta", "Fix review: https://github.example.test/harborline/dispatch/pull/1842."),
     ("09:34", "Neha Kapoor", "Patch and replay pass. Owner ID: HS-EMP-1057."),
     ("09:42", "Owen Blake", "Bluebird Air confirms three messages once; Isha validates."),
@@ -168,7 +167,7 @@ def slack_pdf(path: Path) -> None:
     pdf.setTitle("Synthetic developer Slack incident thread")
     y = header(pdf, "Engineering channel  /  5 developers", "Bug resolution thread",
                "#incident-p0-7421  |  01 Oct 2026  |  Fictional Slack-style conversation")
-    roster_height = 150
+    roster_height = 176
     pdf.setFillColor(PALE)
     pdf.setStrokeColor(LINE)
     pdf.roundRect(LEFT, y - roster_height, RIGHT - LEFT, roster_height, 7, fill=1, stroke=1)
@@ -184,24 +183,22 @@ def slack_pdf(path: Path) -> None:
     pdf.drawString(LEFT + 13, y - 122, "ESCALATION ROSTER")
     pdf.setFillColor(INK)
     pdf.setFont("Helvetica", 7.8)
-    pdf.drawString(LEFT + 13, y - 137, "Lina Chen is assistant to Maya Patel; assistant for Harborline Systems.")
+    pdf.drawString(LEFT + 13, y - 143, "Lina Chen is assistant to Maya Patel.")
+    pdf.drawString(LEFT + 13, y - 164, "Lina Chen is assistant for Harborline Systems.")
     y -= roster_height + 8
     for time, author, message in MESSAGES:
-            lines = wrapped(message, "Helvetica", 10.2, RIGHT - LEFT - 130)
-            height = max(38, 14 + 16 * len(lines) + 5)
+            # One reading column avoids asking OCR to infer the ordering of
+            # timestamp, author, and message cells on a shared baseline.
+            lines = wrapped(f"{time}  {author}: {message}", "Helvetica", 10.2, RIGHT - LEFT - 8)
+            height = max(38, 14 + 20 * len(lines) + 5)
             if y - height < 60:
                 raise ValueError("Slack thread no longer fits a single demo PDF page")
             pdf.setStrokeColor(LINE)
             pdf.line(LEFT, y - height, RIGHT, y - height)
-            pdf.setFillColor(MUTED)
-            pdf.setFont("Helvetica", 8.5)
-            pdf.drawString(LEFT + 2, y - 15, time)
             pdf.setFillColor(INK)
-            pdf.setFont("Helvetica-Bold", 9.5)
-            pdf.drawString(LEFT + 43, y - 15, author)
             pdf.setFont("Helvetica", 10.2)
             for index, line in enumerate(lines):
-                pdf.drawString(LEFT + 128, y - 15 - index * 16, line)
+                pdf.drawString(LEFT + 2, y - 15 - index * 20, line)
             y -= height + 4
     footer(pdf)
     pdf.showPage()

@@ -17,7 +17,10 @@ static form, an interactive AcroForm boundary, a screenshot PNG, a faint
 low-contrast scan, and an EXIF-rotated JPEG. The tests run the installed OCR
 engine against the two-column, table, static-form and screenshot inputs. A
 case passes only when it returns bounded page/text output or returns one of the
-explicit review abstentions; the suite does not pin model-specific OCR words.
+explicit review abstentions. The screenshot replacement regression intentionally
+pins one large fictional `Name: Maya Patel` OCR line: a model change that loses
+that line must fail the demo test rather than silently produce an incomplete
+candidate. Other corpus cases do not pin model-specific OCR words.
 
 The pixel oracle checks both directions relevant to repaint fidelity: no pixel
 may change outside an applied OCR-line box or a reviewer manual box, and a
@@ -26,10 +29,11 @@ replacement is empty. This is evidence about the raster candidate only, not a
 claim that OCR coverage, entity detection, or anonymization is complete.
 
 The corpus verifies the present conservative geometry guards for overlapping
-OCR boxes, competing same-baseline column/cell boxes, and an actual padded repaint box that
-touches an otherwise unprocessed OCR neighbor. It does **not** establish
-general table parsing, multi-column reading order, general scan quality, or
-that every three-or-more-cell table is rejected. The interactive AcroForm is
-required to abstain before OCR. The faint scan's low-confidence response is
-tested with a deterministic provider result because real OCR confidence is
-hardware/model dependent.
+OCR boxes, competing same-baseline two- and three-cell rows, and an actual
+padded repaint box that touches an otherwise unprocessed OCR neighbor. A real
+OCR screenshot case also repaints a fictional name and checks that pixels
+outside its OCR box are unchanged. This does **not** establish general table
+parsing, multi-column reading order, or general scan quality. The interactive
+AcroForm is required to abstain before OCR. The faint scan's low-confidence
+response is tested with a deterministic provider result because real OCR
+confidence is hardware/model dependent.

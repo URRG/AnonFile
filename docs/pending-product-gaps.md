@@ -51,12 +51,14 @@ supplier data. `Blocked externally` is not the same as done.
     table, static form and screenshot, plus AcroForm abstention, simulated
     low-confidence scan and EXIF rotation. This is not a layout benchmark.
   - [x] Conservative actual-repaint-box versus neighboring OCR ink check,
-    material OCR-ink overlap and isolated two-cell ambiguity abstention;
+    material OCR-ink overlap and same-baseline multi-cell ambiguity abstention;
     whole-line unreadable fallback now abstains. No repaint box is cropped.
+  - [x] The rich PDF/PDF/TXT batch remains usable with a single-column Slack
+    transcript and labelled signature; a real-OCR screenshot replacement has
+    an outside-mask pixel oracle. The focused D05 suite passed 102 tests.
   - [ ] General multi-column/table/form reading-order mapping, real OCR blur and
     coverage qualification, and visual utility thresholds remain open. These
-    tests are synthetic controls, not proof of completeness or production
-    fidelity; 3+ cell tables are not comprehensively classified.
+    synthetic controls do not prove completeness or production fidelity.
 - [ ] **D06 — Graph provenance and adjudication.** Link an edge to exact
   page/line/span evidence, support reviewer accept/reject and identity
   merge/split, and flag conflicts. Exit: evidence navigation and graph

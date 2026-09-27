@@ -83,7 +83,7 @@ def _assert_unambiguous_ocr_layout(lines: list[dict[str, Any]]) -> None:
                 for candidate in lines)
             if (vertical_overlap >= max(3, min(left[3] - left[1], right[3] - right[1]) // 2)
                     and horizontal_gap >= 8 and same_baseline
-                    and same_row_count == 2 and min(left[2] - left[0], right[2] - right[0]) >= 50):
+                    and same_row_count >= 2):
                 raise PayloadError("OCR layout is ambiguous for conservative visual review.")
 
 

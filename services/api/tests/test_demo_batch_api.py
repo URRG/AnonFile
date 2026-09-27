@@ -461,7 +461,8 @@ def test_batch_pdf_is_rasterized_into_new_image_only_candidate_preview(demo_clie
     stream = BytesIO()
     canvas = reportlab.Canvas(stream)
     canvas.drawString(72, 720, "From: Riya <riya@example.test>")
-    canvas.drawString(72, 700, "To: Sita <sita@example.test>")
+    # Leave enough visual separation for the bounded padded repaint regions.
+    canvas.drawString(72, 692, "To: Sita <sita@example.test>")
     canvas.save()
     request = payload()
     request["files"][0] = file("email", "thread.pdf", stream.getvalue())

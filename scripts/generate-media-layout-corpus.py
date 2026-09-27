@@ -105,7 +105,8 @@ def build_corpus(output: Path) -> dict[str, dict[str, Any]]:
     draw.rectangle((0, 0, 959, 76), fill=(20, 49, 78))
     draw.text((32, 20), "FICTIONAL STATUS SCREEN", font=ImageFont.truetype(bold, 28), fill="white")
     draw.rounded_rectangle((45, 118, 915, 450), radius=12, fill="white", outline=(172, 188, 202), width=2)
-    for y, text in ((155, "Example service status"), (220, "North region: available"), (285, "South region: available"), (350, "No real account information")):
+    for y, text in ((155, "Example service status"), (220, "North region: available"), (285, "South region: available"),
+                    (350, "Name: Maya Patel"), (405, "No real account information")):
         draw.text((82, y), text, font=ImageFont.truetype(regular, 26), fill=(22, 47, 67))
     screenshot.save(output / "screenshot.png", format="PNG", optimize=True)
     manifest["screenshot.png"] = {"kind": "png", "expected": "accept_or_abstain", "layout": "screenshot"}

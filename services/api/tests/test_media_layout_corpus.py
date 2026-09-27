@@ -206,3 +206,28 @@ def test_complex_layout_real_ocr_is_bounded_or_explicitly_abstains(corpus, filen
         assert 0 < len(text) <= media_preview.MAX_OCR_CHARS
         assert len(pages) == 1
         assert all(0 < len(page["lines"]) <= media_preview.MAX_OCR_LINES for page in pages)
+
+
+def test_real_screenshot_ocr_repaint_preserves_unprocessed_pixels(corpus):
+    """Exercise actual OCR, replacement rendering and pixel fidelity together."""
+    import base64
+    from io import BytesIO
+
+    output, _ = corpus
+    source = Image.open(output / "screenshot.png").convert("RGB")
+    text, pages = media_preview.extract_media((output / "screenshot.png").read_bytes(), ".png")
+    assert text.count("Name: Maya Patel") == 1, "fictional sensitive field was missed by OCR"
+    line = next(line for line in pages[0]["lines"] if line["text"] == "Name: Maya Patel")
+    start = text.index("Maya Patel")
+    preview = media_preview.render_candidate(pages, [{
+        "start": start, "end": start + len("Maya Patel"), "source": "Maya Patel",
+        "replacement": "John Singh", "applied": True,
+    }], "image")
+    assert preview["fallback_lines"] == preview["self_ocr_residual_sources"] == 0
+    candidate = Image.open(BytesIO(base64.b64decode(preview["pages"][0]["candidate_png_base64"]))).convert("RGB")
+    changed = np.any(np.asarray(source) != np.asarray(candidate), axis=2)
+    x0, y0, x1, y1 = line["box"]
+    allowed = np.zeros(changed.shape, dtype=bool)
+    allowed[y0:y1, x0:x1] = True
+    assert changed[y0:y1, x0:x1].any()
+    assert not np.any(changed & ~allowed), "real-OCR candidate changed an unprocessed region"
