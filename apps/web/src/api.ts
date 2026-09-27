@@ -656,16 +656,19 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
     const automaticExact = countTriple(rawAggregate.automatic_exact)
     const reviewerCorrectedExact = countTriple(rawAggregate.reviewer_corrected_exact)
     const finalText = rawAggregate.final_text_validation
-    if (!object(finalText) || finalText.status !== 'INDEPENDENT_RULE_SCANNER_TEXT_ONLY' || !safeCount(finalText.bound_artifacts) ||
+    if (!object(finalText)) batchInvalid()
+    const residualUnits = finalText.residual_units_by_category
+    if (finalText.status !== 'INDEPENDENT_RULE_SCANNER_TEXT_ONLY' || !safeCount(finalText.bound_artifacts) ||
         !safeCount(finalText.abstained_artifacts) || JSON.stringify(finalText.assessed_categories) !== JSON.stringify(['CREDENTIAL', 'PAYMENT', 'PII']) ||
-        !object(finalText.residual_units_by_category) || !['CREDENTIAL', 'PAYMENT', 'PII'].every(key => safeCount(finalText.residual_units_by_category[key]))) batchInvalid()
+        !object(residualUnits) || Object.keys(residualUnits).sort().join(',') !== 'CREDENTIAL,PAYMENT,PII' ||
+        !['CREDENTIAL', 'PAYMENT', 'PII'].every(key => safeCount(residualUnits[key]))) batchInvalid()
     if (JSON.stringify(automaticExact) !== JSON.stringify(annotationScore.automaticExact) ||
         JSON.stringify(reviewerCorrectedExact) !== JSON.stringify(annotationScore.exact)) batchInvalid()
     aggregateScorecard = { status: 'OBSERVATIONAL_ONLY', classification: 'SYNTHETIC_INTERNAL_EVALUATION_ONLY', qualification: 'NOT_QUALIFIED',
       automaticExact, reviewerCorrectedExact,
       finalArtifactValidation: { status: 'ABSTAINED', reason: rawAggregate.final_artifact_validation.reason as BatchAggregateScorecard['finalArtifactValidation']['reason'] },
       finalTextValidation: { status: 'INDEPENDENT_RULE_SCANNER_TEXT_ONLY', boundArtifacts: finalText.bound_artifacts as number,
-        assessedCategories: finalText.assessed_categories as string[], residualUnitsByCategory: finalText.residual_units_by_category as Record<string, number>, abstainedArtifacts: finalText.abstained_artifacts as number },
+        assessedCategories: finalText.assessed_categories as string[], residualUnitsByCategory: residualUnits as Record<string, number>, abstainedArtifacts: finalText.abstained_artifacts as number },
       relationshipReview: 'NO_GRAPH_GOLD_OR_REVIEW_STATE' }
   }
   const checks: BatchCheck[] = verification.checks.map(raw => {
