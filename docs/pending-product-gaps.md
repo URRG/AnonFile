@@ -83,9 +83,17 @@ supplier data. `Blocked externally` is not the same as done.
   - [x] A graph-local two-person merge *proposal* rejects direct self-link
     collapse and resets on graph change. It does not apply a merge, split an
     identity, alter evidence, or persist a reviewer decision.
+  - [x] A bounded server-side domain state machine owns immutable opaque graph
+    snapshots, one-shot accept/reject decisions, optimistic revision checks,
+    tenant/snapshot tuple lookup, and append-only source-free audit events.
+    It rejects stale and fabricated claim references. Tenant/reviewer values
+    are trusted-server inputs, not authorization; identity merge/split is
+    intentionally not implemented.
   - [ ] Recorded reviewer accept/reject, identity merge/split and conflict
-    adjudication remain unavailable in this stateless synthetic demo.
-    Node/edge IDs are response-local, not durable correction keys.
+    adjudication remain unavailable in this stateless synthetic demo. The D06
+    state machine is not connected to authenticated API routes or a durable
+    transactional repository, so process restart discards it; node/edge IDs in
+    the demo remain response-local, not durable correction keys.
 - [ ] **D07 — Independent demo scorecard.** Evaluate untouched final pixels and
   text with a different engine/annotated ground truth; separate automatic
   detector scores from reviewer corrections and measure graph/link quality.
