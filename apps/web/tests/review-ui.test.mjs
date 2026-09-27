@@ -59,7 +59,8 @@ test('three-document synthetic graph keeps review state ephemeral and cues only 
   assert.equal(reviewStatusFor('edge_a', {}), 'pending')
   // The response object, not response-local edge IDs, controls reset. A new
   // batch may reuse the same edge IDs for entirely different people.
-  assert.match(graphSource, /setEdgeReviews\(\{\}\) \}, \[graph\]\)/)
+  assert.match(graphSource, /reviewState\.graph === graph \? reviewState\.reviews : \{\}/)
+  assert.match(graphSource, /current\.graph === graph \? current\.reviews : \{\}/)
   assert.doesNotMatch(graphSource, /graphReviewKey/)
 })
 

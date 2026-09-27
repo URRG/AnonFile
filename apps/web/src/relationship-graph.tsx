@@ -56,7 +56,10 @@ export function RelationshipGraph({ graph, documentNames, onInspectDocument }: {
   const [zoom, setZoom] = useState(1)
   const [tableOpen, setTableOpen] = useState(false)
   const [compact, setCompact] = useState(false)
-  const [edgeReviews, setEdgeReviews] = useState<Record<string, EphemeralEdgeReview>>({})
+  const [reviewState, setReviewState] = useState<{ graph: EntityGraph; reviews: Record<string, EphemeralEdgeReview> }>({ graph, reviews: {} })
+  // Treat an incoming graph object as a new inspection immediately, before
+  // effects or paint. Response-local edge IDs may recur for unrelated data.
+  const edgeReviews = reviewState.graph === graph ? reviewState.reviews : {}
   const viewport = useRef<HTMLDivElement | null>(null)
   const nodeButtons = useRef(new Map<string, HTMLButtonElement>())
   const visibleEdges = useMemo(() => graph.edges.filter(edge => showCommunication || edge.type !== 'sent_to'), [graph.edges, showCommunication])
@@ -75,7 +78,8 @@ export function RelationshipGraph({ graph, documentNames, onInspectDocument }: {
     if (focus) requestAnimationFrame(() => nodeButtons.current.get(id)?.focus())
   }
   const selectEdge = (edge: EntityGraphEdge) => { setSelectedId(edge.sourceId); setSelectedEdgeId(edge.id) }
-  const setEdgeReview = (edgeId: string, status: EphemeralEdgeReview) => setEdgeReviews(current => ({ ...current, [edgeId]: status }))
+  const setEdgeReview = (edgeId: string, status: EphemeralEdgeReview) => setReviewState(current => ({ graph,
+    reviews: { ...(current.graph === graph ? current.reviews : {}), [edgeId]: status } }))
   const focusGraph = () => {
     const bounds = viewport.current?.getBoundingClientRect()
     if (!bounds) return
@@ -95,9 +99,6 @@ export function RelationshipGraph({ graph, documentNames, onInspectDocument }: {
     return () => observer.disconnect()
   }, [width])
   useEffect(() => { if (dense || compact) setTableOpen(true) }, [dense, compact])
-  // Edge IDs are response-local. A new inspection can reuse the same IDs for
-  // different source data, so reset on the graph response object itself.
-  useEffect(() => { setEdgeReviews({}) }, [graph])
   useEffect(() => {
     if (selectedId && visibleNodes.some(node => node.id === selectedId)) return
     setSelectedId(visibleNodes[0]?.id ?? null); setSelectedEdgeId(null)
