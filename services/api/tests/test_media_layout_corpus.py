@@ -123,7 +123,9 @@ def test_pixel_oracle_removes_original_fictional_sensitive_pixels(monkeypatch):
     ImageDraw.Draw(source).text((40, 50), "Maya Patel", font=font, fill="black")
     before = np.asarray(source).copy()
     page = {"number": 1, "image": source, "lines": [
-        {"text": "Maya Patel", "box": box, "ink_box": (40, 50, 215, 81), "start": 0, "end": 10, "confidence": 0.99},
+        # Vera's lowercase `y` descender reaches row 84; the tight source
+        # ink claim must include it rather than misclassify it as padding.
+        {"text": "Maya Patel", "box": box, "ink_box": (40, 50, 215, 85), "start": 0, "end": 10, "confidence": 0.99},
     ]}
     # An empty replacement is intentional here: it gives a pixel-level oracle
     # that the original fictional name's ink is gone, independent of OCR text.

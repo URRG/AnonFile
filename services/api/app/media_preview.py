@@ -140,6 +140,49 @@ def _assert_repaint_is_isolated(line: dict[str, Any], lines: list[dict[str, Any]
             raise PayloadError("A visual repaint region touches another OCR line; no visual candidate was made.")
 
 
+def _assert_repaint_padding_is_source_free(source_gray: Any, line: dict[str, Any]) -> None:
+    """Reject a padded repaint whose source-pixel ring contains dark ink.
+
+    The renderer erases ``line["box"]``, while OCR's reported ``ink_box`` is
+    the only region claimed for that line.  An unrecognised dark mark in the
+    intervening padding would be silently erased even when no other OCR line
+    reports it.  This is deliberately a narrow, pixel-only fail-closed guard;
+    it does not identify text or make an OCR-coverage claim.
+    """
+    import numpy as np
+
+    x0, y0, x1, y1 = tuple(line["box"])
+    ink_x0, ink_y0, ink_x1, ink_y1 = _line_ink_box(line)
+    repaint_gray = source_gray[y0:y1, x0:x1]
+    padding = np.ones(repaint_gray.shape, dtype=bool)
+    # OCR-produced boxes always nest the tight ink extent in the padded repaint
+    # extent. Intersect defensively so a hand-built caller cannot use an
+    # out-of-bounds slice to make the padding disappear.
+    inner_x0, inner_x1 = max(x0, ink_x0), min(x1, ink_x1)
+    inner_y0, inner_y1 = max(y0, ink_y0), min(y1, ink_y1)
+    if inner_x0 < inner_x1 and inner_y0 < inner_y1:
+        padding[inner_y0 - y0:inner_y1 - y0, inner_x0 - x0:inner_x1 - x0] = False
+    dark = repaint_gray <= 245
+    if not np.any(dark & padding):
+        return
+
+    # Rasterization can place one antialiased edge pixel just beyond a
+    # detector's half-open polygon. Permit a fringe pixel only when it is a
+    # *direct* 8-neighbor of dark ink inside the OCR claim. Component-level
+    # connectivity would let an arbitrarily long foreign stroke propagate
+    # around the margin from a single touching point.
+    import cv2
+    directly_adjacent = cv2.dilate((dark & ~padding).astype(np.uint8),
+                                   np.ones((3, 3), dtype=np.uint8), iterations=1).astype(bool)
+    fringe = np.zeros(repaint_gray.shape, dtype=bool)
+    fringe_x0, fringe_x1 = max(x0, ink_x0 - 1), min(x1, ink_x1 + 1)
+    fringe_y0, fringe_y1 = max(y0, ink_y0 - 1), min(y1, ink_y1 + 1)
+    fringe[fringe_y0 - y0:fringe_y1 - y0, fringe_x0 - x0:fringe_x1 - x0] = True
+    permitted = fringe & directly_adjacent
+    if np.any(dark & padding & ~permitted):
+        raise PayloadError("A visual repaint padding region contains unrecognised source ink; no visual candidate was made.")
+
+
 def _assert_ocr_line_has_raster_edge(source_gray: Any, line: dict[str, Any]) -> None:
     """Reject a source OCR line whose reported ink box is visually flat.
 
@@ -473,6 +516,7 @@ def render_candidate(pages: list[dict[str, Any]], matches: list[dict[str, Any]],
     for page in pages:
         source_image = page["image"]
         candidate = source_image.copy()
+        source_gray = None
         page_sources = set()
         for line in page["lines"]:
             line_matches = []
@@ -486,6 +530,12 @@ def render_candidate(pages: list[dict[str, Any]], matches: list[dict[str, Any]],
             if not applied:
                 continue
             _assert_repaint_is_isolated(line, page["lines"])
+            # Only pages with a proposed repaint pay for grayscale conversion,
+            # and every applied line on one page shares this source buffer.
+            if source_gray is None:
+                import numpy as np
+                source_gray = np.asarray(source_image.convert("L"), dtype=np.int16)
+            _assert_repaint_padding_is_source_free(source_gray, line)
             parts = []
             cursor = line["start"]
             for match in applied:
