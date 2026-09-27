@@ -85,15 +85,36 @@ download. Original PDF objects and metadata are not copied into that
 candidate. Image input downloads as candidate PNG; text formats download as
 candidate text files. Unreadable, oversized, or ambiguous media are rejected.
 
+On a PDF/image result, a reviewer can draw or enter a bounded top-left pixel
+rectangle over a sensitive region that was **not** captured in the OCR
+transcript, then rescan. The candidate paints that region opaque black in a
+new PNG/image-only PDF. The browser verifies that every requested candidate
+pixel is opaque black. For a corrected PDF download it rebuilds a lossless
+raster-only PDF from the verified candidate PNG pages instead of trusting an
+unbound server PDF. This path requires browser image decoding, canvas,
+cryptography and compression support, and fails closed when any is absent.
+Staged boxes are shown separately and block download until applied or removed;
+applied boxes persist across further rescans and can be removed by rescanning.
+A batch
+accepts at most 20 boxes, each at least 4 × 4 pixels and no more than 25% of
+its page (50% total per page). Boxes cannot overlap one another or any OCR
+line; use the text correction workflow for recognized lines. The review
+response binds uploaded source bytes and raster source/candidate pages with
+SHA-256 digests. These visual-only corrections do not become entities, text
+matches, or scorecard true positives; the proposed OCR transcript can remain
+unchanged while pixels are blacked out. Review the before/after page closely:
+this is not proof that all sensitive pixels were found or that the result is
+safe to release.
+
 This is a visual *review candidate*, not safe redaction certification. OCR can
 miss or misread visible sensitive content; no detection outside recognized
 lines is assured. The candidate is rechecked only by the same OCR engine, so
-zero retained *detected source values* is not independent assurance. Names
+zero retained *detected source values* is not independent assurance.
 Input OCR lines below 0.60 confidence reject the batch. A lower-confidence
 candidate OCR line is counted and shown for review: a replacement can change
 recognizer confidence without restoring source pixels, but that recheck cannot
-establish the absence of other sensitive content. Names
-are replaced with same-length, readable name pseudonyms. Unsupported name
+establish the absence of other sensitive content. Names are replaced with
+same-length, readable name pseudonyms. Unsupported name
 shapes fail closed instead of turning into `Axxxxx`-style tokens. Emails linked
 by explicit mail headers, one unambiguous structured record, or a Slack-style
 name/address roster row use the person's pseudonym as

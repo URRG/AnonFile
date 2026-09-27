@@ -1,5 +1,6 @@
 """The batch preview is synthetic-only, ephemeral and never a release."""
 import base64
+import hashlib
 from io import BytesIO
 import json
 from pathlib import Path
@@ -658,6 +659,172 @@ def test_batch_rejects_excess_total_media_pixels_before_candidate(monkeypatch):
 
 def test_batch_route_is_not_registered_without_demo_opt_in(client):
     assert client.post("/demo/batch/inspect", headers=auth(), json=payload()).status_code == 404
+
+
+def test_coordinate_correction_blacks_only_pixels_and_does_not_inflate_text_scoring(demo_client, monkeypatch):
+    from PIL import Image
+    from app import media_preview
+
+    # Keep OCR deterministic: the lower-right box is deliberately outside the
+    # transcript, so it is valid for a reviewer coordinate correction.
+    monkeypatch.setattr(media_preview, "_ocr_lines", lambda *_args, **_kwargs: [
+        {"text": "Riya", "box": (10, 10, 50, 30), "confidence": 1.0}])
+    stream = BytesIO()
+    Image.new("RGB", (100, 100), "white").save(stream, format="PNG")
+    request = {"synthetic_only": True, "files": [file("scan", "scan.png", stream.getvalue()),
+                                                    file("notes", "notes.txt", "synthetic notes")],
+               "coordinate_corrections": [{"document_id": "scan", "page": 1,
+                                           "x0": 70, "y0": 70, "x1": 80, "y1": 80,
+                                           "kind": "OTHER_SENSITIVE"}]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    page = body["documents"][0]["media_preview"]["pages"][0]
+    from PIL import Image as PillowImage
+    candidate = PillowImage.open(BytesIO(base64.b64decode(page["candidate_png_base64"])))
+    source = PillowImage.open(BytesIO(base64.b64decode(page["source_png_base64"])))
+    assert candidate.getpixel((75, 75)) == (0, 0, 0)
+    assert source.getpixel((75, 75)) == (255, 255, 255)
+    assert page["manual_regions"] == [{"document_id": "scan", "page": 1, "x0": 70, "y0": 70,
+                                        "x1": 80, "y1": 80, "kind": "OTHER_SENSITIVE",
+                                        "origin": "REVIEWER_COORDINATE"}]
+    assert page["source_png_sha256"] == hashlib.sha256(base64.b64decode(page["source_png_base64"])).hexdigest()
+    assert body["documents"][0]["source_sha256"] == hashlib.sha256(stream.getvalue()).hexdigest()
+    # The coordinate is intentionally not a finding/entity/match and changes
+    # no count that feeds the reviewed text score.
+    assert body["summary"]["detected_mentions"] == len(body["documents"][0]["matches"])
+    assert all(match["origin"] != "REVIEWER_COORDINATE" for match in body["documents"][0]["matches"])
+
+
+def test_coordinate_correction_rejects_any_ocr_line_overlap(demo_client, monkeypatch):
+    from PIL import Image
+    from app import media_preview
+
+    monkeypatch.setattr(media_preview, "_ocr_lines", lambda *_args, **_kwargs: [
+        {"text": "ordinary transcript", "box": (10, 10, 60, 30), "confidence": 1.0}])
+    stream = BytesIO()
+    Image.new("RGB", (100, 100), "white").save(stream, format="PNG")
+    request = {"synthetic_only": True, "files": [file("scan", "scan.png", stream.getvalue()),
+                                                    file("notes", "notes.txt", "synthetic notes")],
+               "coordinate_corrections": [{"document_id": "scan", "page": 1,
+                                           "x0": 20, "y0": 12, "x1": 30, "y1": 22,
+                                           "kind": "OTHER_SENSITIVE"}]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 422
+    assert "ordinary transcript" not in response.text
+
+
+@pytest.mark.parametrize("corrections", [
+    [{"document_id": "scan", "page": 1, "x0": -1, "y0": 60, "x1": 10, "y1": 70,
+      "kind": "OTHER_SENSITIVE"}],
+    [{"document_id": "scan", "page": 1, "x0": 60, "y0": 60, "x1": 70, "y1": 70,
+      "kind": "OTHER_SENSITIVE"},
+     {"document_id": "scan", "page": 1, "x0": 65, "y0": 65, "x1": 75, "y1": 75,
+      "kind": "GOVERNMENT_ID"}],
+])
+def test_coordinate_corrections_reject_out_of_page_and_each_other(demo_client, monkeypatch, corrections):
+    from PIL import Image
+    from app import media_preview
+
+    monkeypatch.setattr(media_preview, "_ocr_lines", lambda *_args, **_kwargs: [
+        {"text": "ordinary transcript", "box": (10, 10, 40, 30), "confidence": 1.0}])
+    stream = BytesIO()
+    Image.new("RGB", (100, 100), "white").save(stream, format="PNG")
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json={
+        "synthetic_only": True, "files": [file("scan", "scan.png", stream.getvalue()),
+                                               file("notes", "notes.txt", "synthetic notes")],
+        "coordinate_corrections": corrections,
+    })
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("corrections", [
+    # Text and foreign documents never have raster pages eligible for boxes.
+    [{"document_id": "notes", "page": 1, "x0": 60, "y0": 60, "x1": 70, "y1": 70,
+      "kind": "OTHER_SENSITIVE"}],
+    [{"document_id": "missing", "page": 1, "x0": 60, "y0": 60, "x1": 70, "y1": 70,
+      "kind": "OTHER_SENSITIVE"}],
+    [{"document_id": "scan", "page": 2, "x0": 60, "y0": 60, "x1": 70, "y1": 70,
+      "kind": "OTHER_SENSITIVE"}],
+    # Invalid geometry: reversed and below the four-pixel minimum.
+    [{"document_id": "scan", "page": 1, "x0": 70, "y0": 70, "x1": 60, "y1": 80,
+      "kind": "OTHER_SENSITIVE"}],
+    [{"document_id": "scan", "page": 1, "x0": 60, "y0": 60, "x1": 63, "y1": 70,
+      "kind": "OTHER_SENSITIVE"}],
+    # 30% of this 100x100 page is over the individual cap.
+    [{"document_id": "scan", "page": 1, "x0": 0, "y0": 60, "x1": 100, "y1": 90,
+      "kind": "OTHER_SENSITIVE"}],
+])
+def test_coordinate_corrections_reject_invalid_target_and_geometry(demo_client, monkeypatch, corrections):
+    from PIL import Image
+    from app import media_preview
+
+    monkeypatch.setattr(media_preview, "_ocr_lines", lambda *_args, **_kwargs: [
+        {"text": "ordinary transcript", "box": (10, 10, 40, 30), "confidence": 1.0}])
+    stream = BytesIO()
+    Image.new("RGB", (100, 100), "white").save(stream, format="PNG")
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json={
+        "synthetic_only": True, "files": [file("scan", "scan.png", stream.getvalue()),
+                                               file("notes", "notes.txt", "synthetic notes")],
+        "coordinate_corrections": corrections,
+    })
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("corrections", [
+    [{"document_id": "scan", "page": 1, "x0": 60, "y0": 60, "x1": 70, "y1": 70,
+      "kind": "NOT_A_KIND"}],
+    [{"document_id": "scan", "page": 1, "x0": 60, "y0": 60, "x1": 70, "y1": 70,
+      "kind": "OTHER_SENSITIVE", "unexpected": True}],
+    [{"document_id": "scan", "page": "1", "x0": 60, "y0": 60, "x1": 70, "y1": 70,
+      "kind": "OTHER_SENSITIVE"}],
+    [{"document_id": "scan", "page": 1, "x0": 60.0, "y0": 60, "x1": 70, "y1": 70,
+      "kind": "OTHER_SENSITIVE"}],
+    [{"document_id": "scan", "page": True, "x0": 60, "y0": 60, "x1": 70, "y1": 70,
+      "kind": "OTHER_SENSITIVE"}],
+    [{"document_id": "scan", "page": 1, "x0": 60, "y0": 60, "x1": 70, "y1": 70,
+      "kind": "OTHER_SENSITIVE"}] * 21,
+])
+def test_coordinate_corrections_reject_malformed_kind_extra_key_nonintegers_and_limit(demo_client, monkeypatch, corrections):
+    from PIL import Image
+    from app import media_preview
+
+    monkeypatch.setattr(media_preview, "_ocr_lines", lambda *_args, **_kwargs: [
+        {"text": "ordinary transcript", "box": (10, 10, 40, 30), "confidence": 1.0}])
+    stream = BytesIO()
+    Image.new("RGB", (100, 100), "white").save(stream, format="PNG")
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json={
+        "synthetic_only": True, "files": [file("scan", "scan.png", stream.getvalue()),
+                                               file("notes", "notes.txt", "synthetic notes")],
+        "coordinate_corrections": corrections,
+    })
+    assert response.status_code == 422
+
+
+def test_coordinate_corrected_pdf_remains_image_only(demo_client, monkeypatch):
+    reportlab = pytest.importorskip("reportlab.pdfgen.canvas")
+    from pypdf import PdfReader
+    from app import media_preview
+
+    monkeypatch.setattr(media_preview, "_ocr_lines", lambda *_args, **_kwargs: [
+        {"text": "Riya", "box": (10, 10, 60, 35), "confidence": 1.0}])
+    stream = BytesIO()
+    canvas = reportlab.Canvas(stream, pagesize=(100, 100))
+    canvas.drawString(10, 80, "Riya")
+    canvas.save()
+    request = {"synthetic_only": True, "files": [file("pdf", "scan.pdf", stream.getvalue()),
+                                                    file("notes", "notes.txt", "synthetic notes")],
+               "coordinate_corrections": [{"document_id": "pdf", "page": 1,
+                                           "x0": 70, "y0": 70, "x1": 80, "y1": 80,
+                                           "kind": "OTHER_SENSITIVE"}]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    preview = response.json()["documents"][0]["media_preview"]
+    generated = base64.b64decode(preview["candidate_pdf_base64"])
+    assert PdfReader(BytesIO(generated)).pages[0].extract_text() in (None, "")
+    assert preview["pdf_raster_evidence"]["sha256"] == hashlib.sha256(generated).hexdigest()
+    assert preview["pdf_raster_evidence"]["bytes"] == len(generated)
+    assert preview["pages"][0]["manual_regions"][0]["origin"] == "REVIEWER_COORDINATE"
 
 
 def test_reference_labels_measure_exact_reviewed_spans_without_approval(demo_client):

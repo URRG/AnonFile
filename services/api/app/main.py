@@ -17,7 +17,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, ValidationError, model_validator
 from app.contracts import PayloadError
 from app.processing import (RULES_METHOD_CONFIG_DIGEST, RULES_METHOD_ID, RULES_METHOD_VERSION,
                             detect_text, process_payload)
@@ -228,11 +228,26 @@ class DemoBatchManualFinding(StrictModel):
     value: str = Field(min_length=2, max_length=80)
     kind: Literal["OTHER_SENSITIVE", "BUSINESS_CONFIDENTIAL", "QUASI_IDENTIFIER", "GOVERNMENT_ID", "DATE_OF_BIRTH"]
 
+class DemoBatchCoordinateCorrection(StrictModel):
+    """A reviewer-drawn opaque region on a raster media page.
+
+    Coordinates deliberately have no text value or entity identity: this is a
+    visual correction only and must not affect text findings or scoring.
+    """
+    document_id: str = Field(min_length=1, max_length=48)
+    page: StrictInt = Field(ge=1)
+    x0: StrictInt
+    y0: StrictInt
+    x1: StrictInt
+    y1: StrictInt
+    kind: Literal["OTHER_SENSITIVE", "BUSINESS_CONFIDENTIAL", "QUASI_IDENTIFIER", "GOVERNMENT_ID", "DATE_OF_BIRTH"]
+
 class DemoBatchCreate(StrictModel):
     files: list[DemoBatchFile] = Field(min_length=2, max_length=3)
     synthetic_only: Literal[True]
     manual_names: list[str] = Field(default_factory=list, max_length=20)
     manual_findings: list[DemoBatchManualFinding] = Field(default_factory=list, max_length=20)
+    coordinate_corrections: list[DemoBatchCoordinateCorrection] = Field(default_factory=list, max_length=20)
     alias_overrides: dict[str, str] = Field(default_factory=dict)
     review_exclusions: dict[str, Literal["FALSE_POSITIVE_CONFIRMED"]] = Field(default_factory=dict, max_length=100)
     reference_annotations: DemoBatchReferenceAnnotations | None = None

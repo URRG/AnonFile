@@ -47,6 +47,40 @@ test('PDF candidate is digest-verified before browser download', async () => {
     pdfRasterEvidence: { ...item.mediaPreview.pdfRasterEvidence, bytes: pdf.length + 1 } } }), /declared size/)
 })
 
+test('reviewed PDF is rebuilt from blacked-out candidate PNG pixels, not server PDF bytes', async t => {
+  const png = Buffer.from('89504e470d0a1a0a0000000d4948445200000002000000020806000000', 'hex')
+  const originalBitmap = globalThis.createImageBitmap
+  const originalCanvas = globalThis.OffscreenCanvas
+  const pixels = new Uint8ClampedArray([
+    0, 0, 0, 255, 12, 34, 56, 255,
+    78, 90, 12, 255, 34, 56, 78, 255,
+  ])
+  Object.defineProperty(globalThis, 'createImageBitmap', { configurable: true, value: async () => ({ width: 2, height: 2, close() {} }) })
+  Object.defineProperty(globalThis, 'OffscreenCanvas', { configurable: true, value: class {
+    getContext() { return { drawImage() {}, getImageData: () => ({ data: pixels }) } }
+  } })
+  t.after(() => {
+    if (originalBitmap) Object.defineProperty(globalThis, 'createImageBitmap', { configurable: true, value: originalBitmap })
+    else delete globalThis.createImageBitmap
+    if (originalCanvas) Object.defineProperty(globalThis, 'OffscreenCanvas', { configurable: true, value: originalCanvas })
+    else delete globalThis.OffscreenCanvas
+  })
+  const item = { kind: 'pdf', name: 'reviewed.pdf', mediaPreview: {
+    pages: [{ width: 2, height: 2, candidatePngBase64: png.toString('base64'), candidatePngSha256: createHash('sha256').update(png).digest('hex'),
+      manualRegions: [{ x0: 0, y0: 0, x1: 1, y1: 1 }] }],
+    candidatePdfBase64: Buffer.from('SERVER-PDF-MUST-NOT-BE-USED').toString('base64'), pdfRasterEvidence: null,
+  } }
+  const candidate = await prepareDemoCandidateFile(item)
+  assert.equal(candidate.mimeType, 'application/pdf')
+  assert.match(new TextDecoder('ascii').decode(candidate.bytes.subarray(0, 8)), /^%PDF-1.4/)
+  assert.equal(new TextDecoder().decode(candidate.bytes).includes('SERVER-PDF-MUST-NOT-BE-USED'), false)
+  pixels[7] = 254
+  await assert.rejects(prepareDemoCandidateFile(item), /contains transparency/)
+  pixels[7] = 255
+  pixels[3] = 254
+  await assert.rejects(prepareDemoCandidateFile(item), /not opaque black/)
+})
+
 test('browser download clicks candidate filename and revokes the temporary URL', async t => {
   const events = []
   const link = { hidden: false, click: () => events.push('click'), remove: () => events.push('remove') }

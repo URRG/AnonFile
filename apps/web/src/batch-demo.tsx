@@ -3,7 +3,7 @@ import { ArrowDown, ArrowLeft, ArrowRight, Check, ChevronRight, CircleAlert, Dow
   Files, Fingerprint, FlaskConical, ImageIcon, Link2, LockKeyhole, Plus, RefreshCw, Search, ShieldCheck,
   Sparkles, UploadCloud, X, ZoomIn, ZoomOut } from 'lucide-react'
 import { inspectSyntheticBatch, readBatchFile, readBatchReferenceManifest, type BatchDocument, type BatchInspection,
-  type BatchManualFinding, type BatchReferenceManifest, type BatchReferenceSpan, type BatchUpload,
+  type BatchCoordinateCorrection, type BatchManualFinding, type BatchReferenceManifest, type BatchReferenceSpan, type BatchUpload,
   BATCH_MAX_TOTAL_BYTES, DemoInspectionFailure } from './api'
 import { downloadDemoCandidate } from './demo-download'
 import { RelationshipGraph } from './relationship-graph'
@@ -112,14 +112,27 @@ function HighlightedSource({ document }: { document: BatchDocument }) {
   return <pre>{chunks}</pre>
 }
 
-function MediaPages({ document, candidate, zoom }: { document: BatchDocument; candidate: boolean; zoom: MediaZoom }) {
+function MediaPages({ document, candidate, zoom, pending = [], onDraw }: { document: BatchDocument; candidate: boolean; zoom: MediaZoom;
+  pending?: BatchCoordinateCorrection[]; onDraw?: (page: number, x0: number, y0: number, x1: number, y1: number) => void }) {
+  const drawStart = useRef<{ pointerId: number; page: number; x: number; y: number; rect: DOMRect } | null>(null)
+  const pointFor = (event: React.PointerEvent<HTMLImageElement>, page: { width: number; height: number }, rect: DOMRect) => ({
+    x: Math.max(0, Math.min(page.width, Math.round((event.clientX - rect.left) * page.width / rect.width))),
+    y: Math.max(0, Math.min(page.height, Math.round((event.clientY - rect.top) * page.height / rect.height))),
+  })
   return <div className={`media-preview-pages ${zoom === 'fit' ? 'is-fit' : ''}`}>{document.mediaPreview?.pages.map(page => <figure key={page.number}
     style={{ width: zoom === 'fit' ? `min(100%, ${page.width + 16}px)` : `${Math.round(page.width * zoom / 100) + 16}px` }}>
-    <img src={`data:image/png;base64,${candidate ? page.candidatePngBase64 : page.sourcePngBase64}`}
+    <div className={`media-page-image ${onDraw && !candidate ? 'is-drawable' : ''}`}><img src={`data:image/png;base64,${candidate ? page.candidatePngBase64 : page.sourcePngBase64}`}
       width={page.width} height={page.height}
       style={{ width: zoom === 'fit' ? '100%' : `${Math.round(page.width * zoom / 100)}px` }}
+      draggable={false}
+      onDragStart={event => event.preventDefault()}
+      onPointerDown={event => { if (!onDraw || candidate || event.button !== 0) return; const rect = event.currentTarget.getBoundingClientRect(); const point = pointFor(event, page, rect); drawStart.current = { pointerId: event.pointerId, page: page.number, x: point.x, y: point.y, rect }; event.currentTarget.setPointerCapture(event.pointerId); event.preventDefault() }}
+      onPointerUp={event => { const start = drawStart.current; if (!onDraw || !start || start.pointerId !== event.pointerId || start.page !== page.number) return; drawStart.current = null; if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); const point = pointFor(event, page, start.rect); if (Math.abs(point.x - start.x) > 1 && Math.abs(point.y - start.y) > 1) onDraw(page.number, Math.min(start.x, point.x), Math.min(start.y, point.y), Math.max(start.x, point.x), Math.max(start.y, point.y)) }}
+      onPointerCancel={event => { if (drawStart.current?.pointerId === event.pointerId) drawStart.current = null }}
+      onLostPointerCapture={() => { drawStart.current = null }}
       alt={`${candidate ? 'Raster candidate' : 'Source rendering'} of ${document.name}, page ${page.number}`} />
-    <figcaption>Page {page.number} · {page.width} × {page.height} px · {page.ocrLines} OCR lines</figcaption>
+      {[...(page.manualRegions || []), ...pending.filter(region => region.documentId === document.id && region.page === page.number)].map((region, index) => <span key={`${region.x0}-${region.y0}-${region.x1}-${region.y1}-${index}`} className={`media-region ${index < page.manualRegions.length ? 'applied' : 'pending'}`} style={{ left: `${100 * region.x0 / page.width}%`, top: `${100 * region.y0 / page.height}%`, width: `${100 * (region.x1 - region.x0) / page.width}%`, height: `${100 * (region.y1 - region.y0) / page.height}%` }} />)}</div>
+    <figcaption>Page {page.number} · {page.width} × {page.height} px · {page.ocrLines} OCR lines{onDraw && !candidate ? ' · drag to stage a region' : ''}</figcaption>
   </figure>)}</div>
 }
 
@@ -142,6 +155,11 @@ export default function BatchDemo() {
   const [manualFindings, setManualFindings] = useState<BatchManualFinding[]>([])
   const [manualValue, setManualValue] = useState('')
   const [manualKind, setManualKind] = useState<BatchManualFinding['kind']>('OTHER_SENSITIVE')
+  const [coordinateCorrections, setCoordinateCorrections] = useState<BatchCoordinateCorrection[]>([])
+  const [appliedCoordinates, setAppliedCoordinates] = useState<BatchCoordinateCorrection[]>([])
+  const [coordinateRescanRequired, setCoordinateRescanRequired] = useState(false)
+  const [coordinateRescanTarget, setCoordinateRescanTarget] = useState<BatchCoordinateCorrection[] | null>(null)
+  const [coordinateDraft, setCoordinateDraft] = useState({ page: 1, x0: '', y0: '', x1: '', y1: '', kind: 'OTHER_SENSITIVE' as BatchManualFinding['kind'] })
   const [aliasOverrides, setAliasOverrides] = useState<Record<string, string>>({})
   const [excludedIds, setExcludedIds] = useState<string[]>([])
   const [exclusionAcknowledged, setExclusionAcknowledged] = useState(false)
@@ -160,7 +178,7 @@ export default function BatchDemo() {
 
   useEffect(() => () => { request.current?.abort(); intakeEpoch.current += 1 }, [])
 
-  function resetReview() { setInspection(null); setReferenceManifest(null); setReferenceAttested(false); setSampleMode(null); setManualNames([]); setManualFindings([]); setAliasOverrides({}); setExcludedIds([]); setExclusionAcknowledged(false); setStep('upload'); setError('') }
+  function resetReview() { setInspection(null); setReferenceManifest(null); setReferenceAttested(false); setSampleMode(null); setManualNames([]); setManualFindings([]); setCoordinateCorrections([]); setAppliedCoordinates([]); setCoordinateRescanRequired(false); setCoordinateRescanTarget(null); setAliasOverrides({}); setExcludedIds([]); setExclusionAcknowledged(false); setStep('upload'); setError('') }
 
   async function addFiles(selected: File[], replace = false) {
     if (!selected.length) return false
@@ -181,6 +199,10 @@ export default function BatchDemo() {
       setSampleMode(null)
       setManualNames([])
       setManualFindings([])
+      setCoordinateCorrections([])
+      setAppliedCoordinates([])
+      setCoordinateRescanRequired(false)
+      setCoordinateRescanTarget(null)
       setAliasOverrides({})
       setExcludedIds([])
       setExclusionAcknowledged(false)
@@ -227,7 +249,7 @@ export default function BatchDemo() {
   }
 
   async function inspect(nextNames = manualNames, nextAliases = aliasOverrides, nextStep: Step = 'detect', nextExclusions = excludedIds,
-    nextFindings = manualFindings) {
+    nextFindings = manualFindings, nextCoordinates = [...appliedCoordinates, ...coordinateCorrections], coordinateRescan = false) {
     if (busy || !acknowledged || !token.trim()) { setError('Enter a processor token and confirm the batch is synthetic.'); return }
     if (nextStep === 'results' && nextExclusions.length && !exclusionAcknowledged) {
       setError('Confirm that excluded findings are false positives and will remain in the candidate preview.'); return
@@ -240,7 +262,7 @@ export default function BatchDemo() {
     setBusy(true)
     setError('')
     try {
-      const value = await inspectSyntheticBatch({ apiBase: API_BASE, token, files, manualNames: nextNames, manualFindings: nextFindings,
+      const value = await inspectSyntheticBatch({ apiBase: API_BASE, token, files, manualNames: nextNames, manualFindings: nextFindings, coordinateCorrections: nextCoordinates,
         aliasOverrides: nextAliases,
         reviewExclusions: Object.fromEntries(nextExclusions.map(id => [id, 'FALSE_POSITIVE_CONFIRMED' as const])),
         referenceManifest: referenceManifest?.basis === 'CURATED_SYNTHETIC_SAMPLE' || referenceAttested ? referenceManifest : null,
@@ -250,9 +272,12 @@ export default function BatchDemo() {
       setDemoDownloadAcknowledged(false)
       setManualNames(nextNames)
       setManualFindings(nextFindings)
+      setAppliedCoordinates(value.documents.flatMap(document => document.mediaPreview?.pages.flatMap(page => page.manualRegions.map(region => ({ documentId: document.id, page: region.page, x0: region.x0, y0: region.y0, x1: region.x1, y1: region.y1, kind: region.kind }))) || []))
+      setCoordinateCorrections([])
+      if (coordinateRescan) { setCoordinateRescanRequired(false); setCoordinateRescanTarget(null) }
       setAliasOverrides(nextAliases)
       setExcludedIds(nextExclusions)
-      setSelectedDoc(value.documents[0]?.id || '')
+      setSelectedDoc(current => value.documents.some(document => document.id === current) ? current : (value.documents[0]?.id || ''))
       setStep(nextStep)
     } catch (cause) {
       if (request.current === controller && !controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Batch inspection failed.')
@@ -292,7 +317,52 @@ export default function BatchDemo() {
     await inspect(manualNames, {}, 'detect', [], [...manualFindings, { value, kind: finding.kind }])
   }
 
+  function stageCoordinate(documentId: string, page: number, x0: number, y0: number, x1: number, y1: number, kind = coordinateDraft.kind) {
+    if (busy || coordinateRescanRequired) return
+    const document = inspection?.documents.find(item => item.id === documentId)
+    const target = document?.mediaPreview?.pages.find(item => item.number === page)
+    if (!document || !target || ![x0, y0, x1, y1].every(Number.isSafeInteger) || x0 < 0 || y0 < 0 || x1 - x0 < 4 || y1 - y0 < 4 || x1 > target.width || y1 > target.height) { setError('Enter a box of at least 4 × 4 pixels within the selected source page.'); return }
+    const region: BatchCoordinateCorrection = { documentId: document.id, page, x0, y0, x1, y1, kind }
+    if (coordinateCorrections.length + appliedCoordinates.length >= 20) { setError('At most 20 coordinate regions can be reviewed in one batch.'); return }
+    const intersects = (item: BatchCoordinateCorrection) => item.documentId === region.documentId && item.page === region.page && x0 < item.x1 && x1 > item.x0 && y0 < item.y1 && y1 > item.y0
+    if ([...appliedCoordinates, ...coordinateCorrections].some(intersects)) { setError('That region overlaps another staged or applied region.'); return }
+    if ((x1 - x0) * (y1 - y0) > target.width * target.height * .25) { setError('A single region cannot cover more than 25% of its page.'); return }
+    setCoordinateCorrections(current => [...current, region]); setCoordinateDraft(current => ({ ...current, page, x0: String(x0), y0: String(y0), x1: String(x1), y1: String(y1) })); setError('')
+  }
+
+  function rescanCoordinates(nextApplied = appliedCoordinates) {
+    if (busy) return
+    const nextCoordinates = [...nextApplied, ...coordinateCorrections]
+    setCoordinateRescanRequired(true)
+    setCoordinateRescanTarget(nextCoordinates)
+    void inspect(manualNames, aliasOverrides, 'results', excludedIds, manualFindings, nextCoordinates, true)
+  }
+
+  function removeAppliedCoordinate(index: number) {
+    if (busy) return
+    rescanCoordinates(appliedCoordinates.filter((_, itemIndex) => itemIndex !== index))
+  }
+
+  function retryCoordinateRescan() {
+    if (!coordinateRescanTarget || busy) return
+    setCoordinateRescanRequired(true)
+    void inspect(manualNames, aliasOverrides, 'results', excludedIds, manualFindings, coordinateRescanTarget, true)
+  }
+
+  function keepPreviousCoordinateCandidate() {
+    if (busy) return
+    setCoordinateRescanRequired(false)
+    setCoordinateRescanTarget(null)
+    setError('Kept the previous applied coordinate regions. Stage or remove regions, then rescan when ready.')
+  }
+
   const selected = inspection?.documents.find(doc => doc.id === selectedDoc) || inspection?.documents[0]
+  const selectedAppliedCoordinates = selected ? appliedCoordinates.filter(region => region.documentId === selected.id) : []
+  useEffect(() => {
+    const pages = inspection?.documents.find(document => document.id === selectedDoc)?.mediaPreview?.pages
+    setCoordinateDraft(current => ({ ...current, page: pages?.some(page => page.number === current.page) ? current.page : 1,
+      x0: '', y0: '', x1: '', y1: '' }))
+  }, [selectedDoc, inspection])
   const visibleEntities = inspection?.entities.filter(item => item.mentions > 0) || []
   const registerEntities = [...visibleEntities].sort((left, right) => {
     const order = ['people', 'contacts', 'identifiers', 'other']
@@ -423,16 +493,26 @@ export default function BatchDemo() {
             </div>
             {selected.mediaPreview && <p className="zoom-hint">100% shows native preview pixels. Fit width may shrink text; zoom above 100% magnifies raster pixels. Scroll to pan, with panes synchronized side by side.</p>}
             {selected.mediaPreview && <div className="pdf-note"><CircleAlert size={16} /> {selected.kind === 'pdf' ? 'Pages were rebuilt as pixels in a new image-only PDF held in memory.' : 'The image was re-encoded without source metadata.'} {selected.mediaPreview.candidateLowConfidenceLines > 0 ? `${selected.mediaPreview.candidateLowConfidenceLines} candidate OCR lines have low confidence. ` : ''}OCR may miss visible text; this same-engine visual check is not independent validation.</div>}
+            {selected.mediaPreview && <section className="coordinate-review" aria-label="Coordinate redaction review">
+              <div><strong>Reviewer coordinate regions</strong><p>Drag on the source page or enter native top-left raster pixels. Staged regions are not applied until you rescan.</p></div>
+              <div className="coordinate-inputs"><label>Page<select value={coordinateDraft.page} disabled={coordinateRescanRequired} onChange={event => setCoordinateDraft(current => ({ ...current, page: Number(event.target.value) }))}>{selected.mediaPreview.pages.map(page => <option key={page.number} value={page.number}>{page.number}</option>)}</select></label>{(['x0', 'y0', 'x1', 'y1'] as const).map(field => <label key={field}>{field.toUpperCase()}<input inputMode="numeric" pattern="[0-9]*" disabled={coordinateRescanRequired} value={coordinateDraft[field]} onChange={event => setCoordinateDraft(current => ({ ...current, [field]: event.target.value.replace(/[^0-9]/g, '') }))} /></label>)}<label>Category<select value={coordinateDraft.kind} disabled={coordinateRescanRequired} onChange={event => setCoordinateDraft(current => ({ ...current, kind: event.target.value as BatchManualFinding['kind'] }))}>{MANUAL_FINDING_OPTIONS.map(option => <option key={option.kind} value={option.kind}>{option.label}</option>)}</select></label><button type="button" className="secondary-button" disabled={busy || coordinateRescanRequired} onClick={() => { if ((['x0', 'y0', 'x1', 'y1'] as const).some(field => coordinateDraft[field] === '')) { setError('Enter all four pixel coordinates.'); return } stageCoordinate(selected.id, coordinateDraft.page, Number(coordinateDraft.x0), Number(coordinateDraft.y0), Number(coordinateDraft.x1), Number(coordinateDraft.y1)) }}>Stage region</button></div>
+              {selectedAppliedCoordinates.length > 0 && <div className="applied-regions"><strong>{selectedAppliedCoordinates.length} applied in this document · rescan to change</strong>{selectedAppliedCoordinates.map(region => {
+                const index = appliedCoordinates.indexOf(region)
+                return <span key={`${region.documentId}-${region.page}-${region.x0}-${region.y0}-${index}`}>Page {region.page}: ({region.x0}, {region.y0})–({region.x1}, {region.y1}) {shortType(region.kind)} <button type="button" aria-label={`Remove applied region ${index + 1}`} disabled={busy || coordinateRescanRequired} onClick={() => removeAppliedCoordinate(index)}><X size={14} /></button></span>
+              })}</div>}
+              {coordinateCorrections.length > 0 && <div className="pending-regions"><strong>{coordinateCorrections.length} staged · not applied</strong>{coordinateCorrections.map((region, index) => <span key={`${region.documentId}-${region.page}-${region.x0}-${index}`}>Page {region.page}: ({region.x0}, {region.y0})–({region.x1}, {region.y1}) {shortType(region.kind)} <button type="button" aria-label={`Remove staged region ${index + 1}`} disabled={busy || coordinateRescanRequired} onClick={() => setCoordinateCorrections(current => current.filter((_, itemIndex) => itemIndex !== index))}><X size={14} /></button></span>)}<button type="button" className="primary-button" disabled={busy || coordinateRescanRequired} onClick={() => rescanCoordinates()}>{busy ? 'Rescanning…' : 'Rescan and apply staged regions'}</button></div>}
+              {coordinateRescanRequired && <div className="coordinate-rescan-warning"><CircleAlert size={16} /><span>The prior candidate remains visible. Retry the exact coordinate change, or keep the previous candidate before making another edit.</span><button type="button" className="secondary-button" disabled={busy || !coordinateRescanTarget} onClick={retryCoordinateRescan}>Retry rescan</button><button type="button" className="text-button" disabled={busy} onClick={keepPreviousCoordinateCandidate}>Keep previous candidate</button></div>}
+            </section>}
             <div className={`comparison ${comparisonMode !== 'split' ? 'is-single' : ''}`}>
               {comparisonMode !== 'candidate' && <div className="comparison-column"><div className="pane-heading"><span>ORIGINAL · SYNTHETIC INPUT</span><span>{selected.matches.length} highlighted matches</span></div>
                 <div className="document-pane" ref={sourcePane} onScroll={event => syncPaneScroll(event.currentTarget, candidatePane.current)}>
-                  {selected.mediaPreview && <MediaPages document={selected} candidate={false} zoom={mediaZoom} />}
+                  {selected.mediaPreview && <MediaPages document={selected} candidate={false} zoom={mediaZoom} pending={coordinateCorrections} onDraw={(page, x0, y0, x1, y1) => stageCoordinate(selected.id, page, x0, y0, x1, y1)} />}
                   <details className="ocr-transcript" open={!selected.mediaPreview}><summary>{selected.mediaPreview ? 'OCR transcript' : 'Source text'}</summary><HighlightedSource document={selected} /></details>
                 </div></div>}
               {comparisonMode === 'split' && <div className="compare-divider"><ArrowDown size={17} /></div>}
               {comparisonMode !== 'original' && <div className="comparison-column"><div className="pane-heading"><span>{selected.mediaPreview ? 'RASTER CANDIDATE' : 'PROPOSED TEXT CANDIDATE'}</span><span>Demo review only</span></div>
                 <div className="document-pane candidate" ref={candidatePane} onScroll={event => syncPaneScroll(event.currentTarget, sourcePane.current)}>
-                  {selected.mediaPreview && <MediaPages document={selected} candidate={true} zoom={mediaZoom} />}
+                  {selected.mediaPreview && <MediaPages document={selected} candidate={true} zoom={mediaZoom} pending={coordinateCorrections} />}
                   <details className="ocr-transcript" open={!selected.mediaPreview}><summary>{selected.mediaPreview ? 'Proposed OCR text' : 'Candidate text'}</summary><pre>{selected.candidateText}</pre></details>
                 </div></div>}
             </div>
@@ -441,12 +521,12 @@ export default function BatchDemo() {
               <label className="check-label"><input type="checkbox" checked={demoDownloadAcknowledged}
                 onChange={event => setDemoDownloadAcknowledged(event.target.checked)} />
                 I confirm this batch contains synthetic test data only. The candidate is unverified and must not be shared or used as a release artifact.</label>
-              <button type="button" className="demo-download-button" disabled={!demoDownloadAcknowledged || busy || Boolean(demoDownloadBlockReason)}
+              <button type="button" className="demo-download-button" disabled={!demoDownloadAcknowledged || busy || coordinateCorrections.length > 0 || coordinateRescanRequired || Boolean(demoDownloadBlockReason)}
                 onClick={() => void downloadDemoCandidate(selected).catch(cause => setError(cause instanceof Error ? cause.message : 'Could not save the demo candidate.'))}>
                 <Download size={17} /> Download this demo candidate
               </button>
             </div>
-            {demoDownloadBlockReason && <p className="download-blocked">{demoDownloadBlockReason}</p>}
+            {(demoDownloadBlockReason || coordinateCorrections.length > 0 || coordinateRescanRequired) && <p className="download-blocked">{coordinateRescanRequired ? 'Download is blocked until the coordinate rescan succeeds. Previous applied regions remain visible while you retry.' : coordinateCorrections.length > 0 ? 'Download is disabled while coordinate regions are staged. Rescan to apply or remove them.' : demoDownloadBlockReason}</p>}
           </section>}
           {resultTab === 'relationships' && <section className="batch-card result-panel relationship-panel">
             <div className="card-header"><div><p className="overline">CROSS-DOCUMENT CONTEXT</p><h2>Entity relationship map</h2></div><span className="quiet-tag">Explicit evidence only</span></div>
