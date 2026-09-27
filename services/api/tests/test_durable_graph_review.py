@@ -12,7 +12,7 @@ from app.durable_graph_review import DurableGraphReviewAdapter, _snapshot_dict
 from app.durable_repository import DurableStore
 from app.demo_graph_review_binding import snapshot_binding
 from app.main import create_app
-from app.revisioned_graph_review import (GraphClaimSnapshot, GraphIdentityMerge, GraphIdentitySplit,
+from app.revisioned_graph_review import (GraphClaimSnapshot, GraphConflictResolution, GraphIdentityMerge, GraphIdentitySplit,
     GraphNodeSnapshot, GraphReviewConflict, GraphSnapshot, GraphSplitEndpointAssignment)
 from test_access import TOKENS, auth
 from test_control_plane_api import setup
@@ -93,6 +93,32 @@ def test_conflict_projection_contains_only_bound_accepted_claims_and_no_evidence
     assert view["conflict_groups"] == [{"kind": "POTENTIAL_MULTIPLE_WORKS_AT", "subject_ref": person,
                                         "claim_refs": sorted([claims[0].identifier, claims[1].identifier])}]
     assert "graphevidence" not in json.dumps(view)
+
+
+def test_conflict_resolution_replays_after_restart_and_rejects_fabricated_group(tmp_path):
+    tenant = ref("tenantref", "resolved-conflict"); person = ref("graphnode", "person")
+    first, second = ref("graphnode", "org-one"), ref("graphnode", "org-two")
+    claims = (GraphClaimSnapshot(ref("graphclaim", "one"), "works_at", person, first, ref("graphevidence", "one")),
+              GraphClaimSnapshot(ref("graphclaim", "two"), "works_at", person, second, ref("graphevidence", "two")))
+    item = GraphSnapshot(tenant, ref("graphsnap", "resolved-conflict"),
+        (GraphNodeSnapshot(person, "person"), GraphNodeSnapshot(first, "organization"), GraphNodeSnapshot(second, "organization")), claims)
+    service = adapter(tmp_path); service.create_snapshot(item); reviewer = ref("reviewerref", "r")
+    view = service.decide(tenant_ref=tenant, snapshot_ref=item.snapshot_ref, claim_ref=claims[0].identifier,
+                          expected_revision=0, decision="ACCEPT", reviewer_ref=reviewer)
+    view = service.decide(tenant_ref=tenant, snapshot_ref=item.snapshot_ref, claim_ref=claims[1].identifier,
+                          expected_revision=view["revision"], decision="ACCEPT", reviewer_ref=reviewer)
+    group = view["conflict_groups"][0]
+    resolved = service.resolve_conflict(tenant_ref=tenant, snapshot_ref=item.snapshot_ref,
+        resolution=GraphConflictResolution(group["kind"], group["subject_ref"], tuple(group["claim_refs"]), "RETAIN_ALL"),
+        expected_revision=view["revision"], reviewer_ref=reviewer)
+    assert resolved["conflict_resolutions"] == [{**group, "status": "RESOLVED"}]
+    assert "graphevidence" not in json.dumps(resolved)
+    restarted = adapter(tmp_path).read(tenant_ref=tenant, snapshot_ref=item.snapshot_ref)
+    assert restarted["conflict_resolutions"] == resolved["conflict_resolutions"]
+    with pytest.raises(HTTPException):
+        service.resolve_conflict(tenant_ref=tenant, snapshot_ref=item.snapshot_ref,
+            resolution=GraphConflictResolution(group["kind"], person, (claims[0].identifier, ref("graphclaim", "fake")), "RETAIN_ALL"),
+            expected_revision=resolved["revision"], reviewer_ref=reviewer)
 
 
 def test_expired_review_cannot_be_revived_by_decision(tmp_path, monkeypatch):

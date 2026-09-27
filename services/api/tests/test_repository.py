@@ -817,6 +817,18 @@ def test_stale_running_run_recovers_to_terminal_failure_and_rejects_late_complet
     assert store.verify_audit("tenant-a")
 
 
+def test_zero_run_lease_recovers_even_when_wall_clock_reads_before_serialized_claim(store, monkeypatch):
+    run, _, _ = run_dependencies(store)
+    store.register_run_control(run, "operator")
+    claimed, _ = store.claim_processing_run("run-1", "tenant-a", "processor")
+    started = store._running_started_at(claimed["payload"])
+    store.RUN_LEASE_SECONDS = 0
+    # ISO serialization and a wall-clock read can straddle a tick. A zero
+    # lease is already expired, independent of that small apparent skew.
+    monkeypatch.setattr("app.repository.time.time", lambda: started - 1)
+    assert store.recover_stale_processing_run("run-1", "tenant-a", "operator")["payload"]["state"] == "FAILED"
+
+
 def test_quarantine_persists_private_evidence_without_marking_a_candidate_available(store):
     run, _, _ = run_dependencies(store)
     store.register_run_control(run, "operator")

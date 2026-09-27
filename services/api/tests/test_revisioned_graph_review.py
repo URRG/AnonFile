@@ -1,7 +1,7 @@
 import pytest
 
 from app.revisioned_graph_review import (GraphClaimSnapshot, GraphNodeSnapshot, GraphReviewConflict,
-    GraphReviewError, GraphIdentityMerge, GraphIdentitySplit, GraphSnapshot,
+    GraphReviewError, GraphConflictResolution, GraphIdentityMerge, GraphIdentitySplit, GraphSnapshot,
     GraphSplitEndpointAssignment, RevisionedGraphReviewStore)
 
 
@@ -115,6 +115,33 @@ def test_identity_merge_is_revisioned_recalculates_conflicts_and_keeps_three_doc
     assert merged.snapshot.claims == initial.snapshot.claims
     private_evidence = overlay_snapshot().claims[0].evidence_binding_ref
     assert private_evidence not in str(merged)
+
+
+def test_exact_conflict_resolution_is_one_shot_cas_and_does_not_change_claims():
+    store = RevisionedGraphReviewStore(); initial = store.create_snapshot(overlay_snapshot())
+    first, second = (node.identifier for node in initial.snapshot.nodes[:2])
+    accepted = initial
+    for claim in initial.snapshot.claims[:2]:
+        accepted = store.decide(tenant_ref=TENANT_A, snapshot_ref=SNAPSHOT, claim_ref=claim.identifier,
+                                expected_revision=accepted.revision, decision="ACCEPT", reviewer_ref=REVIEWER)
+    conflicted = store.merge_identities(tenant_ref=TENANT_A, snapshot_ref=SNAPSHOT,
+                                        merge=GraphIdentityMerge(first, (first, second)),
+                                        expected_revision=accepted.revision, reviewer_ref=REVIEWER)
+    kind, subject, claims = __import__('app.revisioned_graph_review', fromlist=['conflict_groups']).conflict_groups(conflicted)[0]
+    resolved = store.resolve_conflict(tenant_ref=TENANT_A, snapshot_ref=SNAPSHOT,
+        resolution=GraphConflictResolution(kind, subject, claims, "RETAIN_ALL"),
+        expected_revision=conflicted.revision, reviewer_ref=REVIEWER)
+    assert resolved.revision == conflicted.revision + 1
+    assert resolved.snapshot.claims == initial.snapshot.claims
+    assert resolved.conflict_resolutions[0].claim_refs == claims
+    with pytest.raises(GraphReviewConflict):
+        store.resolve_conflict(tenant_ref=TENANT_A, snapshot_ref=SNAPSHOT,
+            resolution=GraphConflictResolution(kind, subject, claims, "RETAIN_ALL"),
+            expected_revision=conflicted.revision, reviewer_ref=REVIEWER)
+    with pytest.raises(GraphReviewError):
+        store.resolve_conflict(tenant_ref=TENANT_A, snapshot_ref=SNAPSHOT,
+            resolution=GraphConflictResolution(kind, subject, tuple(reversed(claims)), "RETAIN_ALL"),
+            expected_revision=resolved.revision, reviewer_ref=REVIEWER)
 
 
 def test_merge_rejects_post_overlay_person_self_link_and_stale_update():

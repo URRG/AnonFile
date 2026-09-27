@@ -79,7 +79,7 @@ from app.policies import TAXONOMY_CATEGORIES
 from app.durable_repository import DurableStore
 from app.durable_graph_review import DurableGraphReviewAdapter
 from app.demo_graph_review_binding import snapshot_binding
-from app.revisioned_graph_review import (GraphIdentityMerge, GraphIdentitySplit, GraphReviewConflict,
+from app.revisioned_graph_review import (GraphConflictResolution, GraphIdentityMerge, GraphIdentitySplit, GraphReviewConflict,
                                          GraphReviewError, GraphSplitEndpointAssignment)
 
 MAX_BODY_BYTES = 2_100_000
@@ -577,6 +577,13 @@ class GraphReviewSplitCreate(StrictModel):
     source_person_ref: str = Field(min_length=1, max_length=80)
     replacement_person_refs: list[str] = Field(min_length=2, max_length=100)
     endpoint_assignments: list[GraphReviewSplitAssignmentCreate] = Field(max_length=200)
+    expected_revision: StrictInt = Field(ge=0)
+
+class GraphReviewConflictResolutionCreate(StrictModel):
+    kind: Literal["POTENTIAL_MULTIPLE_WORKS_AT", "POTENTIAL_MULTIPLE_ASSIGNED_TO"]
+    subject_ref: str = Field(min_length=1, max_length=80)
+    claim_refs: list[str] = Field(min_length=2, max_length=200)
+    disposition: Literal["RETAIN_ALL"]
     expected_revision: StrictInt = Field(ge=0)
 
 def now():
@@ -1191,6 +1198,24 @@ def create_app() -> FastAPI:
                 return app.state.graph_reviews.split_identity(tenant_ref=tenant_ref, snapshot_ref=snapshot_ref,
                                                               split=split, expected_revision=request.expected_revision,
                                                               reviewer_ref=reviewer_ref)
+            except GraphReviewConflict:
+                raise HTTPException(409, "Graph review revision is stale") from None
+            except GraphReviewError:
+                raise HTTPException(404, "Graph review unavailable") from None
+            except HTTPException as error:
+                if error.status_code == 404:
+                    raise HTTPException(404, "Graph review unavailable") from None
+                raise
+
+        @app.post("/graph-reviews/{snapshot_ref}/conflict-resolutions")
+        def resolve_graph_conflict(snapshot_ref: str, request: GraphReviewConflictResolutionCreate,
+                                   principal: Principal = Depends(require_roles("reviewer"))):
+            try:
+                tenant_ref, reviewer_ref = graph_review_principal_refs(principal)
+                return app.state.graph_reviews.resolve_conflict(tenant_ref=tenant_ref, snapshot_ref=snapshot_ref,
+                    resolution=GraphConflictResolution(request.kind, request.subject_ref, tuple(request.claim_refs),
+                                                       request.disposition), expected_revision=request.expected_revision,
+                    reviewer_ref=reviewer_ref)
             except GraphReviewConflict:
                 raise HTTPException(409, "Graph review revision is stale") from None
             except GraphReviewError:

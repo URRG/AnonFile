@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import ts from 'typescript'
 const source = readFileSync(new URL('../src/api.ts', import.meta.url), 'utf8')
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText
-const { requestRelease, validateRelease, runControlPlane, ControlPlaneFailure, DEFAULT_POLICY_NOTICE, REQUEST_TIMEOUT_MS, decodeDemoUpload, inspectSyntheticDemo, DemoInspectionFailure, DEMO_MAX_BYTES, getRecordedGraphReview, decideRecordedGraphClaim, mergeRecordedGraphIdentities, splitRecordedGraphIdentity, GraphReviewFailure } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
+const { requestRelease, validateRelease, runControlPlane, ControlPlaneFailure, DEFAULT_POLICY_NOTICE, REQUEST_TIMEOUT_MS, decodeDemoUpload, inspectSyntheticDemo, DemoInspectionFailure, DEMO_MAX_BYTES, getRecordedGraphReview, decideRecordedGraphClaim, mergeRecordedGraphIdentities, resolveRecordedGraphConflict, splitRecordedGraphIdentity, GraphReviewFailure } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
 const request = { apiBase: 'http://localhost:8000', token: 'test-token', content: 'synthetic', recipient: 'buyer-test', mode: 'external_anonymized' }
 const safe = () => ({ id: 'release-1', dataset_id: 'dataset-1', status: 'evaluation_incomplete', eligibility: 'REVIEW_REQUIRED', output: null, card: { release_id: 'release-1', dataset_id: 'dataset-1', eligibility: 'REVIEW_REQUIRED', policy_version: 'external-release-v1', release_mode: 'external_anonymized', evidence_status: 'INSUFFICIENT_EVIDENCE', scores: null, findings: [], gates: ['EXPORT_DISABLED', 'QUALIFICATION_REQUIRED'], limitations: ['rules-only'] } })
 for (const status of [401, 403, 409, 413, 422, 429, 500, 503]) {
@@ -69,6 +69,34 @@ test('recorded review accepts only exact source-free conflict groups bound to ac
   assert.deepEqual(view.conflictGroups[0].claimRefs, [recordedBinding.claims[0].claimRef, claimTwo]); t.mock.restoreAll()
   t.mock.method(globalThis, 'fetch', async () => Response.json({ ...base, conflict_groups: [] }))
   await assert.rejects(getRecordedGraphReview({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding, graph }), GraphReviewFailure)
+})
+
+test('recorded conflict resolution counts its durable action, replays, and fails closed when the live group changes', async t => {
+  const orgTwo = `${opaque('graphnode').slice(0, -1)}C`, claimTwo = `${opaque('graphclaim').slice(0, -1)}B`
+  const graph = { nodes: [...recordedGraph.nodes, { id: 'organization_2', kind: 'organization', label: 'Organization B', documentIds: [] }], edges: [...recordedGraph.edges, { id: 'edge_2', type: 'works_at', sourceId: 'person_1', targetId: 'organization_2', evidence: [] }] }
+  const binding = { ...recordedBinding, nodes: [...recordedBinding.nodes, { graphNodeId: 'organization_2', nodeRef: orgTwo }], claims: [...recordedBinding.claims, { graphEdgeId: 'edge_2', claimRef: claimTwo }] }
+  const group = { kind: 'POTENTIAL_MULTIPLE_WORKS_AT', subject_ref: recordedBinding.nodes[0].nodeRef, claim_refs: [recordedBinding.claims[0].claimRef, claimTwo] }
+  const resolved = { ...recordedPayload(3), nodes: [...recordedPayload(3).nodes, { id: orgTwo, kind: 'organization' }], claims: [...recordedPayload(3).claims, { id: claimTwo, relation: 'works_at', source: recordedBinding.nodes[0].nodeRef, target: orgTwo }], decisions: [{ claim_ref: recordedBinding.claims[0].claimRef, decision: 'ACCEPT' }, { claim_ref: claimTwo, decision: 'ACCEPT' }], conflicts: [{ kind: group.kind, subjects: 1, relationships: 2 }], conflict_groups: [group], conflict_resolutions: [{ ...group, status: 'RESOLVED' }], conflict_resolution_actions: [{ ...group, disposition: 'RETAIN_ALL' }] }
+  let received
+  t.mock.method(globalThis, 'fetch', async (_url, options) => { received = JSON.parse(options.body); return Response.json(resolved) })
+  const view = await resolveRecordedGraphConflict({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding, graph, group: { kind: group.kind, subjectRef: group.subject_ref, claimRefs: group.claim_refs }, expectedRevision: 2 })
+  assert.deepEqual(received, { kind: group.kind, subject_ref: group.subject_ref, claim_refs: group.claim_refs, disposition: 'RETAIN_ALL', expected_revision: 2 })
+  assert.equal(view.revision, 3); assert.equal(view.conflictResolutionActions.length, 1)
+  t.mock.restoreAll(); t.mock.method(globalThis, 'fetch', async () => Response.json(resolved))
+  assert.equal((await getRecordedGraphReview({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding, graph })).conflictResolutions[0].status, 'RESOLVED')
+  t.mock.restoreAll(); t.mock.method(globalThis, 'fetch', async () => Response.json({ ...resolved, conflict_groups: [] }))
+  await assert.rejects(getRecordedGraphReview({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding, graph }), GraphReviewFailure)
+})
+
+test('recorded client accepts a retained resolution after a later split removes its live group', async t => {
+  const secondPerson = `${opaque('graphnode').slice(0, -1)}C`, thirdPerson = `${opaque('graphnode').slice(0, -1)}D`, orgTwo = `${opaque('graphnode').slice(0, -1)}E`, claimTwo = `${opaque('graphclaim').slice(0, -1)}B`
+  const graph = { nodes: [...recordedGraph.nodes, { id: 'person_2', kind: 'person', label: 'Person B', documentIds: [] }, { id: 'person_3', kind: 'person', label: 'Person C', documentIds: [] }, { id: 'organization_2', kind: 'organization', label: 'Organization B', documentIds: [] }], edges: [...recordedGraph.edges, { id: 'edge_2', type: 'works_at', sourceId: 'person_1', targetId: 'organization_2', evidence: [] }] }
+  const binding = { ...recordedBinding, nodes: [...recordedBinding.nodes, { graphNodeId: 'person_2', nodeRef: secondPerson }, { graphNodeId: 'person_3', nodeRef: thirdPerson }, { graphNodeId: 'organization_2', nodeRef: orgTwo }], claims: [...recordedBinding.claims, { graphEdgeId: 'edge_2', claimRef: claimTwo }] }
+  const historical = { kind: 'POTENTIAL_MULTIPLE_WORKS_AT', subject_ref: recordedBinding.nodes[0].nodeRef, claim_refs: [recordedBinding.claims[0].claimRef, claimTwo] }
+  const response = { ...recordedPayload(4), nodes: [...recordedPayload(4).nodes, { id: secondPerson, kind: 'person' }, { id: thirdPerson, kind: 'person' }, { id: orgTwo, kind: 'organization' }], claims: [...recordedPayload(4).claims, { id: claimTwo, relation: 'works_at', source: recordedBinding.nodes[0].nodeRef, target: orgTwo }], decisions: [{ claim_ref: recordedBinding.claims[0].claimRef, decision: 'ACCEPT' }, { claim_ref: claimTwo, decision: 'ACCEPT' }], identity_actions: [{ action: 'SPLIT', source: recordedBinding.nodes[0].nodeRef, replacements: [secondPerson, thirdPerson], assignments: [{ claim_ref: recordedBinding.claims[0].claimRef, endpoint: 'source', replacement: secondPerson }, { claim_ref: claimTwo, endpoint: 'source', replacement: thirdPerson }] }], conflicts: [], conflict_groups: [], conflict_resolutions: [], conflict_resolution_actions: [{ ...historical, disposition: 'RETAIN_ALL' }] }
+  t.mock.method(globalThis, 'fetch', async () => Response.json(response))
+  const view = await getRecordedGraphReview({ apiBase: 'http://localhost:8000', token: 'reviewer-secret', binding, graph })
+  assert.equal(view.revision, 4); assert.deepEqual(view.conflictGroups, []); assert.deepEqual(view.conflictResolutions, []); assert.equal(view.conflictResolutionActions.length, 1)
 })
 
 test('recorded split parser tolerates unavailable decision/action chronology without accepting extra endpoints', async t => {
