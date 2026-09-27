@@ -506,13 +506,15 @@ def _media_locator(document: dict[str, Any], span: tuple[int, int] | None) -> di
         for line in lines:
             if not isinstance(line, dict):
                 return _unsupported_locator()
-            start, end, box = line.get("start"), line.get("end"), line.get("box")
+            line_text, start, end, box = line.get("text"), line.get("start"), line.get("end"), line.get("box")
             if (not isinstance(start, int) or isinstance(start, bool) or not isinstance(end, int)
-                    or isinstance(end, bool) or not isinstance(box, (list, tuple)) or len(box) != 4
+                    or isinstance(end, bool) or not isinstance(line_text, str)
+                    or not isinstance(box, (list, tuple)) or len(box) != 4
                     or any(not isinstance(value, int) or isinstance(value, bool) for value in box)):
                 return _unsupported_locator()
             x0, y0, x1, y1 = box
-            if not (0 <= start < end <= len(text) and 0 <= x0 < x1 <= width and 0 <= y0 < y1 <= height):
+            if not (0 <= start < end <= len(text) and line_text == text[start:end]
+                    and 0 <= x0 < x1 <= width and 0 <= y0 < y1 <= height):
                 return _unsupported_locator()
             if start < span[1] and end > span[0]:
                 selected.append((start, end, number, width, height, x0, y0, x1, y1))

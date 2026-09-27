@@ -192,6 +192,45 @@ def test_api_graph_media_evidence_abstains_for_cross_page_or_invalid_ocr_geometr
                                    "lines": [{"start": 0, "end": len(malformed_text), "box": (1, 1, 101, 20)}]}]}
     assert demo_batch._text_locator(malformed, "Maya Patel", "Dispatch Guard", (0, len(malformed_text))) == {
         "status": "UNSUPPORTED", "reason": "NO_DEFENSIBLE_SOURCE_LOCATOR"}
+    stale = {"kind": "image", "text": malformed_text, "source_sha256": "a" * 64,
+             "_media_pages": [{"number": 1, "image": Image.new("RGB", (100, 100), "white"),
+                               "lines": [{"text": "a stale OCR line", "start": 0, "end": len(malformed_text),
+                                          "box": (1, 1, 99, 20)}]}]}
+    assert demo_batch._text_locator(stale, "Maya Patel", "Dispatch Guard", (0, len(malformed_text))) == {
+        "status": "UNSUPPORTED", "reason": "NO_DEFENSIBLE_SOURCE_LOCATOR"}
+
+
+def test_real_ocr_pdf_locator_is_reachable_only_for_an_exact_relationship_line():
+    """Exercise the locator against real extraction, without treating OCR drift as proof."""
+    from reportlab.pdfgen import canvas
+    from app.demo_batch import _text_locator
+    from app.media_preview import extract_media
+
+    expected = "Maya Patel works on Orion Project."
+    stream = BytesIO()
+    pdf = canvas.Canvas(stream)
+    pdf.setFont("Helvetica", 18)
+    pdf.drawString(72, 720, expected)
+    pdf.save()
+    raw = stream.getvalue()
+    try:
+        text, pages = extract_media(raw, ".pdf")
+    except PayloadError:
+        # A provider that cannot make a bounded OCR transcript cannot make a
+        # graph locator either; this is an intentional abstention, not a pass.
+        return
+    document = {"kind": "pdf", "text": text, "source_sha256": hashlib.sha256(raw).hexdigest(),
+                "_media_pages": pages}
+    if text.count(expected) != 1:
+        assert _text_locator(document, "Maya Patel", "Orion Project") == {
+            "status": "UNSUPPORTED", "reason": "NO_DEFENSIBLE_SOURCE_LOCATOR"}
+        return
+    start = text.index(expected)
+    locator = _text_locator(document, "Maya Patel", "Orion Project", (start, start + len(expected)))
+    assert locator["status"] == "SUPPORTED"
+    assert locator["kind"] == "ocr_line_boxes"
+    assert locator["precision"] == "OCR_LINE_BOX_APPROXIMATE"
+    assert locator["page"] == 1 and locator["line_boxes"]
 
 
 def test_locator_abstains_for_duplicate_or_nonrecord_text_occurrences():
