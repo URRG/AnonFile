@@ -10,15 +10,18 @@ import json
 import re
 from dataclasses import dataclass
 from enum import Enum
+from io import BytesIO
 from pathlib import Path
 from typing import Protocol
 
-from app.tesseract_verifier import FinalPngTranscriptVerifier
+from PIL import Image, UnidentifiedImageError
+
+from app.tesseract_verifier import TesseractCliVerifier
 
 
 VERSION = "d07-synthetic-media-final-pixels-v1"
 _FIXTURE_DIRECTORY = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "d07_media_holdout"
-_MANIFEST_SHA256 = "e5e0e9efc9caa3a8c010f69243a334df86180c07cc5578cf0e722ab37f8f382c"
+_MANIFEST_SHA256 = "8ceeffdad535192b675ef554162e083239016b8953c82c006618c4ba3dca1941"
 _MAX_CASES = 16
 _MAX_MANIFEST_BYTES = 16_384
 _MAX_PIXELS_PER_CASE = 10_000_000
@@ -62,7 +65,13 @@ class TesseractPixelOcr:
     runtime-identity checks.  It is opt-in and has no product or release wiring.
     """
 
-    verifier: FinalPngTranscriptVerifier
+    verifier: TesseractCliVerifier
+
+    def __post_init__(self) -> None:
+        # This named adapter cannot be satisfied by a structural/mock OCR
+        # object.  Generic test adapters remain supported through PixelOcr.
+        if type(self.verifier) is not TesseractCliVerifier:
+            raise TypeError("D07 Tesseract adapter requires a provisioned TesseractCliVerifier.")
 
     def extract_text(self, *, pixels: bytes, kind: MediaKind) -> str:
         if not isinstance(kind, MediaKind):
@@ -178,6 +187,19 @@ def _limitations() -> list[str]:
     ]
 
 
+def _validate_final_png(pixels: bytes) -> None:
+    """Require a bounded, decodable PNG before it reaches an OCR adapter."""
+    try:
+        with Image.open(BytesIO(pixels)) as image:
+            if image.format != "PNG":
+                _reject()
+            if image.width < 16 or image.height < 16 or image.width * image.height > 2_000_000:
+                _reject()
+            image.load()
+    except (OSError, ValueError, UnidentifiedImageError, D07MediaHoldoutError):
+        _reject()
+
+
 def evaluate_final_pixels(*, rendered: tuple[RenderedPixels, ...], ocr: PixelOcr | None,
                           fixture_directory: Path = _FIXTURE_DIRECTORY) -> dict[str, object]:
     """Evaluate locked synthetic markers with an independent OCR adapter.
@@ -211,6 +233,7 @@ def evaluate_final_pixels(*, rendered: tuple[RenderedPixels, ...], ocr: PixelOcr
         for case_id, kind, digest, expected, forbidden in cases:
             if hashlib.sha256(supplied[case_id]).hexdigest() != digest:
                 _reject()
+            _validate_final_png(supplied[case_id])
             text = ocr.extract_text(pixels=supplied[case_id], kind=kind)
             if not isinstance(text, str) or len(text) > _MAX_OCR_CHARACTERS:
                 _reject()

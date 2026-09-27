@@ -2,7 +2,7 @@
   "schema_version": "d07-synthetic-media-final-pixels-v1",
   "fixture_id": "d07-synthetic-media-final-pixels-v1",
   "cases": [
-    {"case_id": "pdf-page-1", "kind": "pdf_rendered_page", "final_raster_sha256": "b9c85c071771c1bd2ffc2323aa3f653731a8cad82510c2e96a1baabbd6b05693", "expected_final_markers": ["D07-FINAL-ALPHA-91"], "forbidden_markers": ["D07-SOURCE-ALPHA-91"]},
-    {"case_id": "image-1", "kind": "image", "final_raster_sha256": "3e8ef2d78918832c90b741ebb877d61f277e682d9e4635ff8a72839914ddb5e4", "expected_final_markers": ["D07-FINAL-BRAVO-27"], "forbidden_markers": ["D07-SOURCE-BRAVO-27"]}
+    {"case_id": "pdf-page-1", "kind": "pdf_rendered_page", "final_raster_sha256": "1ae407bd196dc90b3dc929cf9e6f976d984f20794622fe1fa7919aa6423faeb6", "expected_final_markers": ["D07-FINAL-ALPHA-91"], "forbidden_markers": ["D07-SOURCE-ALPHA-91"]},
+    {"case_id": "image-1", "kind": "image", "final_raster_sha256": "23343631ff16ee35b85b5f3aa861626a7de13cd53fed6d6de38571f2ced35fbd", "expected_final_markers": ["D07-FINAL-BRAVO-27"], "forbidden_markers": ["D07-SOURCE-BRAVO-27"]}
   ]
 }

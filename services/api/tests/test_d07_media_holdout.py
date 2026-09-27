@@ -1,5 +1,9 @@
 import json
+import hashlib
 from pathlib import Path
+
+import pytest
+from PIL import Image
 
 from app.d07_media_holdout import (EvaluationStatus, MediaKind, RenderedPixels,
                                    TesseractPixelOcr, evaluate_final_pixels)
@@ -19,7 +23,8 @@ class StubOcr:
 
 
 def pixels() -> tuple[RenderedPixels, ...]:
-    return (RenderedPixels("pdf-page-1", b"pdf-final-pixels"), RenderedPixels("image-1", b"image-final-pixels"))
+    return (RenderedPixels("pdf-page-1", (FIXTURE / "pdf-page-1.png").read_bytes()),
+            RenderedPixels("image-1", (FIXTURE / "image-1.png").read_bytes()))
 
 
 def test_expected_final_canaries_are_aggregate_only_and_never_qualify() -> None:
@@ -106,14 +111,14 @@ def test_unavailable_ocr_and_oversized_ocr_result_fail_closed() -> None:
 
 def test_final_raster_digest_mismatch_prevents_ocr_and_fails_closed() -> None:
     ocr = StubOcr("D07-FINAL-ALPHA-91 D07-FINAL-BRAVO-27")
-    changed = (RenderedPixels("pdf-page-1", b"changed-final-pixels"), RenderedPixels("image-1", b"image-final-pixels"))
+    changed = (RenderedPixels("pdf-page-1", b"changed-final-pixels"), pixels()[1])
     report = evaluate_final_pixels(rendered=changed, ocr=ocr, fixture_directory=FIXTURE)
     assert report["status"] == EvaluationStatus.BLOCKED.value
     assert report["reason"] == "FINAL_PIXEL_EVALUATION_FAILED_CLOSED"
     assert ocr.calls == []
 
 
-def test_tesseract_adapter_uses_only_supplied_pinned_verifier() -> None:
+def test_tesseract_adapter_rejects_structural_fake_verifier() -> None:
     class PinnedVerifier:
         def __init__(self) -> None:
             self.pixels: list[bytes] = []
@@ -122,7 +127,29 @@ def test_tesseract_adapter_uses_only_supplied_pinned_verifier() -> None:
             self.pixels.append(pixels)
             return "D07-FINAL-ALPHA-91 D07-FINAL-BRAVO-27"
 
-    verifier = PinnedVerifier()
-    report = evaluate_final_pixels(rendered=pixels(), ocr=TesseractPixelOcr(verifier), fixture_directory=FIXTURE)
-    assert report["status"] == EvaluationStatus.SYNTHETIC_CANARIES_CONFIRMED.value
-    assert verifier.pixels == [b"pdf-final-pixels", b"image-final-pixels"]
+    with pytest.raises(TypeError, match="requires a provisioned TesseractCliVerifier"):
+        TesseractPixelOcr(PinnedVerifier())
+
+
+def test_fixtures_are_real_decodable_pngs_with_pinned_bytes_and_pdf_provenance() -> None:
+    manifest = json.loads((FIXTURE / "manifest.json").read_text(encoding="utf-8"))
+    for case in manifest["cases"]:
+        image_path = FIXTURE / f"{case['case_id']}.png"
+        raw = image_path.read_bytes()
+        assert raw.startswith(b"\x89PNG\r\n\x1a\n")
+        assert hashlib.sha256(raw).hexdigest() == case["final_raster_sha256"]
+        with Image.open(image_path) as image:
+            assert image.format == "PNG"
+            image.load()
+    assert (FIXTURE / "pdf-page-1-source.pdf").read_bytes().startswith(b"%PDF-")
+
+
+def test_non_png_bytes_are_rejected_before_generic_ocr(monkeypatch) -> None:
+    bad = b"not a png"
+    monkeypatch.setattr("app.d07_media_holdout._load_cases", lambda _directory: (
+        ("image-1", MediaKind.IMAGE, hashlib.sha256(bad).hexdigest(), ("expected",), ("forbidden",)),
+    ))
+    ocr = StubOcr("expected")
+    report = evaluate_final_pixels(rendered=(RenderedPixels("image-1", bad),), ocr=ocr, fixture_directory=FIXTURE)
+    assert report["status"] == EvaluationStatus.BLOCKED.value
+    assert ocr.calls == []
