@@ -334,6 +334,17 @@ def test_ocr_geometry_accepts_one_tight_line_with_ordinary_word_spacing(monkeypa
      [(160, 35), (260, 35), (260, 55), (160, 55)],
      [(10, 50), (100, 50), (100, 70), (10, 70)],
      [(160, 65), (260, 65), (260, 85), (160, 85)]],
+    # A lone tall sidebar/value beside two stacked claims does not supply a
+    # dependable linear reading order merely because the second track has
+    # only one OCR result.
+    [[(10, 20), (100, 20), (100, 40), (10, 40)],
+     [(160, 25), (260, 25), (260, 75), (160, 75)],
+     [(10, 55), (100, 55), (100, 75), (10, 75)]],
+    # Do not let the repeated-track 8px column heuristic become an escape
+    # hatch: a seven-pixel-separated tall claim can still span two rows.
+    [[(10, 20), (100, 20), (100, 40), (10, 40)],
+     [(107, 25), (207, 25), (207, 75), (107, 75)],
+     [(10, 55), (100, 55), (100, 75), (10, 75)]],
     # OCR boxes that physically overlap cannot be safely repainted separately.
     [[(10, 20), (180, 20), (180, 45), (10, 45)],
      [(120, 35), (280, 35), (280, 60), (120, 60)]],
@@ -370,6 +381,23 @@ def test_render_candidate_abstains_when_repaint_touches_unaffected_neighbor(monk
     with pytest.raises(PayloadError, match="visual repaint region touches") as error:
         render_candidate([page], [match], "image")
     assert secret not in str(error.value)
+
+
+def test_ocr_geometry_allows_distant_singleton_beside_stacked_track(monkeypatch):
+    """The singleton-column guard stays local to materially overlapping rows."""
+    from types import SimpleNamespace
+    from app import media_preview
+
+    boxes = [[(10, 20), (100, 20), (100, 40), (10, 40)],
+             [(10, 55), (100, 55), (100, 75), (10, 75)],
+             [(160, 110), (260, 110), (260, 130), (160, 130)]]
+    monkeypatch.setattr(media_preview, "_engine", lambda: lambda _: SimpleNamespace(
+        txts=["first line", "second line", "distant note"], boxes=boxes, scores=[0.99] * len(boxes)))
+
+    # Disable pixel-level guards to isolate the layout decision; this test is
+    # deliberately about geometry, not source-raster support.
+    lines = _ocr_lines(Image.new("RGB", (320, 180), "white"), validate_layout=False)
+    media_preview._assert_unambiguous_ocr_layout(lines)
 
 
 def test_render_candidate_abstains_on_unrecognised_dark_ink_in_repaint_padding(monkeypatch):

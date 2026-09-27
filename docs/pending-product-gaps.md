@@ -77,6 +77,11 @@ supplier data. `Blocked externally` is not the same as done.
     in that ring abstains, except a one-pixel antialiased fringe directly adjacent to
     claimed source ink; this prevents a padded repaint from erasing an unseen
     local glyph. This narrow fail-closed guard is not OCR-coverage evidence.
+  - [x] A repeated OCR track beside one tall laterally separated claim now
+    abstains when that claim materially spans two rows, preventing a sidebar,
+    partial second column, or multi-row form value from being sorted into an
+    invented linear transcript. This is a local geometry guard only; it does
+    not extract reading order or establish same-engine OCR source geometry.
   - [ ] General multi-column/table/form reading-order mapping, real OCR blur and
     coverage qualification, and visual utility thresholds remain open. These
     synthetic controls do not prove completeness or production fidelity.
