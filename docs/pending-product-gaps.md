@@ -65,14 +65,15 @@ supplier data. `Blocked externally` is not the same as done.
   merge/split, and flag conflicts. Exit: evidence navigation and graph
   correction tests across at least three documents.
   - [x] Exact, bounded text-source spans for explicit statements, mail headers
-    and unambiguous CSV records; PDF/image claims explicitly abstain from a
-    precise locator. The graph UI navigates to a highlighted text span or
-    labels the link document-level only. Repeated mail messages retain distinct
-    evidence spans.
-  - [ ] Page/box-backed media provenance, recorded reviewer accept/reject,
-    identity merge/split and conflict adjudication remain unavailable in this
-    stateless synthetic demo. Node/edge IDs are response-local, not durable
-    correction keys.
+    and unambiguous CSV records. The graph UI navigates to a highlighted text
+    span. Repeated mail messages retain distinct evidence spans.
+  - [x] A media relationship with an exact parser span mapping to one source
+    page and at most four validated OCR lines navigates to approximate
+    OCR-line boxes, bound to source bytes and page dimensions. Ambiguous,
+    cross-page or stale maps abstain. These boxes are not glyph-precise proof.
+  - [ ] Recorded reviewer accept/reject, identity merge/split and conflict
+    adjudication remain unavailable in this stateless synthetic demo.
+    Node/edge IDs are response-local, not durable correction keys.
 - [ ] **D07 — Independent demo scorecard.** Evaluate untouched final pixels and
   text with a different engine/annotated ground truth; separate automatic
   detector scores from reviewer corrections and measure graph/link quality.

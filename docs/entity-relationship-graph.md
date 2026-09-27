@@ -45,8 +45,10 @@ names, or raw evidence snippets.
    header. Do not run a free-form model and treat its prose as evidence.
 4. Record the source document ID, extraction rule, and bounded field for
    each edge. The UI offers an evidence inspector and a route back to the
-   source comparison; a provenance label is not a correctness score. Exact
-   page/line or span navigation remains future work.
+   source comparison. Text evidence can navigate to a validated source span;
+   media evidence can show bounded approximate OCR-line boxes on one verified
+   source page or explicitly abstains. These locators are not pixel-precise
+   relationship proof, OCR coverage evidence, or a correctness score.
 5. Render role/affiliation links first in a spatial node-link map. Show mail
    traffic only by opt-in toggle so a long thread does not bury the useful
    relationships. Provide zoom, pan, fit, keyboard-operable selection and a
