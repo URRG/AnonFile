@@ -112,7 +112,7 @@ class DevelopmentStore:
                                 "private_candidate", "evaluation_report", "qualification",
                                 "detector_evaluation_evidence", "benchmark_evidence", "utility_evidence", "disclosure_risk_evidence",
                                 "linkage_risk_evidence", "independent_residual_evidence", "release_case", "privacy_decision",
-                                "release_authorization_request", "release_authorization_approval", "delivery_readiness"})
+                                "release_authorization_request", "release_authorization_approval", "delivery_readiness", "graph_review"})
     TTL_SECONDS = 3600
 
     def __init__(self):

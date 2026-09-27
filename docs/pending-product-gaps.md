@@ -99,14 +99,20 @@ supplier data. `Blocked externally` is not the same as done.
   - [x] A bounded server-side domain state machine owns immutable opaque graph
     snapshots, one-shot accept/reject decisions, optimistic revision checks,
     tenant/snapshot tuple lookup, and append-only source-free audit events.
-    It rejects stale and fabricated claim references. Tenant/reviewer values
-    are trusted-server inputs, not authorization; identity merge/split is
-    intentionally not implemented.
-  - [ ] Recorded reviewer accept/reject, identity merge/split and conflict
-    adjudication remain unavailable in this stateless synthetic demo. The D06
-    state machine is not connected to authenticated API routes or a durable
-    transactional repository, so process restart discards it; node/edge IDs in
-    the demo remain response-local, not durable correction keys.
+    It rejects stale and fabricated claim references. The in-process primitive
+    also supports revisioned merge and exhaustive endpoint-level split overlays,
+    without changing original evidence or authorizing release.
+  - [x] In development mode with encrypted SQLite storage, reviewer-only GET
+    and accept/reject POST routes bind opaque graph snapshots to the authenticated
+    tenant, retain CAS revision and audit atomically, reject expired snapshots,
+    and omit evidence bindings from views. Memory mode exposes no graph-review
+    route; production mode still blocks the workflow. Snapshot registration is
+    trusted-server-only and has no user-facing ingest path.
+  - [ ] User-facing recorded graph review is still unavailable in the synthetic
+    demo. Identity merge/split actions and conflict resolution are not routed or
+    durably applied; the UI's node/edge IDs remain response-local rather than
+    durable correction keys. External audit anchoring and multi-host persistence
+    are also not established.
 - [ ] **D07 — Independent demo scorecard.** Evaluate untouched final pixels and
   text with a different engine/annotated ground truth; separate automatic
   detector scores from reviewer corrections and measure graph/link quality.
