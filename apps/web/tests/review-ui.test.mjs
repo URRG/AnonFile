@@ -12,6 +12,7 @@ const { relationshipConflictCues, reviewStatusFor, selectionForGraph, validateMe
 const graphSource = readFileSync(new URL('../src/relationship-graph.tsx', import.meta.url), 'utf8')
 const graphCss = readFileSync(new URL('../src/relationship-graph.css', import.meta.url), 'utf8')
 const batchSource = readFileSync(new URL('../src/batch-demo.tsx', import.meta.url), 'utf8')
+const batchCss = readFileSync(new URL('../src/batch.css', import.meta.url), 'utf8')
 
 test('graph node keyboard navigation wraps and supports Home and End', () => {
   assert.equal(moveReviewFocus(0, 3, 'ArrowRight'), 1)
@@ -149,6 +150,12 @@ test('review graph preserves visible focus, touch-sized controls, responsive lay
   for (const required of ['min-height:44px', ':focus-visible', '@media (prefers-reduced-motion:reduce)', '@media(max-width:760px)', 'overflow:auto']) {
     assert.match(graphCss, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   }
+})
+
+test('narrow result header lets the breadcrumb shrink before the demo badge overflows', () => {
+  assert.match(batchCss, /@media\(max-width:360px\)\{\.topbar\{[^}]*padding-inline:12px/)
+  assert.match(batchCss, /\.breadcrumb\{[^}]*min-width:0;overflow:hidden;white-space:nowrap/)
+  assert.match(batchCss, /\.breadcrumb strong\{[^}]*overflow:hidden;text-overflow:ellipsis/)
 })
 
 test('every actionable relationship evidence and table control has a 44px target', () => {
