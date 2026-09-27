@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from app.contracts import PayloadError
-from app.demo_batch import _choose_alias
+from app.demo_batch import _choose_alias, analyze_batch
 from test_demo_inspect_api import demo_client
 from test_access import auth, client
 
@@ -529,6 +529,11 @@ def test_rich_three_file_fixture_redacts_contextual_values_without_releasing(dem
         file("calendar", "13-calendar-events.txt", (root / "13-calendar-events.txt").read_bytes()),
     ]}
     response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    if response.status_code != 200:
+        # The public route correctly suppresses rejection details. Keep a
+        # fixture-only diagnostic so platform-specific OCR mismatches can be
+        # fixed without weakening that fail-closed response contract.
+        analyze_batch(request)
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["verification"]["status"] == "REVIEW_REQUIRED"
