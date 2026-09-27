@@ -66,7 +66,6 @@ export function RelationshipGraph({ graph, documentNames, onInspectDocument }: {
     return graph.nodes.filter(node => connected.has(node.id))
   }, [graph.nodes, visibleEdges, showCommunication])
   const dense = isDenseReviewGraph(visibleNodes.length, visibleEdges.length)
-  const graphReviewKey = useMemo(() => graph.edges.map(edge => edge.id).sort().join('|'), [graph.edges])
   const conflictCues = useMemo(() => relationshipConflictCues(visibleEdges, edgeReviews), [visibleEdges, edgeReviews])
   const { positions, width, height } = useMemo(() => layout(visibleNodes), [visibleNodes])
   const selected = visibleNodes.find(node => node.id === selectedId) ?? visibleNodes[0] ?? null
@@ -96,7 +95,9 @@ export function RelationshipGraph({ graph, documentNames, onInspectDocument }: {
     return () => observer.disconnect()
   }, [width])
   useEffect(() => { if (dense || compact) setTableOpen(true) }, [dense, compact])
-  useEffect(() => { setEdgeReviews({}) }, [graphReviewKey])
+  // Edge IDs are response-local. A new inspection can reuse the same IDs for
+  // different source data, so reset on the graph response object itself.
+  useEffect(() => { setEdgeReviews({}) }, [graph])
   useEffect(() => {
     if (selectedId && visibleNodes.some(node => node.id === selectedId)) return
     setSelectedId(visibleNodes[0]?.id ?? null); setSelectedEdgeId(null)

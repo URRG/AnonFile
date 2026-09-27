@@ -57,6 +57,10 @@ test('three-document synthetic graph keeps review state ephemeral and cues only 
   // empty object again; no identity or adjudication is persisted here.
   assert.equal(relationshipConflictCues(edges, { edge_b: 'rejected' }).has('edge_a'), false)
   assert.equal(reviewStatusFor('edge_a', {}), 'pending')
+  // The response object, not response-local edge IDs, controls reset. A new
+  // batch may reuse the same edge IDs for entirely different people.
+  assert.match(graphSource, /setEdgeReviews\(\{\}\) \}, \[graph\]\)/)
+  assert.doesNotMatch(graphSource, /graphReviewKey/)
 })
 
 test('review graph preserves visible focus, touch-sized controls, responsive layout, and reduced-motion support', () => {
