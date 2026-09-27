@@ -1,10 +1,13 @@
 """The D07 text holdout is a locked regression fixture, never a release gate."""
 import json
+import re
 from pathlib import Path
 
 import pytest
 
-from app.d07_text_holdout import D07TextHoldoutError, main, run_fixture
+from app import processing
+from app.d07_text_holdout import (D07TextHoldoutError, main, run_fixture,
+                                  _code_identity, run_live_detector_fixture)
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "d07_text_holdout"
@@ -58,3 +61,78 @@ def test_lock_drift_and_cli_failure_do_not_emit_fixture_content(tmp_path, capsys
     output = capsys.readouterr()
     assert output.out == ""
     assert output.err == "D07 frozen text holdout verification failed; no report was produced.\n"
+
+
+def test_live_detector_holdout_uses_current_detector_and_reports_aggregate_only(monkeypatch):
+    live = run_live_detector_fixture(FIXTURE)
+    assert live["classification"] == "SYNTHETIC_TEXT_ONLY_LIVE_DETECTOR_HOLDOUT_FIXTURE"
+    assert live["qualification"] == "NOT_QUALIFIED"
+    assert live["annotation_provenance"] == "INDEPENDENTLY_AUTHORED_SYNTHETIC_REFERENCE"
+    assert live["method"]["method_id"] == processing.RULES_METHOD_ID
+    assert live["method"]["method_version"] == processing.RULES_METHOD_VERSION
+    assert live["method"]["config_digest"] == processing.rules_method_config_digest()
+    assert set(live["method"]["implementation"]) == {"source_file_sha256", "callable_code_sha256"}
+    assert all(value.startswith("sha256:") for value in live["method"]["implementation"].values())
+    assert live["exact_span"]["all_text"] == live["exact_span"]["by_format"]["text"]
+    assert live["measurement_status"] == {
+        "text": "MEASURED_EXACT_SPANS", "media": "NOT_MEASURED", "pdf": "NOT_MEASURED",
+        "image": "NOT_MEASURED", "ocr": "NOT_MEASURED", "graph": "NOT_MEASURED",
+        "release": "NOT_MEASURED",
+    }
+    monkeypatch.setattr(processing, "detect_text", lambda _: ())
+    changed = run_live_detector_fixture(FIXTURE)
+    assert changed["exact_span"]["all_text"]["corpus"] != live["exact_span"]["all_text"]["corpus"]
+    assert changed["exact_span"]["all_text"]["corpus"]["true_positives"] == 0
+    assert changed["method"]["implementation"] != live["method"]["implementation"]
+    monkeypatch.setattr(processing, "detect_text", object())
+    with pytest.raises(D07TextHoldoutError, match="^D07 frozen text holdout verification failed; no report was produced\\.$"):
+        run_live_detector_fixture(FIXTURE)
+    encoded = json.dumps(live, sort_keys=True)
+    assert "jules@example.test" not in encoded and "text-001" not in encoded
+
+
+@pytest.mark.parametrize("filename", ["gold.jsonl", "annotation-protocol.md", "live-detector-lock.json"])
+def test_live_detector_fixture_drift_fails_closed(tmp_path, filename):
+    copied = tmp_path / "fixture"
+    copied.mkdir()
+    for source in FIXTURE.iterdir():
+        (copied / source.name).write_bytes(source.read_bytes())
+    with (copied / filename).open("ab") as stream:
+        stream.write(b"\nlive-fixture-drift")
+    with pytest.raises(D07TextHoldoutError, match="^D07 frozen text holdout verification failed; no report was produced\\.$"):
+        run_live_detector_fixture(copied)
+
+
+def test_live_detector_cli(monkeypatch, capsys):
+    monkeypatch.setattr("sys.argv", ["d07_text_holdout", "--live-detector"])
+    assert main() == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["schema_version"] == "d07-live-current-detector-text-holdout-v1"
+
+
+def test_live_detector_reports_call_time_config_digest(monkeypatch):
+    before = run_live_detector_fixture(FIXTURE)
+    monkeypatch.setattr(processing, "_EMAIL", re.compile(r"never-a-live-email-match"))
+    after = run_live_detector_fixture(FIXTURE)
+    assert after["method"]["config_digest"] == processing.rules_method_config_digest()
+    assert after["method"]["config_digest"] != before["method"]["config_digest"]
+    assert after["exact_span"]["all_text"]["corpus"] != before["exact_span"]["all_text"]["corpus"]
+
+
+def test_live_detector_rejects_configuration_drift_during_scoring(monkeypatch):
+    def changing_detector(_: str):
+        monkeypatch.setattr(processing, "_EMAIL", re.compile(r"drifted"))
+        return ()
+
+    monkeypatch.setattr(processing, "detect_text", changing_detector)
+    with pytest.raises(D07TextHoldoutError, match="^D07 frozen text holdout verification failed; no report was produced\\.$"):
+        run_live_detector_fixture(FIXTURE)
+
+
+def test_code_identity_canonicalizes_nonempty_frozenset_constants():
+    def uses_frozenset(value):
+        return value in {"alpha", "beta"}
+
+    assert frozenset({"alpha", "beta"}) in uses_frozenset.__code__.co_consts
+    identity = _code_identity(uses_frozenset.__code__)
+    assert json.dumps(identity, sort_keys=True, ensure_ascii=True, allow_nan=False)
