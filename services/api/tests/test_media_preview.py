@@ -372,6 +372,67 @@ def test_render_candidate_abstains_when_repaint_touches_unaffected_neighbor(monk
     assert secret not in str(error.value)
 
 
+def test_render_candidate_abstains_on_unrecognised_dark_ink_in_repaint_padding(monkeypatch):
+    """One OCR line cannot authorize erasing an unseen glyph in its margin."""
+    from app import media_preview
+
+    monkeypatch.setattr(media_preview, "_ocr_lines", lambda _, **kwargs: [])
+    image = Image.new("RGB", (180, 80), "white")
+    # This deliberately lies outside the tight OCR claim but inside the
+    # five-pixel padded rectangle that _draw_line would erase.
+    ImageDraw.Draw(image).text((11, 24), "?", fill="black")
+    secret = "Maya Patel"
+    page = {"number": 1, "image": image, "lines": [
+        {"text": secret, "box": (10, 10, 150, 55), "ink_box": (15, 15, 145, 50),
+         "start": 0, "end": len(secret)},
+    ]}
+    match = {"start": 0, "end": len(secret), "source": secret, "replacement": "John Singh", "applied": True}
+
+    with pytest.raises(PayloadError, match="padding region contains unrecognised source ink") as error:
+        render_candidate([page], [match], "image")
+    assert secret not in str(error.value)
+
+
+def test_render_candidate_allows_blank_repaint_padding_and_grayscales_once(monkeypatch):
+    """A source-free padding ring is safe and one affected page converts once."""
+    from app import media_preview
+
+    monkeypatch.setattr(media_preview, "_ocr_lines", lambda _, **kwargs: [])
+    image = Image.new("RGB", (180, 130), "white")
+    original_convert = image.convert
+    conversions = 0
+
+    def count_grayscale_conversion(mode, *args, **kwargs):
+        nonlocal conversions
+        if mode == "L":
+            conversions += 1
+        return original_convert(mode, *args, **kwargs)
+
+    monkeypatch.setattr(image, "convert", count_grayscale_conversion)
+    secret = "Maya Patel"
+    other = "Ira Rao"
+    # Dark source pixels in the claimed ink regions remain permitted; only the
+    # padding ring must be source-free.
+    draw = ImageDraw.Draw(image)
+    draw.text((30, 25), secret, fill="black")
+    draw.text((30, 75), other, fill="black")
+    page = {"number": 1, "image": image, "lines": [
+        {"text": secret, "box": (10, 10, 150, 55), "ink_box": (15, 15, 145, 50),
+         "start": 0, "end": len(secret)},
+        {"text": other, "box": (10, 60, 150, 105), "ink_box": (15, 65, 145, 100),
+         "start": len(secret) + 1, "end": len(secret) + 1 + len(other)},
+    ]}
+    matches = [
+        {"start": 0, "end": len(secret), "source": secret, "replacement": "John Singh", "applied": True},
+        {"start": len(secret) + 1, "end": len(secret) + 1 + len(other), "source": other,
+         "replacement": "Eve Fox", "applied": True},
+    ]
+
+    preview = render_candidate([page], matches, "image")
+    assert preview["pages"][0]["ocr_lines"] == 2
+    assert conversions == 1
+
+
 def test_pdf_text_layer_check_requires_every_sensitive_occurrence():
     native = "Call +1 415 555 0148. Call +1 415 555 0148 again."
     one_phone = [{"text": "Call +1 415 555 0148."}]
