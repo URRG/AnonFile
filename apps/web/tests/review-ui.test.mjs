@@ -5,7 +5,7 @@ import ts from 'typescript'
 
 const navigationSource = readFileSync(new URL('../src/review-navigation.ts', import.meta.url), 'utf8')
 const navigationCompiled = ts.transpileModule(navigationSource, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText
-const { isDenseReviewGraph, moveReviewFocus, readableReviewZoom } = await import(`data:text/javascript;base64,${Buffer.from(navigationCompiled).toString('base64')}`)
+const { isDenseReviewGraph, moveReviewFocus, moveReviewTabFocus, readableReviewZoom } = await import(`data:text/javascript;base64,${Buffer.from(navigationCompiled).toString('base64')}`)
 const reviewSource = readFileSync(new URL('../src/relationship-review.ts', import.meta.url), 'utf8')
 const reviewCompiled = ts.transpileModule(reviewSource, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText
 const { relationshipConflictCues, reviewStatusFor, selectionForGraph, validateMergeProposal } = await import(`data:text/javascript;base64,${Buffer.from(reviewCompiled).toString('base64')}`)
@@ -44,8 +44,17 @@ test('review graph exposes roving keyboard navigation, concise updates, and evid
   assert.doesNotMatch(graphSource, /aria-atomic="true"/)
 })
 
+test('document tabs select and focus the adjacent document with horizontal keyboard navigation', () => {
+  assert.equal(moveReviewTabFocus(0, 3, 'ArrowRight'), 1)
+  assert.equal(moveReviewTabFocus(2, 3, 'ArrowRight'), 0)
+  assert.equal(moveReviewTabFocus(0, 3, 'ArrowLeft'), 2)
+  assert.equal(moveReviewTabFocus(1, 3, 'Home'), 0)
+  assert.equal(moveReviewTabFocus(1, 3, 'End'), 2)
+  assert.equal(moveReviewTabFocus(0, 3, 'ArrowDown'), null)
+})
+
 test('document selector implements roving ARIA tabs and document-level evidence returns focus to status', () => {
-  for (const required of ['role="tab"', 'aria-controls="document-comparison-panel"', 'tabIndex={isSelected ? 0 : -1}', "['ArrowLeft', 'ArrowRight', 'Home', 'End']", 'role="tabpanel"', 'aria-labelledby={`document-tab-${selected.id}`}', 'const provenanceStatus = useRef<HTMLParagraphElement | null>(null)', 'provenanceStatus.current', 'tabIndex={-1}', "provenanceTarget.locator.status === 'SUPPORTED'"]) {
+  for (const required of ['role="tab"', 'aria-controls="document-comparison-panel"', 'tabIndex={isSelected ? 0 : -1}', 'moveReviewTabFocus(index, inspection.documents.length, event.key)', 'selectDocument(inspection.documents[nextIndex].id, true)', 'role="tabpanel"', 'aria-labelledby={`document-tab-${selected.id}`}', 'const provenanceStatus = useRef<HTMLParagraphElement | null>(null)', 'provenanceStatus.current', 'tabIndex={-1}', "provenanceTarget.locator.status === 'SUPPORTED'"]) {
     assert.match(batchSource, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   }
 })

@@ -7,6 +7,7 @@ import { inspectSyntheticBatch, readBatchFile, readBatchReferenceManifest, type 
   type EntityGraphEvidence, BATCH_MAX_TOTAL_BYTES, DemoInspectionFailure } from './api'
 import { downloadDemoCandidate } from './demo-download'
 import { RelationshipGraph } from './relationship-graph'
+import { moveReviewTabFocus } from './review-navigation'
 import './batch.css'
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
@@ -424,6 +425,12 @@ export default function BatchDemo() {
     if (Math.abs(target.scrollLeft - source.scrollLeft) > 1) target.scrollLeft = source.scrollLeft
   }
 
+  function selectDocument(id: string, focus = false) {
+    setProvenanceTarget(null)
+    setSelectedDoc(id)
+    if (focus) requestAnimationFrame(() => documentTabs.current.get(id)?.focus())
+  }
+
   function toggleExclusion(entityId: string) {
     setExcludedIds(current => current.includes(entityId) ? current.filter(id => id !== entityId) : [...current, entityId])
     setAliasOverrides(current => { const next = { ...current }; delete next[entityId]; return next })
@@ -502,7 +509,7 @@ export default function BatchDemo() {
           <div className="result-tabs" role="tablist" aria-label="Batch result views">{([['documents', 'Documents', Files], ['relationships', 'Entities & relationships', Link2], ['verification', 'Verification scorecard', ShieldCheck]] as const).map(([key, label, Icon]) => <button key={key} type="button" role="tab" aria-selected={resultTab === key} className={resultTab === key ? 'selected' : ''} onClick={() => setResultTab(key)}><Icon size={17} /> {label}</button>)}</div>
           {resultTab === 'documents' && selected && <section className="batch-card result-panel">
             <div className="card-header"><div><p className="overline">DOCUMENT COMPARISON</p><h2>Inspect the source and proposed candidate</h2></div><span className="quiet-tag">{selected.matches.length} matches in this file</span></div>
-            <div className="doc-selector" role="tablist" aria-label="Documents">{inspection.documents.map((document, index) => { const isSelected = selected.id === document.id; const selectDocument = (focus = false) => { setProvenanceTarget(null); setSelectedDoc(document.id); if (focus) requestAnimationFrame(() => documentTabs.current.get(document.id)?.focus()) }; return <button type="button" role="tab" id={`document-tab-${document.id}`} aria-controls="document-comparison-panel" aria-selected={isSelected} tabIndex={isSelected ? 0 : -1} className={isSelected ? 'selected' : ''} key={document.id} ref={element => { if (element) documentTabs.current.set(document.id, element); else documentTabs.current.delete(document.id) }} onClick={() => selectDocument()} onKeyDown={event => { const key = event.key; if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key)) return; event.preventDefault(); const nextIndex = key === 'Home' ? 0 : key === 'End' ? inspection.documents.length - 1 : (index + (key === 'ArrowRight' ? 1 : -1) + inspection.documents.length) % inspection.documents.length; selectDocument(true) }}>{fileIcon(document.name)}<span>{document.name}</span><small>{document.matches.length}</small></button> })}</div>
+            <div className="doc-selector" role="tablist" aria-label="Documents">{inspection.documents.map((document, index) => { const isSelected = selected.id === document.id; return <button type="button" role="tab" id={`document-tab-${document.id}`} aria-controls="document-comparison-panel" aria-selected={isSelected} tabIndex={isSelected ? 0 : -1} className={isSelected ? 'selected' : ''} key={document.id} ref={element => { if (element) documentTabs.current.set(document.id, element); else documentTabs.current.delete(document.id) }} onClick={() => selectDocument(document.id)} onKeyDown={event => { const nextIndex = moveReviewTabFocus(index, inspection.documents.length, event.key); if (nextIndex === null) return; event.preventDefault(); selectDocument(inspection.documents[nextIndex].id, true) }}>{fileIcon(document.name)}<span>{document.name}</span><small>{document.matches.length}</small></button> })}</div>
             {provenanceTarget?.documentId === selected.id && <p ref={provenanceStatus} tabIndex={-1} className={`provenance-navigation ${provenanceTarget.locator.status === 'SUPPORTED' ? 'is-precise' : ''}`} role="status">{provenanceTarget.locator.status !== 'SUPPORTED' ? <>Graph evidence supports this document only. No defensible text span, PDF page, or bounding box is available for this relationship.</> : provenanceTarget.locator.kind === 'ocr_line_boxes' ? <>Opened page {provenanceTarget.locator.page} at approximate OCR line boxes. These boxes locate recognized text, not exact glyphs or independently verified relationship proof.</> : <>Opened graph evidence at source lines {provenanceTarget.locator.lineStart}{provenanceTarget.locator.lineEnd === provenanceTarget.locator.lineStart ? '' : `–${provenanceTarget.locator.lineEnd}`}. The highlighted text is a navigation aid, not a release-safety finding.</>}</p>}
             <div className="comparison-toolbar">
               <div className="comparison-layout" role="group" aria-label="Comparison layout">
