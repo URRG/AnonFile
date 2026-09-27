@@ -67,6 +67,10 @@ export function RelationshipGraph({ graph, documentNames, onInspectDocument }: {
     if (!element) return
     const update = () => { setZoom(readableReviewZoom(element.clientWidth, width)); setCompact(element.clientWidth < 760) }
     update()
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', update)
+      return () => window.removeEventListener('resize', update)
+    }
     const observer = new ResizeObserver(update)
     observer.observe(element)
     return () => observer.disconnect()

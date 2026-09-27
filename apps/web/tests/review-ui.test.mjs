@@ -33,7 +33,7 @@ test('narrow layouts scroll a readable map instead of shrinking node text to an 
 })
 
 test('review graph exposes accessible navigation, live updates, and evidence controls', () => {
-  for (const required of ['aria-live="polite"', 'aria-atomic="true"', 'relationship-map-instructions', 'moveReviewFocus', 'onKeyDown', 'aria-controls="relationship-table"', '<table className="relationship-fallback-table">', 'onInspectDocument(item.documentId, item)']) {
+  for (const required of ['aria-live="polite"', 'aria-atomic="true"', 'relationship-map-instructions', 'moveReviewFocus', 'onKeyDown', 'aria-controls="relationship-table"', '<table className="relationship-fallback-table">', 'onInspectDocument(item.documentId, item)', "typeof ResizeObserver === 'undefined'", "window.addEventListener('resize', update)"]) {
     assert.match(graphSource, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   }
 })
