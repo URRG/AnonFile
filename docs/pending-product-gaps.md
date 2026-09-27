@@ -126,6 +126,11 @@ supplier data. `Blocked externally` is not the same as done.
     reviewer-corrected exact-span errors by format and entity type. When
     complete synthetic labels are supplied, the demo displays bounded totals
     and explicitly abstains from independent final-artifact and graph claims.
+  - [x] A separate, non-authorizing final-pixel holdout evaluator has a bounded,
+    source-byte-pinned synthetic manifest, accepts only caller-supplied final
+    rasters and an independent OCR adapter, and reports aggregate-only outcomes.
+    It is not wired into the demo or release path; no actual independent OCR,
+    renderer qualification, or media recall claim follows from this scaffold.
   - [ ] Freeze an independently annotated holdout, validate untouched final
     pixels/text with a different executable checker, and measure reviewed
     graph links and identity adjudication. No production qualification exists.
