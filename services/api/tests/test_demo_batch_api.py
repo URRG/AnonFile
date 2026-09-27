@@ -121,9 +121,15 @@ def test_api_graph_media_evidence_uses_bound_approximate_ocr_line_boxes(demo_cli
         {"text": text, "start": 0, "end": len(text), "box": (40, 80, 440, 125),
          "ink_box": (45, 85, 435, 120), "confidence": 0.99},
     ]}
+    raster = BytesIO()
+    page["image"].save(raster, format="PNG")
+    source_png = raster.getvalue()
     monkeypatch.setattr(demo_batch, "extract_media", lambda _raw, _extension: (text, [page]))
     monkeypatch.setattr(demo_batch, "render_candidate", lambda *_args, **_kwargs: {
-        "pages": [], "fallback_lines": 0, "self_ocr_residual_sources": 0,
+        "pages": [{"number": 1, "width": 640, "height": 320,
+                   "source_png_base64": base64.b64encode(source_png).decode("ascii"),
+                   "source_png_sha256": hashlib.sha256(source_png).hexdigest()}],
+        "fallback_lines": 0, "self_ocr_residual_sources": 0,
         "candidate_low_confidence_lines": 0, "pdf_raster_evidence": None,
         "candidate_pdf_base64": None,
     })
@@ -139,9 +145,22 @@ def test_api_graph_media_evidence_uses_bound_approximate_ocr_line_boxes(demo_cli
     assert locator == {
         "status": "SUPPORTED", "kind": "ocr_line_boxes", "precision": "OCR_LINE_BOX_APPROXIMATE",
         "source_sha256": hashlib.sha256(raw).hexdigest(), "page": 1, "width": 640, "height": 320,
+        "source_png_sha256": hashlib.sha256(source_png).hexdigest(),
         "line_boxes": [{"x0": 40, "y0": 80, "x1": 440, "y1": 125}],
     }
     assert "Maya Patel" not in json.dumps(locator)
+
+
+def test_media_locator_abstains_when_returned_source_raster_digest_does_not_match():
+    from app import demo_batch
+
+    facts = [{"document_id": "media", "locator": {"status": "SUPPORTED", "kind": "ocr_line_boxes",
+              "page": 1, "width": 100, "height": 100}}]
+    documents = [{"id": "media", "media_preview": {"pages": [
+        {"number": 1, "width": 100, "height": 100, "source_png_base64": "bm90LWEtcG5n",
+         "source_png_sha256": "0" * 64}]} }]
+    demo_batch._bind_media_locator_rasters(facts, documents)
+    assert facts[0]["locator"] == {"status": "UNSUPPORTED", "reason": "NO_DEFENSIBLE_SOURCE_LOCATOR"}
 
 
 def test_api_graph_media_evidence_abstains_for_cross_page_or_invalid_ocr_geometry(demo_client, monkeypatch):

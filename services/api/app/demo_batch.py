@@ -539,6 +539,48 @@ def _media_locator(document: dict[str, Any], span: tuple[int, int] | None) -> di
                            for _, _, _, _, _, x0, y0, x1, y1 in selected]}
 
 
+def _bind_media_locator_rasters(facts: list[dict[str, Any]], documents: list[dict[str, Any]]) -> None:
+    """Bind an OCR locator to the exact source PNG returned to the browser.
+
+    The upload digest identifies source bytes, but it cannot authenticate a
+    rendered PDF page.  A supported geometry locator consequently needs both
+    identities.  Any missing, altered, or dimension-mismatched raster causes
+    an explicit abstention rather than a page-level navigation claim.
+    """
+    by_id = {document["id"]: document for document in documents}
+    for fact in facts:
+        locator = fact.get("locator")
+        if not (isinstance(locator, dict) and locator.get("status") == "SUPPORTED"
+                and locator.get("kind") == "ocr_line_boxes"):
+            continue
+        document = by_id.get(fact.get("document_id"))
+        preview = document.get("media_preview") if isinstance(document, dict) else None
+        pages = preview.get("pages") if isinstance(preview, dict) else None
+        if not isinstance(pages, list):
+            fact["locator"] = _unsupported_locator()
+            continue
+        matching = [page for page in pages if isinstance(page, dict) and page.get("number") == locator.get("page")]
+        if len(matching) != 1:
+            fact["locator"] = _unsupported_locator()
+            continue
+        page = matching[0]
+        encoded, digest = page.get("source_png_base64"), page.get("source_png_sha256")
+        if (page.get("width") != locator.get("width") or page.get("height") != locator.get("height")
+                or not isinstance(encoded, str) or not isinstance(digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+            fact["locator"] = _unsupported_locator()
+            continue
+        try:
+            raster = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error):
+            fact["locator"] = _unsupported_locator()
+            continue
+        if not raster or hashlib.sha256(raster).hexdigest() != digest:
+            fact["locator"] = _unsupported_locator()
+            continue
+        locator["source_png_sha256"] = digest
+
+
 def _csv_record_span(document: dict[str, Any], record: dict[str, Any]) -> tuple[int, int] | None:
     """Locate one exact one-line CSV record, rejecting duplicates/ambiguity."""
     lines = document["text"].splitlines(keepends=True)
@@ -1147,6 +1189,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
         doc.pop("_ssn_values")
         doc.pop("_labelled_ssns")
 
+    _bind_media_locator_rasters(graph_facts, documents)
     person_id = {value: id_by_key[("PERSON_NAME", value)] for value in names_by_key}
     graph_person_labels = {value: ("Source retained" if person_id[value] in exclusions else name_aliases[value])
                            for value in person_id}
