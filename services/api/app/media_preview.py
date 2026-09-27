@@ -21,6 +21,7 @@ from typing import Any
 from app.contracts import PayloadError
 from app.demo_contextual import contextual_spans
 from app.processing import detect_text
+from app.tesseract_verifier import IndependentFinalOcrVerifier
 
 MAX_MEDIA_PAGES = 2
 MAX_PAGE_PIXELS = 2_000_000
@@ -394,14 +395,17 @@ def _image_pdf(images: list[Any]) -> bytes:
 
 
 def render_candidate(pages: list[dict[str, Any]], matches: list[dict[str, Any]], kind: str,
-                     coordinate_regions: dict[int, list[dict[str, Any]]] | None = None) -> dict[str, Any]:
-    """Paint affected OCR lines into new raster pages; inspect again with OCR."""
+                     coordinate_regions: dict[int, list[dict[str, Any]]] | None = None,
+                     final_verifier: IndependentFinalOcrVerifier | None = None) -> dict[str, Any]:
+    """Paint affected OCR lines; an independent final verifier is explicit opt-in."""
     public_pages = []
     candidate_images = []
     assigned = set()
     fallback_lines = 0
     visual_residuals = 0
     candidate_low_confidence_lines = 0
+    final_pngs: list[bytes] = []
+    final_sources: set[str] = set()
     coordinate_regions = coordinate_regions or {}
     for page in pages:
         source_image = page["image"]
@@ -456,6 +460,8 @@ def render_candidate(pages: list[dict[str, Any]], matches: list[dict[str, Any]],
                 visual_residuals += 1
         source_png = _png_bytes(source_image)
         candidate_png = _png_bytes(candidate)
+        final_pngs.append(candidate_png)
+        final_sources.update(page_sources)
         public_pages.append({"number": page["number"], "width": source_image.width, "height": source_image.height,
                              "source_png_base64": base64.b64encode(source_png).decode("ascii"),
                              "source_png_sha256": hashlib.sha256(source_png).hexdigest(),
@@ -475,6 +481,12 @@ def render_candidate(pages: list[dict[str, Any]], matches: list[dict[str, Any]],
         pdf_evidence = {"sha256": hashlib.sha256(generated).hexdigest(), "bytes": len(generated),
                         "pages": len(candidate_images), "source_objects_copied": False}
         candidate_pdf_base64 = base64.b64encode(generated).decode("ascii")
+        if final_verifier is not None:
+            # Verify pixels rerasterized from the exact returned PDF bytes.
+            final_verifier.verify_pdf(generated, tuple(final_sources))
+    elif final_verifier is not None:
+        # Verify the exact PNG bytes placed in the response, after all drawing.
+        final_verifier.verify_pngs(tuple(final_pngs), tuple(final_sources))
     return {"pages": public_pages, "fallback_lines": fallback_lines,
             "candidate_low_confidence_lines": candidate_low_confidence_lines,
             "self_ocr_residual_sources": visual_residuals, "pdf_raster_evidence": pdf_evidence,

@@ -1,0 +1,138 @@
+"""Mock-only coverage for the opt-in independent final OCR adapter."""
+from io import BytesIO
+import hashlib
+from pathlib import Path
+import subprocess
+
+import pytest
+
+from app.tesseract_verifier import FinalOcrVerificationError, TesseractCliVerifier
+
+
+EXECUTABLE = Path("C:/Program Files/Tesseract-OCR/tesseract.exe")
+VERSION = "tesseract 5.4.0"
+RUNTIME_IDENTITY = hashlib.sha256(f"tesseract-cli-stdin-psm6-v1\n{VERSION}".encode()).hexdigest()
+
+
+class FakeProcess:
+    def __init__(self, stdout=b"safe replacement\n", returncode=0):
+        class RecordingInput(BytesIO):
+            def close(self):
+                self.was_closed = True
+        self.stdin = RecordingInput()
+        self.stdout = BytesIO(stdout)
+        self.returncode = returncode
+        self.killed = False
+        self.waited = 0
+
+    def poll(self):
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+    def wait(self, timeout):
+        self.waited += 1
+        return self.returncode
+
+
+def verifier(factory):
+    def version_factory(command, **kwargs):
+        assert command == [str(EXECUTABLE), "--version"]
+        return FakeProcess(stdout=(VERSION + "\n").encode())
+    return TesseractCliVerifier(executable=EXECUTABLE, allowed_executables=(EXECUTABLE,),
+                                expected_executable_sha256="a" * 64, expected_runtime_identity=RUNTIME_IDENTITY,
+                                popen_factory=factory, version_popen_factory=version_factory,
+                                executable_digest_reader=lambda _: "a" * 64)
+
+
+def test_tesseract_uses_exact_final_png_bytes_without_rapidocr_fallback():
+    calls = []
+    process = FakeProcess()
+    def factory(command, **kwargs):
+        calls.append((command, kwargs))
+        return process
+
+    verifier(factory).verify_pngs((b"exact-final-png",), ("Maya Patel",))
+    assert calls[0][0] == [str(EXECUTABLE), "stdin", "stdout", "--psm", "6"]
+    assert process.stdin.getvalue() == b"exact-final-png"
+    assert calls[0][1]["stdin"] is subprocess.PIPE
+    assert calls[0][1]["stderr"] is subprocess.DEVNULL
+    assert process.waited == 1
+
+
+@pytest.mark.parametrize("failure, expected", [
+    (FileNotFoundError(), "verifier is unavailable"),
+    (OSError(), "verification failed"),
+])
+def test_tesseract_failures_are_fixed_and_source_free(failure, expected):
+    secret = "Maya Patel"
+    checked = verifier(lambda *_args, **_kwargs: (_ for _ in ()).throw(failure))
+    with pytest.raises(FinalOcrVerificationError, match=expected) as error:
+        checked.verify_pngs((b"exact-final-png",), (secret,))
+    assert secret not in str(error.value)
+
+
+def test_tesseract_output_is_bounded_and_residual_is_source_free():
+    secret = "Maya Patel"
+    overflow_process = FakeProcess(stdout=b"x" * 65_537)
+    oversized = verifier(lambda *_args, **_kwargs: overflow_process)
+    with pytest.raises(FinalOcrVerificationError, match="verification failed"):
+        oversized.verify_pngs((b"exact-final-png",), (secret,))
+    assert overflow_process.killed
+    assert overflow_process.waited >= 1
+    residual = verifier(lambda *_args, **_kwargs: FakeProcess(stdout=secret.encode()))
+    with pytest.raises(FinalOcrVerificationError, match="found residual content") as error:
+        residual.verify_pngs((b"exact-final-png",), (secret,))
+    assert secret not in str(error.value)
+
+
+def test_pdf_verifier_rasterizes_exact_final_pdf_bytes_before_ocr():
+    received = []
+    checked = TesseractCliVerifier(executable=EXECUTABLE, allowed_executables=(EXECUTABLE,),
+        expected_executable_sha256="a" * 64, expected_runtime_identity=RUNTIME_IDENTITY,
+        popen_factory=lambda *_args, **_kwargs: FakeProcess(stdout=b"safe"),
+        version_popen_factory=lambda *_args, **_kwargs: FakeProcess(stdout=(VERSION + "\n").encode()),
+        executable_digest_reader=lambda _: "a" * 64,
+        pdf_rasterizer=lambda pdf: received.append(pdf) or (b"rerasterized-final-pdf-page",))
+    final_pdf = b"%PDF-exact-final-bytes"
+    checked.verify_pdf(final_pdf, ("Maya Patel",))
+    assert received == [final_pdf]
+
+
+def test_unallowlisted_or_path_based_executable_is_unavailable_without_running():
+    calls = []
+    for checked in (TesseractCliVerifier(),
+                    TesseractCliVerifier(executable=Path("tesseract"), allowed_executables=(EXECUTABLE,),
+                                         popen_factory=lambda *_args, **_kwargs: calls.append(True))):
+        with pytest.raises(FinalOcrVerificationError, match="verifier is unavailable"):
+            checked.verify_pngs((b"exact-final-png",), ("Maya Patel",))
+    assert calls == []
+
+
+@pytest.mark.parametrize("digest, version, expected", [
+    ("b" * 64, VERSION, "verifier is unavailable"),
+    ("a" * 64, "tesseract 5.5.0", "verifier is unavailable"),
+])
+def test_integrity_or_runtime_pin_mismatch_prevents_candidate_ocr(digest, version, expected):
+    candidate_calls = []
+    def version_factory(command, **kwargs):
+        return FakeProcess(stdout=(version + "\n").encode())
+    checked = TesseractCliVerifier(executable=EXECUTABLE, allowed_executables=(EXECUTABLE,),
+        expected_executable_sha256="a" * 64, expected_runtime_identity=RUNTIME_IDENTITY,
+        executable_digest_reader=lambda _: digest, version_popen_factory=version_factory,
+        popen_factory=lambda command, **kwargs: candidate_calls.append(command))
+    with pytest.raises(FinalOcrVerificationError, match=expected):
+        checked.verify_pngs((b"exact-final-png",), ("Maya Patel",))
+    assert candidate_calls == []
+
+
+def test_tesseract_timeout_kills_process_with_fixed_source_free_error(monkeypatch):
+    process = FakeProcess(returncode=None)
+    ticks = iter((0.0, 0.0, 6.0))
+    monkeypatch.setattr("app.tesseract_verifier.time.monotonic", lambda: next(ticks))
+    with pytest.raises(FinalOcrVerificationError, match="verification timed out") as error:
+        verifier(lambda *_args, **_kwargs: process).verify_pngs((b"exact-final-png",), ("Maya Patel",))
+    assert process.killed and "Maya Patel" not in str(error.value)
+    assert process.waited >= 1

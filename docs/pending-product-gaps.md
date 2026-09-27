@@ -65,6 +65,19 @@ supplier data. `Blocked externally` is not the same as done.
   - [ ] General multi-column/table/form reading-order mapping, real OCR blur and
     coverage qualification, and visual utility thresholds remain open. These
     synthetic controls do not prove completeness or production fidelity.
+  - [x] An opt-in, bounded Tesseract CLI final-artifact checker is isolated from
+    RapidOCR. It receives exact returned candidate PNG bytes (or rerasterizes
+    exact returned PDF bytes), has fixed source-free unavailable/timeout/failure
+    outcomes, and never changes `REVIEW_REQUIRED`. It is not installed in this
+    demo environment and does not establish OCR completeness, layout fidelity,
+    privacy qualification, or release approval.
+    It is held unavailable by default until a provisioned, immutable executable
+    allowlist, executable SHA-256 and Tesseract-version/config identity are
+    installed and its behavior is calibrated; no current demo route enables it.
+  - [ ] **Known P1 remains:** an overbroad same-engine OCR line can still hide
+    adjacent source content. The optional second-engine final-byte check does
+    not establish source geometry or coverage, does not run by default, and
+    must not be represented as verified/safe media output.
 - [ ] **D06 — Graph provenance and adjudication.** Link an edge to exact
   page/line/span evidence, support reviewer accept/reject and identity
   merge/split, and flag conflicts. Exit: evidence navigation and graph

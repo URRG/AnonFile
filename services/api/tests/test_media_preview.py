@@ -44,6 +44,35 @@ def test_render_candidate_carries_only_bounded_rebuilt_pdf_bytes(monkeypatch):
     assert image_preview["pdf_raster_evidence"] is None
 
 
+def test_render_candidate_calls_opt_in_verifier_with_exact_final_artifact_bytes(monkeypatch):
+    """The optional independent path sees response bytes, never working images."""
+    monkeypatch.setattr("app.media_preview._ocr_lines", lambda _, **kwargs: [])
+    image = Image.new("RGB", (320, 180), "white")
+    page = {"number": 1, "image": image, "lines": [
+        {"text": "Maya Patel", "box": (10, 10, 200, 40), "start": 0, "end": 10},
+    ]}
+    match = {"start": 0, "end": 10, "source": "Maya Patel", "replacement": "John Singh", "applied": True}
+
+    class Verifier:
+        pngs = None
+        pdf = None
+        values = None
+        def verify_pngs(self, pngs, values):
+            self.pngs, self.values = tuple(pngs), tuple(values)
+        def verify_pdf(self, pdf, values):
+            self.pdf, self.values = pdf, tuple(values)
+
+    image_verifier = Verifier()
+    preview = render_candidate([page], [match], "image", final_verifier=image_verifier)
+    assert image_verifier.pngs == (base64.b64decode(preview["pages"][0]["candidate_png_base64"]),)
+    assert image_verifier.values == ("Maya Patel",)
+
+    pdf_verifier = Verifier()
+    preview = render_candidate([page], [match], "pdf", final_verifier=pdf_verifier)
+    assert pdf_verifier.pdf == base64.b64decode(preview["candidate_pdf_base64"])
+    assert pdf_verifier.values == ("Maya Patel",)
+
+
 def test_candidate_low_confidence_is_reported_without_weakening_input_ocr(monkeypatch):
     from types import SimpleNamespace
     from app import media_preview
