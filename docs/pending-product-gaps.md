@@ -63,9 +63,10 @@ supplier data. `Blocked externally` is not the same as done.
     rule or JPEG artifact can also satisfy it, so it is not text support,
     readability, completeness, or a visual-coverage score.
   - [x] A single OCR claim with material separated ink islands inside its own
-    reported box abstains. This closes the case where same-engine OCR reports
-    one value but an overbroad repaint would hide an unrecognised adjacent value;
-    it remains a local geometry guard, not an OCR-completeness claim.
+    reported box abstains. This mitigates tested cases where same-engine OCR
+    reports one value but an overbroad repaint would hide an unrecognised
+    adjacent value; it remains a local geometry guard, not an OCR-completeness
+    claim.
   - [ ] General multi-column/table/form reading-order mapping, real OCR blur and
     coverage qualification, and visual utility thresholds remain open. These
     synthetic controls do not prove completeness or production fidelity.
@@ -80,10 +81,10 @@ supplier data. `Blocked externally` is not the same as done.
     installed and its behavior is calibrated; no current demo route enables it.
   - [ ] **Known P1 remains:** same-engine OCR geometry cannot establish that an
     OCR box contains only the recognised source text. The demo abstains on
-    material horizontal/vertical ink separation and long thin rule-like
-    connected components (including one- or two-pixel rules that bridge a
-    projection), but close or complex source regions can still evade this local
-    heuristic. The optional
+    material horizontal/vertical ink separation and detached long thin
+    rule-like connected components (including tested one- or two-pixel rules
+    that bridge a projection), but close or complex source regions can still
+    evade this local heuristic. The optional
     second-engine final-byte check does not establish source geometry or
     coverage, does not run by default, and must not be represented as
     verified/safe media output.

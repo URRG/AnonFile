@@ -34,7 +34,7 @@ vertically staggered column bands, and an actual padded repaint box that
 touches an otherwise unprocessed OCR neighbor. It also rejects one overbroad
 OCR line whose box contains a separate, unrecognised fictional ink region: a
 local edge alone cannot authorize repainting both regions. Separate islands in
-either horizontal or vertical bands and long thin rule-like connected
+either horizontal or vertical bands and detached long thin rule-like connected
 components abstain; this remains a local heuristic, not proof that OCR
 geometry contains only the recognised text. A real OCR screenshot case also
 repaints a fictional name and checks that pixels outside its OCR box are
