@@ -116,12 +116,40 @@ def _assert_unambiguous_ocr_layout(lines: list[dict[str, Any]]) -> None:
                 left, right = second_box, first_box
             else:
                 continue
-            if right[0] - left[2] < 8:
-                continue
             left_track = [candidate for candidate in lines if _same_column_band(left, _line_ink_box(candidate))]
             right_track = [candidate for candidate in lines if _same_column_band(right, _line_ink_box(candidate))]
-            if len(left_track) >= 2 and len(right_track) >= 2:
+            # A wider gap is still required for two repeated tracks. Adjacent
+            # word/token boxes are common OCR output and are not by themselves
+            # proof of columns.
+            if right[0] - left[2] >= 8 and len(left_track) >= 2 and len(right_track) >= 2:
                 raise PayloadError("OCR layout is ambiguous for conservative visual review.")
+
+            # A repeated text track beside one tall claim is also not safely
+            # linear.  It occurs with a sidebar, a form value spanning rows,
+            # or a partially detected second column.  Requiring the singleton
+            # to materially overlap two stacked claims avoids treating a
+            # distant note as a column while refusing to invent an order for
+            # the local multi-track region. Unlike the repeated-track test,
+            # this needs no arbitrary horizontal-gap floor: a tall OCR claim
+            # next to two rows is already a multi-row geometry ambiguity even
+            # when its edge is only a few pixels away. This does not extract
+            # columns or establish that either same-engine OCR box contains
+            # only its recognised text.
+            repeated_track, singleton_track = (
+                (left_track, right_track) if len(left_track) >= 2 and len(right_track) == 1
+                else (right_track, left_track) if len(right_track) >= 2 and len(left_track) == 1
+                else ([], [])
+            )
+            if repeated_track:
+                singleton = _line_ink_box(singleton_track[0])
+                material_overlaps = sum(
+                    min(_line_ink_box(candidate)[3], singleton[3]) - max(_line_ink_box(candidate)[1], singleton[1])
+                    >= max(3, min(_line_ink_box(candidate)[3] - _line_ink_box(candidate)[1],
+                                  singleton[3] - singleton[1]) // 3)
+                    for candidate in repeated_track
+                )
+                if material_overlaps >= 2:
+                    raise PayloadError("OCR layout is ambiguous for conservative visual review.")
 
 
 def _assert_repaint_is_isolated(line: dict[str, Any], lines: list[dict[str, Any]]) -> None:
