@@ -76,6 +76,71 @@ def _span_metrics(documents: tuple[GoldDocument, ...], predictions: dict[str, tu
     return {"status": "SCORED", **evaluate(documents, selected_predictions)}
 
 
+def _recall_bounds(*, eligible: tuple[GoldDocument, ...], assessed: tuple[GoldDocument, ...],
+                   predictions: dict[str, tuple[Any, ...]]) -> dict[str, Any]:
+    """Report assessed-only recall beside conservative bounds over all gold.
+
+    A detector may abstain on difficult documents.  Its ordinary score is
+    therefore conditional on the documents it assessed, whereas the lower and
+    upper bounds retain positives in abstained documents.  This intentionally
+    prevents an all-abstained positive slice from appearing perfect.
+    """
+    eligible_ids = {document.id for document in eligible}
+    assessed_ids = {document.id for document in assessed}
+    if not assessed_ids <= eligible_ids:
+        _reject()
+    labels = sorted({annotation.entity_type for document in eligible for annotation in document.annotations})
+    scored = (evaluate(assessed, {document.id: predictions[document.id] for document in assessed})["exact"]
+              if assessed else None)
+
+    def metrics(label: str | None) -> dict[str, Any]:
+        eligible_gold = sum(1 for document in eligible for annotation in document.annotations
+                            if label is None or annotation.entity_type == label)
+        assessed_gold = sum(1 for document in assessed for annotation in document.annotations
+                            if label is None or annotation.entity_type == label)
+        abstained_gold = eligible_gold - assessed_gold
+        assessed_exact = (scored["corpus"] if label is None else scored["per_entity"].get(label)) if scored else None
+        true_positives = assessed_exact["true_positives"] if assessed_exact else 0
+        false_negatives = assessed_exact["false_negatives"] if assessed_exact else 0
+        conditional_recall = assessed_exact["recall"] if assessed_exact else None
+        if eligible_gold == 0:
+            lower = upper = None
+        else:
+            lower = true_positives / eligible_gold
+            upper = (true_positives + abstained_gold) / eligible_gold
+        return {
+            "eligible_documents": len(eligible), "assessed_documents": len(assessed),
+            "abstained_documents": len(eligible) - len(assessed),
+            "eligible_gold_positives": eligible_gold,
+            "assessed_gold_positives": assessed_gold,
+            "abstained_gold_positives": abstained_gold,
+            "assessed_true_positives": true_positives,
+            "assessed_false_negatives": false_negatives,
+            "conditional_recall": conditional_recall,
+            "operational_recall_lower_bound": lower,
+            "operational_recall_upper_bound": upper,
+        }
+
+    return {
+        "status": "SCORED" if assessed else "ABSTAINED",
+        "reason": None if assessed else "NO_ASSESSED_DOCUMENTS",
+        "corpus": metrics(None),
+        "per_entity": {label: metrics(label) for label in labels},
+    }
+
+
+def _recall_bounds_by_format(documents: tuple[GoldDocument, ...], assessed: tuple[GoldDocument, ...],
+                             predictions: dict[str, tuple[Any, ...]], formats: dict[str, str]) -> dict[str, Any]:
+    return {
+        name: _recall_bounds(
+            eligible=tuple(document for document in documents if formats[document.id] == name),
+            assessed=tuple(document for document in assessed if formats[document.id] == name),
+            predictions=predictions,
+        )
+        for name in sorted(set(formats.values()))
+    }
+
+
 def _graph_metrics(gold: set[tuple[str, str, str]] | None,
                    predicted: set[tuple[str, str, str]] | None) -> dict[str, Any]:
     # Validate both containers before any set operation.  Direct callers must
@@ -158,12 +223,21 @@ def scorecard(*, documents: tuple[GoldDocument, ...], formats: dict[str, str], a
     result = {"schema_version": VERSION, "classification": "SYNTHETIC_INTERNAL_EVALUATION_ONLY",
               "qualification": "NOT_QUALIFIED", "automatic": _span_metrics(assessed_documents, automatic_predictions),
               "reviewer_corrected": _span_metrics(assessed_documents, reviewer_predictions), "by_format": by_format,
+              "coverage_aware_recall": {
+                  "automatic": {"all_formats": _recall_bounds(eligible=documents, assessed=assessed_documents,
+                                                                  predictions=automatic_predictions),
+                                "by_format": _recall_bounds_by_format(documents, assessed_documents, automatic_predictions, formats)},
+                  "reviewer_corrected": {"all_formats": _recall_bounds(eligible=documents, assessed=assessed_documents,
+                                                                           predictions=reviewer_predictions),
+                                         "by_format": _recall_bounds_by_format(documents, assessed_documents, reviewer_predictions, formats)},
+              },
               "abstentions": abstention_summary,
               "graph": {"automatic": _graph_metrics(graph_gold, graph_automatic),
                         "reviewer_corrected": _graph_metrics(graph_gold, graph_reviewer_corrected)},
               "final_artifact_validation": _final_validation(final_validation, primary_engine),
               "limitations": ["Synthetic scorecard results are not representative holdout evidence.",
                               "Reviewer-corrected scores are not automatic detector performance.",
+                              "Conditional recall excludes abstained documents; operational recall bounds retain their gold positives.",
                               "No same-engine OCR recheck is labelled independent.",
                               "This report does not authorize a release."]}
     result["report_sha256"] = canonical_hash(result)
