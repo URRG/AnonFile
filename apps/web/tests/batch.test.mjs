@@ -420,6 +420,8 @@ test('batch client binds annotation-score counts to submitted labels and detecto
     qualification: 'NOT_QUALIFIED', automatic_exact: { true_positives: 1, false_positives: 0, false_negatives: 1 },
     reviewer_corrected_exact: { true_positives: 1, false_positives: 0, false_negatives: 1 },
     final_artifact_validation: { status: 'ABSTAINED', reason: 'INDEPENDENT_ENGINE_UNAVAILABLE' },
+    final_text_validation: { status: 'INDEPENDENT_RULE_SCANNER_TEXT_ONLY', bound_artifacts: 2,
+      assessed_categories: ['CREDENTIAL', 'PAYMENT', 'PII'], residual_units_by_category: { CREDENTIAL: 0, PAYMENT: 0, PII: 0 }, abstained_artifacts: 0 },
     relationship_review: 'NO_GRAPH_GOLD_OR_REVIEW_STATE' }
   const mock = t.mock.method(globalThis, 'fetch', async () => Response.json(response))
   const result = await inspectSyntheticBatch({ ...request, referenceManifest })
@@ -427,6 +429,7 @@ test('batch client binds annotation-score counts to submitted labels and detecto
   assert.equal(result.verification.annotationScore.automaticExact.falseNegatives, 1)
   assert.equal(result.verification.aggregateScorecard.qualification, 'NOT_QUALIFIED')
   assert.equal(result.verification.aggregateScorecard.finalArtifactValidation.status, 'ABSTAINED')
+  assert.equal(result.verification.aggregateScorecard.finalTextValidation.status, 'INDEPENDENT_RULE_SCANNER_TEXT_ONLY')
   assert.deepEqual(result.verification.annotationScore.perDocument[1].missed,
     [{ start: 0, end: 4, entity_type: 'OTHER_SENSITIVE' }])
   const sent = JSON.parse(mock.mock.calls[0].arguments[1].body)

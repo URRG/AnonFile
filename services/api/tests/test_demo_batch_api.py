@@ -1134,6 +1134,10 @@ def test_reference_labels_measure_exact_reviewed_spans_without_approval(demo_cli
         "qualification": "NOT_QUALIFIED", "automatic_exact": score["automatic_exact"],
         "reviewer_corrected_exact": score["exact"],
         "final_artifact_validation": {"status": "ABSTAINED", "reason": "INDEPENDENT_ENGINE_UNAVAILABLE"},
+        "final_text_validation": {"status": "INDEPENDENT_RULE_SCANNER_TEXT_ONLY", "bound_artifacts": 2,
+                                  "assessed_categories": ["CREDENTIAL", "PAYMENT", "PII"],
+                                  "residual_units_by_category": {"CREDENTIAL": 0, "PAYMENT": 0, "PII": 2},
+                                  "abstained_artifacts": 0},
         "relationship_review": "NO_GRAPH_GOLD_OR_REVIEW_STATE",
     }
     assert "email" not in str(aggregate) and "riya@example.test" not in str(aggregate)

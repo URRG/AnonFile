@@ -25,6 +25,7 @@ from app.demo_contextual_surrogates import contextual_alias
 from app.demo_surrogates import SSN_SHAPE, demo_field_kind, typed_alias
 from app.d07_scorecard import ScorecardError, scorecard
 from app.evaluation import EvaluationError, evaluate, parse_gold, parse_predictions
+from app.independent_residual import ASSESSED_CATEGORIES, scan_residual_candidate
 from app.media_preview import extract_media, render_candidate
 from app.processing import _field_type, detect_text
 
@@ -205,6 +206,7 @@ def _score_reference_annotations(value: object, documents: list[dict[str, Any]])
         "automatic_exact": counts(aggregate["automatic"]["exact"]["corpus"]),
         "reviewer_corrected_exact": counts(aggregate["reviewer_corrected"]["exact"]["corpus"]),
         "final_artifact_validation": aggregate["final_artifact_validation"],
+        "final_text_validation": _scan_final_text_candidates(documents),
         "relationship_review": aggregate["graph"]["automatic"]["reason"],
     }
     return ({"basis": value["basis"], "status": "OBSERVATIONAL_ONLY",
@@ -212,7 +214,27 @@ def _score_reference_annotations(value: object, documents: list[dict[str, Any]])
              "exact": counts(exact["corpus"]),
              "automatic_exact": counts(automatic_report["exact"]["corpus"]),
              "per_type": {kind: counts(item) for kind, item in exact["per_entity"].items()},
-             "per_document": per_document}, public_aggregate)
+              "per_document": per_document}, public_aggregate)
+
+
+def _scan_final_text_candidates(documents: list[dict[str, Any]]) -> dict[str, Any]:
+    """Check exact generated text bytes with separate rules; never OCR media."""
+    totals = {category: 0 for category in sorted(ASSESSED_CATEGORIES)}
+    assessed = abstained = 0
+    for document in documents:
+        if document["kind"] not in {"text", "csv", "json", "jsonl"}:
+            continue
+        candidate = document["candidate_text"]
+        if hashlib.sha256(candidate.encode("utf-8")).hexdigest() != document.get("_candidate_text_sha256"):
+            raise PayloadError("Final text candidate binding changed during review.")
+        result = scan_residual_candidate(candidate)
+        assessed += result.scanned_units
+        abstained += result.abstained_units
+        for category in totals:
+            totals[category] += result.residual_counts[category]
+    return {"status": "INDEPENDENT_RULE_SCANNER_TEXT_ONLY", "bound_artifacts": assessed,
+            "assessed_categories": sorted(ASSESSED_CATEGORIES), "residual_units_by_category": totals,
+            "abstained_artifacts": abstained}
 
 
 def _validate_structured(format_name: str, content: str) -> None:
@@ -1194,7 +1216,8 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
                 structure = "pass"
             except PayloadError:
                 structure = "fail"
-        doc.update(candidate_text=candidate, matches=matches, structure_check=structure)
+        doc.update(candidate_text=candidate, matches=matches, structure_check=structure,
+                   _candidate_text_sha256=hashlib.sha256(candidate.encode("utf-8")).hexdigest())
         if "_media_pages" in doc:
             doc["media_preview"] = render_candidate(
                 doc.pop("_media_pages"), matches, doc["kind"],
@@ -1247,6 +1270,8 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
         raise PayloadError("A manual finding cannot override an existing detected span.")
     structure_failures = sum(doc["structure_check"] == "fail" for doc in documents)
     annotation_score, aggregate_scorecard = _score_reference_annotations(payload.get("reference_annotations"), documents)
+    for doc in documents:
+        doc.pop("_candidate_text_sha256", None)
     return {
         "posture": "SYNTHETIC_DEMO_ONLY", "release_authorized": False, "export_available": False,
         "documents": documents, "entities": entities, "relationships": relationships,
