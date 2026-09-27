@@ -268,7 +268,8 @@ def _image_pdf(images: list[Any]) -> bytes:
     return stream.getvalue()
 
 
-def render_candidate(pages: list[dict[str, Any]], matches: list[dict[str, Any]], kind: str) -> dict[str, Any]:
+def render_candidate(pages: list[dict[str, Any]], matches: list[dict[str, Any]], kind: str,
+                     coordinate_regions: dict[int, list[dict[str, Any]]] | None = None) -> dict[str, Any]:
     """Paint affected OCR lines into new raster pages; inspect again with OCR."""
     public_pages = []
     candidate_images = []
@@ -276,6 +277,7 @@ def render_candidate(pages: list[dict[str, Any]], matches: list[dict[str, Any]],
     fallback_lines = 0
     visual_residuals = 0
     candidate_low_confidence_lines = 0
+    coordinate_regions = coordinate_regions or {}
     for page in pages:
         source_image = page["image"]
         candidate = source_image.copy()
@@ -300,6 +302,15 @@ def render_candidate(pages: list[dict[str, Any]], matches: list[dict[str, Any]],
                 page_sources.add(match["source"])
             parts.append(line["text"][cursor - line["start"]:])
             fallback_lines += _draw_line(candidate, line["box"], "".join(parts))
+        # Reviewer coordinates are opaque visual corrections.  They are applied
+        # after OCR-line substitutions, never produce text/entity matches, and
+        # therefore cannot inflate text scoring or alter candidate_text.
+        manual_regions = coordinate_regions.get(page["number"], [])
+        if manual_regions:
+            from PIL import ImageDraw
+            draw = ImageDraw.Draw(candidate)
+            for region in manual_regions:
+                draw.rectangle((region["x0"], region["y0"], region["x1"] - 1, region["y1"] - 1), fill="black")
         # Input OCR still requires 0.60 confidence. A newly rendered alias can
         # itself lower candidate OCR confidence across platforms; it does not
         # restore the original pixels. Count that uncertainty separately, and
@@ -314,8 +325,10 @@ def render_candidate(pages: list[dict[str, Any]], matches: list[dict[str, Any]],
         candidate_png = _png_bytes(candidate)
         public_pages.append({"number": page["number"], "width": source_image.width, "height": source_image.height,
                              "source_png_base64": base64.b64encode(source_png).decode("ascii"),
+                             "source_png_sha256": hashlib.sha256(source_png).hexdigest(),
                              "candidate_png_base64": base64.b64encode(candidate_png).decode("ascii"),
                              "candidate_png_sha256": hashlib.sha256(candidate_png).hexdigest(),
+                             "manual_regions": manual_regions,
                              "ocr_lines": len(page["lines"])})
         candidate_images.append(candidate)
     if len(assigned) != len(matches):

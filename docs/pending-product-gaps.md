@@ -30,10 +30,18 @@ supplier data. `Blocked externally` is not the same as done.
   references, `.invalid` URL host/path, bounded fallback to opaque marker,
   client response validation and browser candidate-download check on this
   branch. These are review labels, not issuer-valid replacements.
-- [ ] **D04 — Media coordinate review.** Let a reviewer add or correct a missed
+- [x] **D04 — Media coordinate review.** Let a reviewer add or correct a missed
   region on a PDF/image, not only a phrase already found by OCR. Exit: bounded
   page boxes, visual diff, source/candidate provenance and rejection of
-  out-of-page or overlapping unsafe edits.
+  out-of-page or overlapping unsafe edits. Evidence: PDF/image OCR-free boxes
+  with strict page/area/overlap limits, source and candidate SHA-256 bindings,
+  independent browser pixel checks, a locally rebuilt lossless raster PDF
+  download, removable applied boxes and failed-rescan recovery. The three-file
+  Edge walkthrough applied two boxes, verified black candidate pixels,
+  downloaded and decoded the raster-only PDF, then removed one box while the
+  other remained. Full API suite: 1279 passed/57 skipped; web: 66 passed and
+  production build green. Independent review found and verified fixes for two
+  initial issues. This is a visual reviewer tool, not detection completeness.
 - [ ] **D05 — Reading-order and layout fidelity.** Test text, tables, forms,
   scanned PDFs, screenshots and images at supported limits; preserve readable
   output or abstain. Exit: visual regression corpus with explicit overlap,

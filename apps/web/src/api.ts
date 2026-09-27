@@ -109,17 +109,19 @@ export async function inspectSyntheticDemo(request: { apiBase: string; token: st
 // demo copy can be downloaded, but never as an authorized buyer release.
 export type BatchUpload = { id: string; name: string; contentBase64: string; size: number }
 export type BatchManualFinding = { value: string; kind: 'OTHER_SENSITIVE' | 'BUSINESS_CONFIDENTIAL' | 'QUASI_IDENTIFIER' | 'GOVERNMENT_ID' | 'DATE_OF_BIRTH' }
+export type BatchCoordinateCorrection = { documentId: string; page: number; x0: number; y0: number; x1: number; y1: number; kind: BatchManualFinding['kind'] }
+export type BatchManualRegion = BatchCoordinateCorrection & { origin: 'REVIEWER_COORDINATE' }
 export type BatchMatch = { start: number; end: number; source: string; entityId: string; kind: string; replacement: string; applied: boolean;
   origin: 'AUTOMATIC' | 'MANUAL' }
 export type BatchMediaPage = { number: number; width: number; height: number; sourcePngBase64: string;
-  candidatePngBase64: string; candidatePngSha256: string; ocrLines: number }
+  candidatePngBase64: string; candidatePngSha256: string; sourcePngSha256?: string; manualRegions: BatchManualRegion[]; ocrLines: number }
 export type BatchMediaPreview = { pages: BatchMediaPage[]; fallbackLines: number; selfOcrResidualSources: number;
   candidateLowConfidenceLines: number;
   pdfRasterEvidence: { sha256: string; bytes: number; pages: number; sourceObjectsCopied: false } | null;
   candidatePdfBase64: string | null }
 export type BatchDocument = { id: string; name: string; kind: 'text' | 'csv' | 'json' | 'jsonl' | 'pdf' | 'image';
   text: string; candidateText: string; sizeBytes: number; previewFidelity: 'source_text' | 'raster_ocr_review';
-  structureCheck: 'pass' | 'fail' | 'not_applicable'; matches: BatchMatch[]; mediaPreview: BatchMediaPreview | null }
+  structureCheck: 'pass' | 'fail' | 'not_applicable'; matches: BatchMatch[]; mediaPreview: BatchMediaPreview | null; sourceSha256?: string }
 export type BatchAliasStrategy = 'NAME_LENGTH_MATCH' | 'EMAIL_TEST_ADDRESS' | 'PAN_INVALID_TEST' |
   'US_SSN_INVALID' | 'NANP_FICTIONAL' | 'OPAQUE_REDACTION' |
   'CONTEXTUAL_REVIEW_REF' | 'INTERNAL_URL_RESERVED_DOMAIN'
@@ -268,8 +270,72 @@ function entityGraph(raw: unknown, documentIds: Set<string>, entities: BatchEnti
   return { nodes, edges }
 }
 
+function coordinateKey(value: BatchCoordinateCorrection) { return `${value.documentId}:${value.page}:${value.x0}:${value.y0}:${value.x1}:${value.y1}:${value.kind}` }
+async function verifyOpaqueCandidateRegions(encoded: string, width: number, height: number, regions: BatchCoordinateCorrection[]) {
+  if (!regions.length) return
+  // Metadata and hashes only prove self-consistency. Inspect the actual pixels
+  // before telling a reviewer that a requested opaque correction was applied.
+  if (typeof globalThis.createImageBitmap !== 'function' || typeof globalThis.document?.createElement !== 'function') batchInvalid()
+  let bitmap: ImageBitmap | null = null
+  try {
+    const binary = atob(encoded)
+    const bytes = Uint8Array.from(binary, character => character.charCodeAt(0))
+    bitmap = await globalThis.createImageBitmap(new Blob([bytes], { type: 'image/png' }))
+    if (bitmap.width !== width || bitmap.height !== height) batchInvalid()
+    const canvas = globalThis.document.createElement('canvas')
+    canvas.width = width; canvas.height = height
+    const context = canvas.getContext('2d', { willReadFrequently: true })
+    if (!context) batchInvalid()
+    context.drawImage(bitmap, 0, 0)
+    for (const region of regions) {
+      const pixels = context.getImageData(region.x0, region.y0, region.x1 - region.x0, region.y1 - region.y0).data
+      for (let index = 0; index < pixels.length; index += 4) {
+        if (pixels[index] !== 0 || pixels[index + 1] !== 0 || pixels[index + 2] !== 0 || pixels[index + 3] !== 255) batchInvalid()
+      }
+    }
+  } catch { batchInvalid() } finally { bitmap?.close() }
+}
+async function sha256Base64(value: string): Promise<string | null> {
+  // Browser-native integrity binding. Coordinate corrections fail closed if
+  // the runtime cannot calculate this digest.
+  if (!globalThis.crypto?.subtle) return null
+  try {
+    const binary = atob(value)
+    const bytes = Uint8Array.from(binary, character => character.charCodeAt(0))
+    const digest = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', bytes))
+    return Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('')
+  } catch { return null }
+}
+async function verifyCoordinateDigestBindings(value: unknown, expectedSourceHashes: Map<string, string | null>, coordinates: BatchCoordinateCorrection[]) {
+  if (!coordinates.length || !object(value) || !Array.isArray(value.documents)) return
+  for (const document of value.documents) {
+    if (!object(document) || typeof document.id !== 'string' || !coordinates.some(item => item.documentId === document.id)) continue
+    if (expectedSourceHashes.get(document.id) !== null && document.source_sha256 !== expectedSourceHashes.get(document.id)) batchInvalid()
+    if (!object(document.media_preview) || !Array.isArray(document.media_preview.pages)) batchInvalid()
+    for (const page of document.media_preview.pages) {
+      // Bind every page of an edited document, not only the corrected page:
+      // the PDF download and split comparison contain the complete document.
+      if (!object(page) || typeof page.source_png_base64 !== 'string' ||
+          typeof page.source_png_sha256 !== 'string' || typeof page.candidate_png_base64 !== 'string' ||
+          typeof page.candidate_png_sha256 !== 'string' || !safeCount(page.number) || !safeCount(page.width) || !safeCount(page.height) ||
+          page.source_png_base64.length > 3_400_000 || page.candidate_png_base64.length > 3_400_000) batchInvalid()
+      const actual = await sha256Base64(page.source_png_base64)
+      const candidate = await sha256Base64(page.candidate_png_base64)
+      if (actual === null || actual !== page.source_png_sha256 || candidate === null || candidate !== page.candidate_png_sha256) batchInvalid()
+      await verifyOpaqueCandidateRegions(page.candidate_png_base64, page.width, page.height,
+        coordinates.filter(item => item.documentId === document.id && item.page === page.number))
+    }
+  }
+}
+type RawCoordinateCorrection = { document_id: string; page: number; x0: number; y0: number; x1: number; y1: number; kind: BatchManualFinding['kind']; origin?: string }
+function validCoordinate(value: unknown, documentIds: Set<string>): value is RawCoordinateCorrection {
+  return object(value) && typeof value.document_id === 'string' && documentIds.has(value.document_id) && safeCount(value.page) &&
+    [value.x0, value.y0, value.x1, value.y1].every(safeCount) && (value.x1 as number) > (value.x0 as number) &&
+    (value.y1 as number) > (value.y0 as number) && MANUAL_FINDING_KINDS.has(String(value.kind))
+}
+
 function batchInspection(value: unknown, expectedUploads: BatchUpload[], reference: BatchReferenceManifest | null,
-  expectedExclusions: Record<string, 'FALSE_POSITIVE_CONFIRMED'>): BatchInspection {
+  expectedExclusions: Record<string, 'FALSE_POSITIVE_CONFIRMED'>, expectedCoordinates: BatchCoordinateCorrection[], expectedSourceHashes: Map<string, string | null>): BatchInspection {
   const expectedIds = expectedUploads.map(file => file.id)
   if (!object(value) || value.posture !== 'SYNTHETIC_DEMO_ONLY' || value.release_authorized !== false || value.export_available !== false ||
       !Array.isArray(value.documents) || value.documents.length !== expectedIds.length || !Array.isArray(value.entities) ||
@@ -345,9 +411,21 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
             !/^[0-9a-f]{64}$/.test(page.candidate_png_sha256) ||
             ![page.source_png_base64, page.candidate_png_base64].every(value => value.length < 3_400_000 &&
               /^[A-Za-z0-9+/]+={0,2}$/.test(value) && pngHeaderMatches(value, page.width as number, page.height as number))) batchInvalid()
+        const needsCoordinateBinding = expectedCoordinates.some(item => item.documentId === raw.id)
+        const rawRegions = page.manual_regions
+        if (needsCoordinateBinding && (!Array.isArray(rawRegions) || typeof page.source_png_sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(page.source_png_sha256))) batchInvalid()
+        if (rawRegions !== undefined && (!Array.isArray(rawRegions) || rawRegions.length > 20)) batchInvalid()
+        const manualRegions: BatchManualRegion[] = (rawRegions || []).map(region => {
+          if (!validCoordinate(region, new Set(expectedIds)) || region.document_id !== raw.id || region.page !== page.number ||
+              region.origin !== 'REVIEWER_COORDINATE' || Object.keys(region).sort().join(',') !== 'document_id,kind,origin,page,x0,x1,y0,y1') batchInvalid()
+          return { documentId: region.document_id, page: region.page, x0: region.x0, y0: region.y0, x1: region.x1, y1: region.y1,
+            kind: region.kind, origin: 'REVIEWER_COORDINATE' }
+        })
+        if (manualRegions.some(region => region.x1 > (page.width as number) || region.y1 > (page.height as number))) batchInvalid()
         return { number: page.number as number, width: page.width as number, height: page.height as number,
           sourcePngBase64: page.source_png_base64 as string, candidatePngBase64: page.candidate_png_base64 as string,
-          candidatePngSha256: page.candidate_png_sha256 as string, ocrLines: page.ocr_lines as number }
+          candidatePngSha256: page.candidate_png_sha256 as string, sourcePngSha256: page.source_png_sha256 as string | undefined,
+          manualRegions, ocrLines: page.ocr_lines as number }
       })
       if (pages.reduce((sum, page) => sum + page.width * page.height, 0) > 3_000_000) batchInvalid()
       let pdfRasterEvidence: BatchMediaPreview['pdfRasterEvidence'] = null
@@ -366,10 +444,17 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
         selfOcrResidualSources: media.self_ocr_residual_sources as number,
         candidateLowConfidenceLines: media.candidate_low_confidence_lines as number, pdfRasterEvidence, candidatePdfBase64 }
     } else if (raw.media_preview !== undefined || raw.preview_fidelity !== 'source_text') batchInvalid()
+    const documentRegions = mediaPreview?.pages.flatMap(page => page.manualRegions) || []
+    const expectedForDocument = expectedCoordinates.filter(item => item.documentId === raw.id)
+    if ((expectedCoordinates.length || documentRegions.length) && (typeof raw.source_sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(raw.source_sha256) ||
+        (expectedSourceHashes.get(raw.id as string) !== null && raw.source_sha256 !== expectedSourceHashes.get(raw.id as string)) ||
+        documentRegions.length !== expectedForDocument.length || new Set(documentRegions.map(coordinateKey)).size !== documentRegions.length ||
+        new Set(documentRegions.map(coordinateKey)).size !== new Set(expectedForDocument.map(coordinateKey)).size ||
+        documentRegions.some(region => !new Set(expectedForDocument.map(coordinateKey)).has(coordinateKey(region))))) batchInvalid()
     return { id: raw.id as string, name: raw.name as string, kind: raw.kind as BatchDocument['kind'], text: raw.text as string,
       candidateText: raw.candidate_text as string, sizeBytes: raw.size_bytes as number,
       previewFidelity: raw.preview_fidelity as BatchDocument['previewFidelity'], structureCheck: raw.structure_check as BatchDocument['structureCheck'], matches,
-      mediaPreview }
+      mediaPreview, sourceSha256: raw.source_sha256 as string | undefined }
   })
   const relationships: BatchRelationship[] = value.relationships.map(raw => {
     const documentKind = object(raw) ? documents.find(doc => doc.id === raw.document_id)?.kind : undefined
@@ -485,6 +570,7 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
 
 export async function inspectSyntheticBatch(request: { apiBase: string; token: string; files: BatchUpload[]; manualNames: string[];
   manualFindings?: BatchManualFinding[];
+  coordinateCorrections?: BatchCoordinateCorrection[];
   aliasOverrides: Record<string, string>; reviewExclusions?: Record<string, 'FALSE_POSITIVE_CONFIRMED'>;
   referenceManifest?: BatchReferenceManifest | null; signal?: AbortSignal }): Promise<BatchInspection> {
   if (!request.token.trim() || request.files.length < 2 || request.files.length > 3 ||
@@ -502,7 +588,17 @@ export async function inspectSyntheticBatch(request: { apiBase: string; token: s
       new Set(request.manualFindings.map(item => `${item.kind}:${item.value.toLocaleLowerCase()}`)).size !== request.manualFindings.length)) {
     throw new DemoInspectionFailure('Invalid manually reviewed sensitive findings.')
   }
+  const coordinateCorrections = request.coordinateCorrections || []
+  const documentIds = new Set(request.files.map(file => file.id))
+  if (coordinateCorrections.length > 20 || coordinateCorrections.some(item => !item || !documentIds.has(item.documentId) ||
+      !Number.isSafeInteger(item.page) || item.page < 1 || ![item.x0, item.y0, item.x1, item.y1].every(Number.isSafeInteger) ||
+      item.x0 < 0 || item.y0 < 0 || item.x1 <= item.x0 || item.y1 <= item.y0 || !MANUAL_FINDING_KINDS.has(item.kind)) ||
+      new Set(coordinateCorrections.map(coordinateKey)).size !== coordinateCorrections.length) {
+    throw new DemoInspectionFailure('Invalid reviewer coordinate corrections.')
+  }
   const controller = new AbortController()
+  const expectedSourceHashes = new Map(await Promise.all(request.files.map(async file => [file.id, await sha256Base64(file.contentBase64)] as const)))
+  if (coordinateCorrections.length && [...expectedSourceHashes.values()].some(value => value === null)) throw new DemoInspectionFailure('Secure SHA-256 is required to apply coordinate corrections.')
   const reference = request.referenceManifest
   if (reference && (reference.documents.length !== request.files.length ||
       new Set(reference.documents.map(document => document.name)).size !== request.files.length ||
@@ -524,6 +620,7 @@ export async function inspectSyntheticBatch(request: { apiBase: string; token: s
           body: JSON.stringify({ synthetic_only: true, files: request.files.map(file => ({ id: file.id, name: file.name, content_base64: file.contentBase64 })),
             manual_names: request.manualNames, manual_findings: request.manualFindings || [], alias_overrides: request.aliasOverrides,
             review_exclusions: request.reviewExclusions || {},
+            coordinate_corrections: coordinateCorrections.map(item => ({ document_id: item.documentId, page: item.page, x0: item.x0, y0: item.y0, x1: item.x1, y1: item.y1, kind: item.kind })),
             ...(reference ? { reference_annotations: { basis: reference.basis, documents: reference.documents.map(document => ({
               id: request.files.find(file => file.name === document.name)!.id, annotations: document.annotations })) } } : {}) }),
         })
@@ -533,8 +630,8 @@ export async function inspectSyntheticBatch(request: { apiBase: string; token: s
           413: 'The batch exceeds the service limit.', 422: 'A file or correction is invalid. Check media size, OCR readability, format, and alias length.', 503: 'Synthetic batch mode is unavailable.' }
         throw new DemoInspectionFailure(messages[response.status] || 'The synthetic batch request failed.')
       }
-      try { return batchInspection(await response.json(), request.files, reference || null,
-        request.reviewExclusions || {}) } catch (cause) {
+      try { const payload = await response.json(); await verifyCoordinateDigestBindings(payload, expectedSourceHashes, coordinateCorrections); return batchInspection(payload, request.files, reference || null,
+        request.reviewExclusions || {}, coordinateCorrections, expectedSourceHashes) } catch (cause) {
         if (cause instanceof DemoInspectionFailure) throw cause
         return batchInvalid()
       }

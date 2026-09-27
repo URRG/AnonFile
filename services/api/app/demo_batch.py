@@ -249,6 +249,9 @@ def _read_file(item: dict[str, Any]) -> dict[str, Any]:
             raise PayloadError("Demo files cannot be blank.")
         _validate_structured(kind, content)
     result = {"id": identifier, "name": name, "kind": kind, "text": content, "size_bytes": len(raw),
+              # Bind review pixels to the exact uploaded media/text bytes.  This
+              # stays provenance only; it is not a release artifact digest.
+              "source_sha256": hashlib.sha256(raw).hexdigest(),
               "preview_fidelity": "raster_ocr_review" if media_pages is not None else "source_text"}
     if media_pages is not None:
         result["_media_pages"] = media_pages
@@ -711,6 +714,57 @@ def _exact_phrase_matches(text: str, value: str) -> list[re.Match[str]]:
     return list(re.finditer(r"(?<!\w)" + re.escape(value) + r"(?!\w)", text, re.I))
 
 
+def _boxes_overlap(first: tuple[int, int, int, int], second: tuple[int, int, int, int]) -> bool:
+    return first[0] < second[2] and first[2] > second[0] and first[1] < second[3] and first[3] > second[1]
+
+
+def _coordinate_regions(value: object, documents: list[dict[str, Any]]) -> dict[tuple[str, int], list[dict[str, Any]]]:
+    """Validate bounded reviewer boxes without turning them into text findings.
+
+    A box may only cover an OCR-free area.  Allowing it to hide an OCR line
+    would leave ``candidate_text`` claiming that visibly redacted text remains.
+    """
+    if value is None:
+        value = []
+    if not isinstance(value, list) or len(value) > 20:
+        raise PayloadError("Coordinate corrections must contain at most 20 reviewer boxes.")
+    media = {doc["id"]: doc for doc in documents if "_media_pages" in doc}
+    by_page = {(document_id, page["number"]): page
+               for document_id, doc in media.items() for page in doc["_media_pages"]}
+    regions: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    expected = {"document_id", "page", "x0", "y0", "x1", "y1", "kind"}
+    for item in value:
+        if (not isinstance(item, dict) or set(item) != expected or
+                not isinstance(item.get("document_id"), str) or
+                not isinstance(item.get("page"), int) or isinstance(item.get("page"), bool) or
+                any(not isinstance(item.get(key), int) or isinstance(item.get(key), bool)
+                    for key in ("x0", "y0", "x1", "y1")) or
+                not isinstance(item.get("kind"), str) or item["kind"] not in MANUAL_FINDING_KINDS):
+            raise PayloadError("Invalid coordinate correction.")
+        key = (item["document_id"], item["page"])
+        page = by_page.get(key)
+        if page is None:
+            raise PayloadError("Coordinate corrections require a known PDF/image document page.")
+        x0, y0, x1, y1 = (item[key] for key in ("x0", "y0", "x1", "y1"))
+        width, height = page["image"].width, page["image"].height
+        if x0 < 0 or y0 < 0 or x1 > width or y1 > height or x1 - x0 < 4 or y1 - y0 < 4:
+            raise PayloadError("Coordinate correction is outside the page or smaller than 4 by 4 pixels.")
+        box = (x0, y0, x1, y1)
+        area = (x1 - x0) * (y1 - y0)
+        if area > width * height * 0.25:
+            raise PayloadError("A coordinate correction cannot cover more than 25% of its page.")
+        if any(_boxes_overlap(box, tuple(line["box"])) for line in page["lines"]):
+            raise PayloadError("A coordinate correction overlaps OCR text; use a text finding for OCR lines.")
+        public = {**item, "origin": "REVIEWER_COORDINATE"}
+        existing = regions.setdefault(key, [])
+        if any(_boxes_overlap(box, (other["x0"], other["y0"], other["x1"], other["y1"])) for other in existing):
+            raise PayloadError("Coordinate corrections on the same page cannot overlap.")
+        if sum((other["x1"] - other["x0"]) * (other["y1"] - other["y0"]) for other in existing) + area > width * height * 0.50:
+            raise PayloadError("Coordinate corrections cannot cover more than 50% of a page in total.")
+        existing.append(public)
+    return regions
+
+
 def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
     """Return synthetic-only review data; never an anonymous or exportable artifact."""
     if payload.get("synthetic_only") is not True:
@@ -730,6 +784,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
         documents.append(document)
     if len({doc["id"] for doc in documents}) != len(documents) or sum(doc["size_bytes"] for doc in documents) > MAX_TOTAL_BYTES:
         raise PayloadError("Duplicate file identities or batch size over 1.5 MB.")
+    coordinate_regions = _coordinate_regions(payload.get("coordinate_corrections", []), documents)
     phrases = payload.get("manual_names", [])
     manual_findings = payload.get("manual_findings", [])
     overrides = payload.get("alias_overrides", {})
@@ -943,7 +998,10 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
                 structure = "fail"
         doc.update(candidate_text=candidate, matches=matches, structure_check=structure)
         if "_media_pages" in doc:
-            doc["media_preview"] = render_candidate(doc.pop("_media_pages"), matches, doc["kind"])
+            doc["media_preview"] = render_candidate(
+                doc.pop("_media_pages"), matches, doc["kind"],
+                {page: regions for (document_id, page), regions in coordinate_regions.items()
+                 if document_id == doc["id"]})
         doc.pop("_fields")
         doc.pop("_ssn_values")
         doc.pop("_labelled_ssns")

@@ -166,6 +166,48 @@ test('batch client binds raster image previews to staged media and PNG dimension
   }
 })
 
+test('coordinate corrections bind exact returned regions and source digests', async t => {
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAI0lEQVR4nGP8//8/AymAiSTVDKMaiANMRKqDg1ENxACSQwkAVW0DHeN02ZEAAAAASUVORK5CYII='
+  const blackPng = 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAEUlEQVR4nGNgGAWjYBQwQAEAAxAAAXyL/2UAAAAASUVORK5CYII='
+  const oldBitmap = Object.getOwnPropertyDescriptor(globalThis, 'createImageBitmap')
+  const oldDocument = Object.getOwnPropertyDescriptor(globalThis, 'document')
+  Object.defineProperty(globalThis, 'createImageBitmap', { configurable: true, value: async blob => ({ width: 16, height: 16,
+    black: Buffer.from(await blob.arrayBuffer()).equals(Buffer.from(blackPng, 'base64')), close() {} }) })
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: { createElement: () => {
+    let black = false
+    return { width: 0, height: 0, getContext: () => ({ drawImage: bitmap => { black = bitmap.black },
+      getImageData: (_x, _y, width, height) => {
+        const data = new Uint8ClampedArray(width * height * 4)
+        for (let index = 0; index < data.length; index += 4) { data[index] = black ? 0 : 255; data[index + 3] = 255 }
+        return { data }
+      } }) }
+  } } })
+  t.after(() => {
+    if (oldBitmap) Object.defineProperty(globalThis, 'createImageBitmap', oldBitmap); else delete globalThis.createImageBitmap
+    if (oldDocument) Object.defineProperty(globalThis, 'document', oldDocument); else delete globalThis.document
+  })
+  const response = valid()
+  response.documents[1].name = 'b.png'; response.documents[1].kind = 'image'; response.documents[1].preview_fidelity = 'raster_ocr_review'
+  const correction = { documentId: 'f2', page: 1, x0: 1, y0: 2, x1: 8, y1: 9, kind: 'OTHER_SENSITIVE' }
+  response.documents[0].source_sha256 = createHash('sha256').update(Buffer.from(files[0].contentBase64, 'base64')).digest('hex')
+  response.documents[1].source_sha256 = createHash('sha256').update(Buffer.from(files[1].contentBase64, 'base64')).digest('hex')
+  response.documents[1].media_preview = { pages: [{ number: 1, width: 16, height: 16, source_png_base64: png, candidate_png_base64: blackPng,
+    source_png_sha256: createHash('sha256').update(Buffer.from(png, 'base64')).digest('hex'), candidate_png_sha256: createHash('sha256').update(Buffer.from(blackPng, 'base64')).digest('hex'),
+    manual_regions: [{ document_id: 'f2', page: 1, x0: 1, y0: 2, x1: 8, y1: 9, kind: 'OTHER_SENSITIVE', origin: 'REVIEWER_COORDINATE' }], ocr_lines: 1 }], fallback_lines: 0, self_ocr_residual_sources: 0, candidate_low_confidence_lines: 0, pdf_raster_evidence: null, candidate_pdf_base64: null }
+  const coordinateRequest = { ...request, files: [files[0], { ...files[1], name: 'b.png' }], coordinateCorrections: [correction] }
+  const mock = t.mock.method(globalThis, 'fetch', async () => Response.json(response))
+  const result = await inspectSyntheticBatch(coordinateRequest)
+  assert.deepEqual(JSON.parse(mock.mock.calls[0].arguments[1].body).coordinate_corrections, [{ document_id: 'f2', page: 1, x0: 1, y0: 2, x1: 8, y1: 9, kind: 'OTHER_SENSITIVE' }])
+  assert.equal(result.documents[1].mediaPreview.pages[0].manualRegions.length, 1)
+  t.mock.restoreAll()
+  for (const change of [value => { value.documents[1].media_preview.pages[0].manual_regions[0].x1 = 7 }, value => { value.documents[1].media_preview.pages[0].manual_regions.push(structuredClone(value.documents[1].media_preview.pages[0].manual_regions[0])) }, value => { value.documents[1].media_preview.pages[0].source_png_sha256 = '0'.repeat(64) }, value => { const page = value.documents[1].media_preview.pages[0]; page.candidate_png_base64 = png; page.candidate_png_sha256 = page.source_png_sha256 }]) {
+    const tampered = structuredClone(response); change(tampered)
+    t.mock.method(globalThis, 'fetch', async () => Response.json(tampered))
+    await assert.rejects(inspectSyntheticBatch(coordinateRequest), /invalid review result/)
+    t.mock.restoreAll()
+  }
+})
+
 test('batch client accepts only a typed, non-source entity graph', async t => {
   const response = valid()
   response.entity_graph = { nodes: [{ id: 'E1', kind: 'person', label: 'Gita', document_ids: ['f1'] }, { id: 'organization_1', kind: 'organization', label: 'Organization 1', document_ids: ['f2'] }], edges: [{ id: 'relationship_1', type: 'works_at', source_id: 'E1', target_id: 'organization_1', evidence: [{ document_id: 'f2', rule: 'explicit_structured_field_pair', field: 'company' }] }] }
