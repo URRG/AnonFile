@@ -119,12 +119,17 @@ supplier data. `Blocked externally` is not the same as done.
     and omit evidence bindings from views. Memory mode exposes no graph-review
     route; production mode still blocks the workflow. Snapshot registration is
     trusted-server-only and has no user-facing ingest path.
+  - [x] A bounded development-only synthetic batch response can include an
+    opaque mapping to a newly persisted graph-review snapshot when encrypted
+    SQLite storage is configured. At most eight active bridge snapshots are
+    admitted per tenant; memory-only demos omit the binding. This does not
+    record a reviewer action or change the generated graph.
   - [ ] User-facing recorded graph review is still unavailable in the synthetic
     demo. The development-only reviewer API has durable merge/split actions,
-    but the UI has no durable snapshot binding and its node/edge IDs remain
-    response-local rather than durable correction keys. Conflict resolution,
-    external audit anchoring, and multi-host persistence are also not
-    established.
+    but the UI does not use the optional snapshot binding or expose recorded
+    decisions. Its node/edge IDs alone remain response-local, not durable
+    correction keys. Conflict resolution, external audit anchoring, and
+    multi-host persistence are also not established.
 - [ ] **D07 — Independent demo scorecard.** Evaluate untouched final pixels and
   text with a different engine/annotated ground truth; separate automatic
   detector scores from reviewer corrections and measure graph/link quality.
