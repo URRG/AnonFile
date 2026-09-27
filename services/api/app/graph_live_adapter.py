@@ -84,6 +84,7 @@ def adjudicate_private_ledger(*, ledger: PrivateGraphLedger, decisions: tuple[tu
             return {"schema_version": "ephemeral-graph-adjudication-v1", "state": "EPHEMERAL_STATELESS",
                     "release_authorized": False, "status": "ABSTAINED", "reason": "NO_RELATIONSHIPS",
                     "decisions": {"accepted": 0, "rejected": 0, "pending": 0}, "relationships": {}, "conflicts": [],
+                    "identity_actions": {"merges": 0, "splits": 0, "claims_reassigned_by_split": 0},
                     "limitations": ["No relationships were produced for this batch; no adjudication was attempted.",
                                     "This source-free in-process summary does not authorize release or delivery."]}
         edge_claims = dict(ledger.claims_by_edge)

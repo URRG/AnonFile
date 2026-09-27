@@ -9,6 +9,8 @@ def test_empty_public_graph_builds_private_no_adjudication_ledger():
     assert ledger.nodes == () and ledger.claims_by_edge == ()
     report = adjudicate_private_ledger(ledger=ledger)
     assert report["status"] == "ABSTAINED" and report["reason"] == "NO_RELATIONSHIPS"
+    assert report["release_authorized"] is False
+    assert report["identity_actions"] == {"merges": 0, "splits": 0, "claims_reassigned_by_split": 0}
     with pytest.raises(GraphAdjudicationError):
         adjudicate_private_ledger(ledger=ledger, decisions=(("edge_0000000000000000", "ACCEPT"),))
 
