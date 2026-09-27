@@ -136,10 +136,16 @@ supplier data. `Blocked externally` is not the same as done.
     changed bindings, unknown claims/endpoints, unsafe response fields, and
     401/403/404/409 responses fail closed. Memory-only demos still show only
     the temporary controls and never request a recorded review.
-  - [ ] The user-facing recorded panel deliberately has no merge/split editor,
-    conflict-resolution workflow, external audit anchoring, or multi-host
-    persistence. Recorded decisions remain development-only and do not
-    authorize release, delivery, export, or real-world identity resolution.
+  - [x] The optional encrypted-SQLite development panel can now submit
+    reviewer-recorded two-person merge and exhaustive endpoint-level split
+    overlays using only server-bound opaque references and CAS revision. The
+    client validates replayed actions and aggregate conflicts, and requires a
+    reload after stale or uncertain outcomes. No source evidence is exposed
+    by this panel; memory-only demos still have no recorded route.
+  - [ ] A conflict-resolution workflow, external audit anchoring, and
+    multi-host persistence remain unavailable. Recorded decisions are
+    development-only and do not authorize release, delivery, export, or
+    real-world identity resolution.
 - [ ] **D07 — Independent demo scorecard.** Evaluate untouched final pixels and
   text with a different engine/annotated ground truth; separate automatic
   detector scores from reviewer corrections and measure graph/link quality.
