@@ -437,6 +437,28 @@ def test_render_candidate_allows_blank_repaint_padding_and_grayscales_once(monke
     assert conversions == 1
 
 
+def test_render_candidate_rejects_long_connected_stroke_in_repaint_fringe(monkeypatch):
+    """One contact point must not legalize a whole unclaimed margin stroke."""
+    from app import media_preview
+
+    monkeypatch.setattr(media_preview, "_ocr_lines", lambda _, **kwargs: [])
+    image = Image.new("RGB", (180, 80), "white")
+    draw = ImageDraw.Draw(image)
+    draw.point((70, 49), fill="black")  # claimed ink
+    draw.line((70, 50, 105, 50), fill="black")  # erased one-pixel ring
+    secret = "Maya Patel"
+    page = {"number": 1, "image": image, "lines": [
+        {"text": secret, "box": (10, 10, 150, 55), "ink_box": (15, 15, 145, 50),
+         "start": 0, "end": len(secret)},
+    ]}
+    match = {"start": 0, "end": len(secret), "source": secret,
+             "replacement": "John Singh", "applied": True}
+
+    with pytest.raises(PayloadError, match="padding region contains unrecognised source ink") as error:
+        render_candidate([page], [match], "image")
+    assert secret not in str(error.value)
+
+
 def test_pdf_text_layer_check_requires_every_sensitive_occurrence():
     native = "Call +1 415 555 0148. Call +1 415 555 0148 again."
     one_phone = [{"text": "Call +1 415 555 0148."}]
