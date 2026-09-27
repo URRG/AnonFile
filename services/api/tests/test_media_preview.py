@@ -99,6 +99,50 @@ def test_ocr_line_without_measurable_raster_edge_abstains_on_catastrophic_blur(m
     assert "Maya Patel" not in str(error.value)
 
 
+def test_ocr_edge_guard_converts_the_source_once_for_many_claimed_lines(monkeypatch):
+    from types import SimpleNamespace
+    from app import media_preview
+
+    image = Image.new("RGB", (320, 280), "white")
+    texts = [f"fictional line {index}" for index in range(5)]
+    boxes = []
+    draw = ImageDraw.Draw(image)
+    for index, text in enumerate(texts):
+        y = 10 + index * 50
+        draw.text((20, y), text, fill="black")
+        boxes.append([(20, y), (220, y), (220, y + 25), (20, y + 25)])
+    calls = 0
+    original_convert = image.convert
+
+    def count_grayscale_conversion(mode, *args, **kwargs):
+        nonlocal calls
+        if mode == "L":
+            calls += 1
+        return original_convert(mode, *args, **kwargs)
+
+    monkeypatch.setattr(image, "convert", count_grayscale_conversion)
+    monkeypatch.setattr(media_preview, "_engine", lambda: lambda _: SimpleNamespace(
+        txts=texts, boxes=boxes, scores=[0.99] * len(texts)))
+    assert [line["text"] for line in _ocr_lines(image)] == texts
+    assert calls == 1
+
+
+def test_ocr_edge_guard_does_not_certify_text_from_a_graphic_edge(monkeypatch):
+    """A visible rule satisfies this narrow raster sanity check, not OCR proof."""
+    from types import SimpleNamespace
+    from app import media_preview
+
+    image = Image.new("RGB", (320, 120), "white")
+    ImageDraw.Draw(image).rectangle((25, 35, 115, 50), fill="black")
+    box = [(15, 25), (125, 25), (125, 60), (15, 60)]
+    monkeypatch.setattr(media_preview, "_engine", lambda: lambda _: SimpleNamespace(
+        txts=["fictional OCR claim"], boxes=[box], scores=[0.99]))
+    # A graphic edge is intentionally accepted here: the guard is only a
+    # catastrophic-flat-raster rejection and must not be presented as text,
+    # OCR-coverage, or semantic-source validation.
+    assert _ocr_lines(image)[0]["text"] == "fictional OCR claim"
+
+
 @pytest.mark.parametrize("boxes", [
     # Adjacent cells / two columns share a vertical band. Their OCR order is
     # not proof of the intended reading order.
