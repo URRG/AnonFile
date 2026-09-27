@@ -46,6 +46,19 @@ supplier data. `Blocked externally` is not the same as done.
   scanned PDFs, screenshots and images at supported limits; preserve readable
   output or abstain. Exit: visual regression corpus with explicit overlap,
   blur and unprocessed-region failure cases.
+  - [x] Fictional reproducible layout corpus and pixel mutation-mask tests;
+    focused tests exercise a single-column control, actual OCR on columns,
+    table, static form and screenshot, plus AcroForm abstention, simulated
+    low-confidence scan and EXIF rotation. This is not a layout benchmark.
+  - [x] Conservative actual-repaint-box versus neighboring OCR ink check,
+    material OCR-ink overlap and same-baseline multi-cell ambiguity abstention;
+    whole-line unreadable fallback now abstains. No repaint box is cropped.
+  - [x] The rich PDF/PDF/TXT batch remains usable with a single-column Slack
+    transcript and labelled signature; a real-OCR screenshot replacement has
+    an outside-mask pixel oracle. The focused D05 suite passed 102 tests.
+  - [ ] General multi-column/table/form reading-order mapping, real OCR blur and
+    coverage qualification, and visual utility thresholds remain open. These
+    synthetic controls do not prove completeness or production fidelity.
 - [ ] **D06 — Graph provenance and adjudication.** Link an edge to exact
   page/line/span evidence, support reviewer accept/reject and identity
   merge/split, and flag conflicts. Exit: evidence navigation and graph
