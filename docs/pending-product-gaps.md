@@ -81,6 +81,14 @@ supplier data. `Blocked externally` is not the same as done.
 - [ ] **D08 — Accessible, scalable review UI.** Test keyboard, screen-reader,
   zoom, responsive layout and a larger batch; keep a navigable table fallback
   when a graph is too dense. Exit: automated checks plus a human walkthrough.
+  - [x] Keyboard focus movement, live announcements, visible focus states,
+    reduced-motion handling, responsive/zoom-oriented layout rules and the
+    dense-batch table threshold have automated coverage. Evidence:
+    [D08 review UI notes](d08-accessible-review-ui.md) and
+    `apps/web/tests/review-ui.test.mjs`.
+  - [ ] A human keyboard, screen-reader, 200–400% zoom and dense synthetic
+    batch walkthrough is still required. The prescribed evidence is in the
+    D08 review UI notes; no walkthrough is claimed yet.
 
 ## Detection and transformation research
 

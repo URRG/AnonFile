@@ -1,0 +1,39 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import ts from 'typescript'
+
+const navigationSource = readFileSync(new URL('../src/review-navigation.ts', import.meta.url), 'utf8')
+const navigationCompiled = ts.transpileModule(navigationSource, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText
+const { isDenseReviewGraph, moveReviewFocus } = await import(`data:text/javascript;base64,${Buffer.from(navigationCompiled).toString('base64')}`)
+const graphSource = readFileSync(new URL('../src/relationship-graph.tsx', import.meta.url), 'utf8')
+const graphCss = readFileSync(new URL('../src/relationship-graph.css', import.meta.url), 'utf8')
+
+test('graph node keyboard navigation wraps and supports Home and End', () => {
+  assert.equal(moveReviewFocus(0, 3, 'ArrowRight'), 1)
+  assert.equal(moveReviewFocus(2, 3, 'ArrowDown'), 0)
+  assert.equal(moveReviewFocus(0, 3, 'ArrowLeft'), 2)
+  assert.equal(moveReviewFocus(1, 3, 'ArrowUp'), 0)
+  assert.equal(moveReviewFocus(1, 3, 'Home'), 0)
+  assert.equal(moveReviewFocus(1, 3, 'End'), 2)
+  assert.equal(moveReviewFocus(0, 0, 'ArrowRight'), null)
+  assert.equal(moveReviewFocus(0, 3, 'Enter'), null)
+})
+
+test('larger relationship batches select the accessible table fallback', () => {
+  assert.equal(isDenseReviewGraph(24, 36), false)
+  assert.equal(isDenseReviewGraph(25, 1), true)
+  assert.equal(isDenseReviewGraph(1, 37), true)
+})
+
+test('review graph exposes accessible navigation, live updates, and evidence controls', () => {
+  for (const required of ['aria-live="polite"', 'aria-atomic="true"', 'relationship-map-instructions', 'moveReviewFocus', 'onKeyDown', 'aria-controls="relationship-table"', '<table className="relationship-fallback-table">', 'onInspectDocument(item.documentId, item)']) {
+    assert.match(graphSource, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  }
+})
+
+test('review graph preserves visible focus, touch-sized controls, responsive layout, and reduced-motion support', () => {
+  for (const required of ['min-height:44px', ':focus-visible', '@media (prefers-reduced-motion:reduce)', '@media(max-width:760px)', 'overflow:auto']) {
+    assert.match(graphCss, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  }
+})
