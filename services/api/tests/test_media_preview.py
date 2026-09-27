@@ -195,8 +195,8 @@ def test_ocr_geometry_rejects_one_overbroad_line_that_hides_adjacent_source_ink(
     assert hidden not in str(error.value)
 
 
-def test_ocr_geometry_rejects_underlined_gap_between_two_source_regions(monkeypatch):
-    """A one-pixel horizontal rule must not bridge separate ink components."""
+def test_ocr_geometry_rejects_two_pixel_rule_between_two_source_regions(monkeypatch):
+    """A two-pixel horizontal rule must not bridge separate ink components."""
     from types import SimpleNamespace
     from app import media_preview
 
@@ -205,15 +205,58 @@ def test_ocr_geometry_rejects_underlined_gap_between_two_source_regions(monkeypa
     image = Image.new("RGB", (260, 90), "white")
     draw = ImageDraw.Draw(image)
     # Compact blocks model two same-baseline source strings in an eight-pixel
-    # OCR box. A one-pixel rule spans their otherwise blank horizontal gap.
+    # OCR box. A two-pixel rule spans their otherwise blank horizontal gap.
     draw.rectangle((20, 35, 65, 40), fill="black")
     draw.rectangle((175, 35, 220, 40), fill="black")
-    draw.line((65, 42, 175, 42), fill="black", width=1)
-    box = [(15, 35), (225, 35), (225, 43), (15, 43)]
+    draw.line((68, 43, 172, 43), fill="black", width=2)
+    box = [(15, 35), (225, 35), (225, 45), (15, 45)]
+    monkeypatch.setattr(media_preview, "_engine", lambda: lambda _: SimpleNamespace(
+        txts=[source], boxes=[box], scores=[0.99]))
+
+    with pytest.raises(PayloadError, match="ambiguous rule-like source ink") as error:
+        _ocr_lines(image)
+    assert source not in str(error.value)
+    assert hidden not in str(error.value)
+
+
+def test_ocr_geometry_rejects_wide_box_with_material_separate_ink_regions(monkeypatch):
+    """A wide OCR box cannot weaken an 80-pixel source-region gap."""
+    from types import SimpleNamespace
+    from app import media_preview
+
+    source = "Maya"
+    hidden = "4932"
+    image = Image.new("RGB", (2500, 100), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((40, 40, 110, 58), fill="black")
+    draw.rectangle((191, 40, 261, 58), fill="black")
+    box = [(20, 30), (2420, 30), (2420, 65), (20, 65)]
     monkeypatch.setattr(media_preview, "_engine", lambda: lambda _: SimpleNamespace(
         txts=[source], boxes=[box], scores=[0.99]))
 
     with pytest.raises(PayloadError, match="separate source-ink regions") as error:
+        _ocr_lines(image)
+    assert source not in str(error.value)
+    assert hidden not in str(error.value)
+
+
+def test_ocr_geometry_rejects_two_pixel_vertical_rule_between_stacked_regions(monkeypatch):
+    """A two-pixel vertical rule must not bridge stacked source regions."""
+    from types import SimpleNamespace
+    from app import media_preview
+
+    source = "Maya"
+    hidden = "4932"
+    image = Image.new("RGB", (160, 180), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((55, 20, 100, 45), fill="black")
+    draw.rectangle((55, 115, 100, 140), fill="black")
+    draw.line((78, 50, 78, 110), fill="black", width=2)
+    box = [(45, 15), (110, 15), (110, 145), (45, 145)]
+    monkeypatch.setattr(media_preview, "_engine", lambda: lambda _: SimpleNamespace(
+        txts=[source], boxes=[box], scores=[0.99]))
+
+    with pytest.raises(PayloadError, match="ambiguous rule-like source ink") as error:
         _ocr_lines(image)
     assert source not in str(error.value)
     assert hidden not in str(error.value)
@@ -242,8 +285,8 @@ def test_ocr_geometry_rejects_one_overbroad_line_that_hides_stacked_source_ink(m
     assert hidden not in str(error.value)
 
 
-def test_ocr_geometry_intentionally_abstains_on_widely_tracked_single_line(monkeypatch):
-    """Wide tracking is an accepted false abstention, never a guessed repaint."""
+def test_ocr_geometry_accepts_widely_tracked_single_line_without_rule(monkeypatch):
+    """Tracking alone is not mistaken for an unrecognised second region."""
     from types import SimpleNamespace
     from app import media_preview
 
@@ -255,8 +298,7 @@ def test_ocr_geometry_intentionally_abstains_on_widely_tracked_single_line(monke
     monkeypatch.setattr(media_preview, "_engine", lambda: lambda _: SimpleNamespace(
         txts=["Maya"], boxes=[box], scores=[0.99]))
 
-    with pytest.raises(PayloadError, match="separate source-ink regions"):
-        _ocr_lines(image)
+    assert _ocr_lines(image)[0]["text"] == "Maya"
 
 
 def test_ocr_geometry_accepts_one_tight_line_with_ordinary_word_spacing(monkeypatch):
