@@ -11,8 +11,8 @@ def inputs():
                 {"id": "two", "annotations": [{"start": 0, "end": 3, "entity_type": "PERSON_NAME"}]}]
     return dict(documents=documents, formats={"one": "text", "two": "json"}, automatic=automatic,
                 reviewer_corrected=reviewed, abstentions={"two": "LOW_CONFIDENCE"},
-                graph_gold={("works_at", "p1", "o1")}, graph_automatic=set(),
-                graph_reviewer_corrected={("works_at", "p1", "o1")}, primary_engine="rapidocr")
+                graph_gold={("works_at", "E1", "organization_1")}, graph_automatic=set(),
+                graph_reviewer_corrected={("works_at", "E1", "organization_1")}, primary_engine="rapidocr")
 
 
 def test_scorecard_separates_automatic_reviewed_format_type_and_graph_results():
@@ -49,7 +49,38 @@ def test_invalid_document_coverage_or_abstention_fails_closed():
 
 
 def test_graph_container_type_and_bounds_fail_closed():
-    values = inputs(); values["graph_gold"] = [("works_at", "p1", "o1")]
+    values = inputs(); values["graph_gold"] = [("works_at", "E1", "organization_1")]
+    try:
+        scorecard(**values)
+    except ScorecardError as error:
+        assert str(error) == "Invalid D07 scorecard input."
+    else:
+        assert False
+
+
+def test_graph_relation_ontology_and_opaque_endpoint_ids_fail_closed():
+    for claim in [("Ada", "E1", "organization_1"), ("works_at", "Ada", "organization_1"),
+                  ("works_at", "E1", "Ada")]:
+        values = inputs(); values["graph_gold"] = {claim}
+        try:
+            scorecard(**values)
+        except ScorecardError as error:
+            assert str(error) == "Invalid D07 scorecard input."
+        else:
+            assert False
+
+
+def test_malformed_format_abstention_and_direct_gold_document_fail_closed():
+    for field, value in [("formats", {"one": [], "two": "json"}),
+                         ("abstentions", {"two": []})]:
+        values = inputs(); values[field] = value
+        try:
+            scorecard(**values)
+        except ScorecardError as error:
+            assert str(error) == "Invalid D07 scorecard input."
+        else:
+            assert False
+    values = inputs(); values["documents"] = (GoldDocument("one", "Ada", (Annotation(0, 9, "PERSON_NAME"),)),)
     try:
         scorecard(**values)
     except ScorecardError as error:

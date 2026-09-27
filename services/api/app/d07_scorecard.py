@@ -9,14 +9,25 @@ inside the evaluator and are absent from its result.
 from __future__ import annotations
 
 from collections import Counter
+import re
 from typing import Any
 
-from app.evaluation import GoldDocument, canonical_hash, evaluate, parse_predictions
+from app.evaluation import GoldDocument, canonical_hash, evaluate, parse_gold, parse_predictions
 
 VERSION = "d07-scorecard-v1"
 _FORMATS = frozenset({"text", "csv", "json", "jsonl", "pdf", "image"})
 _ABSTENTIONS = frozenset({"UNSUPPORTED_FORMAT", "LOW_CONFIDENCE", "NO_DEFENSIBLE_LOCATOR",
                           "INDEPENDENT_ENGINE_UNAVAILABLE", "UNTOUCHED_ARTIFACT_UNAVAILABLE"})
+_RELATION_TYPES = frozenset({"assistant_to", "assistant_for", "works_at", "client_of", "works_on", "assigned_to", "sent_to"})
+_PERSON_ID = re.compile(r"^E[1-9][0-9]{0,5}$")
+_ORGANIZATION_ID = re.compile(r"^organization_[1-9][0-9]{0,5}$")
+_PROJECT_ID = re.compile(r"^project_[1-9][0-9]{0,5}$")
+_RELATION_ENDPOINTS = {
+    "assistant_to": (_PERSON_ID, _PERSON_ID), "sent_to": (_PERSON_ID, _PERSON_ID),
+    "assistant_for": (_PERSON_ID, _ORGANIZATION_ID), "works_at": (_PERSON_ID, _ORGANIZATION_ID),
+    "client_of": (_PERSON_ID, _ORGANIZATION_ID), "works_on": (_PERSON_ID, _PROJECT_ID),
+    "assigned_to": (_PROJECT_ID, _PERSON_ID),
+}
 _MAX_GRAPH_CLAIMS = 10_000
 
 
@@ -31,7 +42,8 @@ def _reject() -> None:
 def _format_map(documents: tuple[GoldDocument, ...], formats: dict[str, str]) -> dict[str, str]:
     if not isinstance(formats, dict) or set(formats) != {document.id for document in documents}:
         _reject()
-    if any(not isinstance(identifier, str) or value not in _FORMATS for identifier, value in formats.items()):
+    if any(not isinstance(identifier, str) or not isinstance(value, str) or value not in _FORMATS
+           for identifier, value in formats.items()):
         _reject()
     return formats
 
@@ -46,7 +58,9 @@ def _slice(documents: tuple[GoldDocument, ...], predictions: dict[str, tuple[Any
 
 
 def _abstentions(documents: tuple[GoldDocument, ...], value: dict[str, str]) -> dict[str, Any]:
-    if not isinstance(value, dict) or any(key not in {doc.id for doc in documents} or reason not in _ABSTENTIONS
+    document_ids = {document.id for document in documents}
+    if not isinstance(value, dict) or any(not isinstance(key, str) or key not in document_ids
+                                          or not isinstance(reason, str) or reason not in _ABSTENTIONS
                                           for key, reason in value.items()):
         _reject()
     counts = Counter(value.values())
@@ -60,10 +74,16 @@ def _graph_metrics(gold: set[tuple[str, str, str]], predicted: set[tuple[str, st
     if (type(gold) is not set or type(predicted) is not set or len(gold) > _MAX_GRAPH_CLAIMS
             or len(predicted) > _MAX_GRAPH_CLAIMS
             or any(not isinstance(edge, tuple) or len(edge) != 3
-                   or any(not isinstance(value, str) or not value or len(value) > 256 for value in edge)
+                   or not isinstance(edge[0], str) or edge[0] not in _RELATION_TYPES
+                   or not isinstance(edge[1], str) or not isinstance(edge[2], str)
+                   or not _RELATION_ENDPOINTS[edge[0]][0].fullmatch(edge[1])
+                   or not _RELATION_ENDPOINTS[edge[0]][1].fullmatch(edge[2])
                    for edge in gold)
             or any(not isinstance(edge, tuple) or len(edge) != 3
-                   or any(not isinstance(value, str) or not value or len(value) > 256 for value in edge)
+                   or not isinstance(edge[0], str) or edge[0] not in _RELATION_TYPES
+                   or not isinstance(edge[1], str) or not isinstance(edge[2], str)
+                   or not _RELATION_ENDPOINTS[edge[0]][0].fullmatch(edge[1])
+                   or not _RELATION_ENDPOINTS[edge[0]][1].fullmatch(edge[2])
                    for edge in predicted)):
         _reject()
     labels = sorted({edge[0] for edge in gold | predicted})
@@ -89,6 +109,21 @@ def _final_validation(value: dict[str, Any] | None, primary_engine: str) -> dict
     return {"status": "ABSTAINED", "reason": "NO_EXECUTABLE_BOUND_INDEPENDENT_VALIDATOR"}
 
 
+def _validated_documents(value: Any) -> tuple[GoldDocument, ...]:
+    """Apply the evaluator's direct-input validation before scorecard parsing."""
+    try:
+        if type(value) is not tuple:
+            _reject()
+        return parse_gold([{
+            "id": document.id, "text": document.text,
+            "annotations": [vars(annotation) for annotation in document.annotations],
+            **({"group_id": document.group_id} if document.group_id is not None else {}),
+            **({"split": document.split} if document.split is not None else {}),
+        } for document in value])
+    except (AttributeError, TypeError, ValueError, RecursionError):
+        _reject()
+
+
 def scorecard(*, documents: tuple[GoldDocument, ...], formats: dict[str, str], automatic: list[dict[str, Any]],
               reviewer_corrected: list[dict[str, Any]], abstentions: dict[str, str],
               graph_gold: set[tuple[str, str, str]], graph_automatic: set[tuple[str, str, str]],
@@ -97,6 +132,7 @@ def scorecard(*, documents: tuple[GoldDocument, ...], formats: dict[str, str], a
     """Create a deterministic, aggregate-only synthetic D07 report."""
     if not isinstance(primary_engine, str) or not primary_engine:
         _reject()
+    documents = _validated_documents(documents)
     # Parsing here makes direct callers meet the same all-document contract.
     automatic_predictions = parse_predictions(automatic, documents)
     reviewer_predictions = parse_predictions(reviewer_corrected, documents)
