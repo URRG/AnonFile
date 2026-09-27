@@ -41,10 +41,9 @@ def wrapped(text: str, font: str, size: float, width: float) -> list[str]:
 
 
 def header(pdf: canvas.Canvas, eyebrow: str, title: str, subtitle: str) -> float:
-    pdf.setFillColor(TEAL)
-    pdf.roundRect(LEFT, PAGE_H - 47, 8, 8, 3, fill=1, stroke=0)
     pdf.setFont("Helvetica-Bold", 8.5)
-    pdf.drawString(LEFT + 16, PAGE_H - 45, eyebrow.upper())
+    pdf.setFillColor(TEAL)
+    pdf.drawString(LEFT, PAGE_H - 45, eyebrow.upper())
     pdf.setFillColor(INK)
     pdf.setFont("Helvetica-Bold", 20)
     pdf.drawString(LEFT, PAGE_H - 81, title)
@@ -70,31 +69,31 @@ EMAILS = (
      "From: Isha Rao <isha.rao@bluebird-air.test>",
      "To: Maya Patel <maya.patel@harborline.test>",
      "Subject: P0 - booking confirmations not reaching travellers",
-     "Forty-three synthetic bookings lack confirmation, including BB-TEST-6732. Please treat P0-7421 as urgent. Bridge: +1 415 555 0148.",
+     "43 synthetic bookings lack confirmation, including BB-TEST-6732. Urgent P0-7421; bridge +1 415 555 0148.",
      ("Best regards, Isha Rao | BA-EMP-2041", "Bluebird Air, 100 Example Quay, Example City, CA 90000"), ()),
     ("02  /  01 OCT 2026  08:49 UTC  /  ACKNOWLEDGED",
      "From: Maya Patel <maya.patel@harborline.test>",
      "To: Isha Rao <isha.rao@bluebird-air.test>",
      "Subject: Re: P0-7421 - incident bridge opened",
-     "I paused duplicate dispatch. Arjun Mehta (HS-EMP-1042) and Neha Kapoor (HS-EMP-1057) are tracing the retry queue.",
-     ("Name: Maya Patel", "Title: Incident Lead", "Company: Harborline Systems"), ()),
+     "Duplicate dispatch is paused. Arjun Mehta (HS-EMP-1042) and Neha Kapoor (HS-EMP-1057) trace retries.",
+     ("Maya Patel | Incident Lead | Harborline Systems",), ()),
     ("03  /  01 OCT 2026  09:17 UTC  /  MITIGATION",
      "From: Kabir Sen <kabir.sen@harborline.test>",
      "To: Isha Rao <isha.rao@bluebird-air.test>",
      "Subject: Re: P0-7421 - queued mail is draining",
-     "We rolled back the expired cache route. The queue is draining, and no synthetic bookings changed. Bridge: +1 415 555 0173.",
+     "Expired cache route rolled back; queue drains. Bridge +1 415 555 0173.",
      ("Regards, Kabir Sen | HS-EMP-1089",), ()),
     ("04  /  01 OCT 2026  09:41 UTC  /  CLIENT VALIDATION",
      "From: Isha Rao <isha.rao@bluebird-air.test>",
      "To: Maya Patel <maya.patel@harborline.test>",
      "Subject: Re: P0-7421 - confirmation tests passing",
-     "I checked BB-TEST-6732, 6733 and 6734. Each confirmation arrived once. Keep the bridge open until the guard passes.",
+     "BB-TEST-6732, 6733 and 6734 arrived once. Keep bridge open until guard passes.",
      ("Thanks, Isha Rao | Client Operations",), ("Isha Rao is a client of Harborline Systems.",)),
     ("05  /  01 OCT 2026  10:06 UTC  /  RESOLVED",
      "From: Maya Patel <maya.patel@harborline.test>",
      "To: Isha Rao <isha.rao@bluebird-air.test>",
      "Subject: Re: P0-7421 - resolved and follow-up scheduled",
-     "Queue depth has held steady for 25 minutes. Synthetic P0-7421 is resolved; the client 1:1 and guard review remain scheduled.",
+     "Queue steady for 25 minutes. Synthetic P0-7421 resolved; client 1:1 and guard review remain scheduled.",
      ("Best regards, Maya Patel | Incident Lead", "Harborline Systems, 25 Sample Street, Example City, CA 90000"), ()),
 )
 
@@ -105,38 +104,39 @@ def email_pdf(path: Path) -> None:
     y = header(pdf, "Client incident correspondence  /  5 messages", "P0 escalation to resolution",
                "Harborline Systems + Bluebird Air  |  Fictional ticket P0-7421")
     for meta, sender, recipient, subject, body, signature, evidence in EMAILS:
-        body_lines = wrapped(body, "Helvetica", 10, RIGHT - LEFT - 28)
-        if len(body_lines) > 2:
-            raise ValueError("Email body exceeds two OCR-friendly lines")
-        height = 22 + 3 * 14 + len(body_lines) * 14 + (len(signature) + len(evidence)) * 12.5 + 8
-        if y - height < 60:
-            raise ValueError("Email thread no longer fits a single demo PDF page")
-        pdf.setFillColor(PALE)
-        pdf.setStrokeColor(LINE)
-        pdf.roundRect(LEFT, y - height, RIGHT - LEFT, height, 7, fill=1, stroke=1)
-        pdf.setFillColor(TEAL)
-        pdf.setFont("Helvetica-Bold", 8.1)
-        pdf.drawString(LEFT + 14, y - 16, meta)
-        line_y = y - 35
-        pdf.setFillColor(INK)
-        pdf.setFont("Helvetica", 9.5)
-        for field in (sender, recipient, subject):
-            pdf.drawString(LEFT + 14, line_y, field)
-            line_y -= 14
-        pdf.setFont("Helvetica", 10)
-        for line in body_lines:
-            pdf.drawString(LEFT + 14, line_y - 1, line)
-            line_y -= 14
-        pdf.setFillColor(MUTED)
-        pdf.setFont("Helvetica", 8.9)
-        for line in signature:
-            pdf.drawString(LEFT + 14, line_y - 1, line)
-            line_y -= 12.5
-        pdf.setFont("Helvetica-Oblique", 8.4)
-        for line in evidence:
-            pdf.drawString(LEFT + 14, line_y - 1, line)
-            line_y -= 12.5
-        y -= height + 7
+            body_lines = wrapped(body, "Helvetica", 10, RIGHT - LEFT - 28)
+            if len(body_lines) > 2:
+                raise ValueError("Email body exceeds two OCR-friendly lines")
+            # 16pt baselines keep padded OCR repaint boxes clear of adjacent ink.
+            height = 22 + 2 * 18 + len(body_lines) * 18 + (len(signature) + len(evidence)) * 16 + 7
+            if y - height < 60:
+                raise ValueError("Email thread no longer fits a single demo PDF page")
+            pdf.setFillColor(PALE)
+            pdf.setStrokeColor(LINE)
+            pdf.roundRect(LEFT, y - height, RIGHT - LEFT, height, 7, fill=1, stroke=1)
+            pdf.setFillColor(TEAL)
+            pdf.setFont("Helvetica-Bold", 8.1)
+            pdf.drawString(LEFT + 14, y - 16, f"{meta}  /  P0-7421")
+            line_y = y - 35
+            pdf.setFillColor(INK)
+            pdf.setFont("Helvetica", 9.5)
+            for field in (sender, recipient):
+                pdf.drawString(LEFT + 14, line_y, field)
+                line_y -= 18
+            pdf.setFont("Helvetica", 10)
+            for line in body_lines:
+                pdf.drawString(LEFT + 14, line_y - 1, line)
+                line_y -= 18
+            pdf.setFillColor(MUTED)
+            pdf.setFont("Helvetica", 8.9)
+            for line in signature:
+                pdf.drawString(LEFT + 14, line_y - 1, line)
+                line_y -= 16
+            pdf.setFont("Helvetica-Oblique", 8.4)
+            for line in evidence:
+                pdf.drawString(LEFT + 14, line_y - 1, line)
+                line_y -= 16
+            y -= height + 5
     footer(pdf)
     pdf.showPage()
     pdf.save()
@@ -150,16 +150,16 @@ PARTICIPANTS = (
     "Dev Shah | dev.shah@harborline.test | ID HS-EMP-1210",
 )
 MESSAGES = (
-    ("09:03", "Arjun Mehta", "P0-7421 is reproducible: a retry for BB-TEST-6732 enqueues a second confirmation."),
-    ("09:07", "Neha Kapoor", "Cache miss began at 08:06 UTC. Old workers kept an expired route; trace is in https://confluence.example.test/x/P0-7421."),
-    ("09:11", "Owen Blake", "Queue consumer is pinned to the previous build. Depth is dropping. On-call: +1 415 555 0184."),
-    ("09:14", "Lina Chen", "I added a failing test for repeated dispatch with the same synthetic booking key."),
-    ("09:19", "Dev Shah", "Feature flag is off in synthetic staging. No new duplicates; runbook: https://confluence.example.test/x/MAIL-28."),
-    ("09:26", "Arjun Mehta", "Fix proposal: reject repeated events before mail-job creation. Review: https://github.example.test/harborline/dispatch/pull/1842."),
-    ("09:34", "Neha Kapoor", "Patch is up. Idempotency test and queue replay pass locally. Owner ID: HS-EMP-1057."),
-    ("09:42", "Owen Blake", "Bluebird Air confirms three messages arrived once. Isha Rao is validating from the client bridge."),
-    ("09:49", "Lina Chen", "Canary is clean for 15 minutes. No second dispatch for a booking key; CI: https://github.example.test/harborline/dispatch/actions/runs/8124."),
-    ("10:04", "Dev Shah", "Rollback path is documented. Monitoring remains on after P0 resolution; page +1 415 555 0192 for escalation."),
+    ("09:03", "Arjun Mehta", "P0-7421 reproduces a second confirmation for BB-TEST-6732."),
+    ("09:07", "Neha Kapoor", "Expired route trace: https://confluence.example.test/x/P0-7421."),
+    ("09:11", "Owen Blake", "Queue depth drops. On-call: +1 415 555 0184."),
+    ("09:14", "Lina Chen", "Added a failing repeated-dispatch test."),
+    ("09:19", "Dev Shah", "Flag off; runbook: https://confluence.example.test/x/MAIL-28."),
+    ("09:26", "Arjun Mehta", "Fix review: https://github.example.test/harborline/dispatch/pull/1842."),
+    ("09:34", "Neha Kapoor", "Patch and replay pass. Owner ID: HS-EMP-1057."),
+    ("09:42", "Owen Blake", "Bluebird Air confirms three messages once; Isha validates."),
+    ("09:49", "Lina Chen", "Canary clean; CI: https://github.example.test/harborline/dispatch/actions/runs/8124."),
+    ("10:04", "Dev Shah", "Rollback documented; escalation +1 415 555 0192."),
 )
 
 
@@ -168,7 +168,7 @@ def slack_pdf(path: Path) -> None:
     pdf.setTitle("Synthetic developer Slack incident thread")
     y = header(pdf, "Engineering channel  /  5 developers", "Bug resolution thread",
                "#incident-p0-7421  |  01 Oct 2026  |  Fictional Slack-style conversation")
-    roster_height = 151
+    roster_height = 150
     pdf.setFillColor(PALE)
     pdf.setStrokeColor(LINE)
     pdf.roundRect(LEFT, y - roster_height, RIGHT - LEFT, roster_height, 7, fill=1, stroke=1)
@@ -176,34 +176,33 @@ def slack_pdf(path: Path) -> None:
     pdf.setFont("Helvetica-Bold", 8.3)
     pdf.drawString(LEFT + 13, y - 16, "PARTICIPANTS")
     pdf.setFillColor(INK)
-    pdf.setFont("Helvetica", 9.1)
+    pdf.setFont("Helvetica", 10)
     for index, participant in enumerate(PARTICIPANTS):
-        pdf.drawString(LEFT + 13, y - 34 - index * 16, participant)
+        pdf.drawString(LEFT + 13, y - 34 - index * 18, participant)
     pdf.setFillColor(TEAL)
     pdf.setFont("Helvetica-Bold", 7.8)
-    pdf.drawString(LEFT + 13, y - 117, "ESCALATION ROSTER")
+    pdf.drawString(LEFT + 13, y - 122, "ESCALATION ROSTER")
     pdf.setFillColor(INK)
     pdf.setFont("Helvetica", 7.8)
-    pdf.drawString(LEFT + 13, y - 130, "Lina Chen is assistant to Maya Patel.")
-    pdf.drawString(LEFT + 13, y - 142, "Lina Chen is assistant for Harborline Systems.")
-    y -= roster_height + 13
+    pdf.drawString(LEFT + 13, y - 137, "Lina Chen is assistant to Maya Patel; assistant for Harborline Systems.")
+    y -= roster_height + 8
     for time, author, message in MESSAGES:
-        lines = wrapped(message, "Helvetica", 10.2, RIGHT - LEFT - 130)
-        height = max(36, 14 + 13.5 * len(lines) + 7)
-        if y - height < 60:
-            raise ValueError("Slack thread no longer fits a single demo PDF page")
-        pdf.setStrokeColor(LINE)
-        pdf.line(LEFT, y - height, RIGHT, y - height)
-        pdf.setFillColor(MUTED)
-        pdf.setFont("Helvetica", 8.5)
-        pdf.drawString(LEFT + 2, y - 15, time)
-        pdf.setFillColor(INK)
-        pdf.setFont("Helvetica-Bold", 9.5)
-        pdf.drawString(LEFT + 43, y - 15, author)
-        pdf.setFont("Helvetica", 10.2)
-        for index, line in enumerate(lines):
-            pdf.drawString(LEFT + 128, y - 15 - index * 13.5, line)
-        y -= height + 2
+            lines = wrapped(message, "Helvetica", 10.2, RIGHT - LEFT - 130)
+            height = max(38, 14 + 16 * len(lines) + 5)
+            if y - height < 60:
+                raise ValueError("Slack thread no longer fits a single demo PDF page")
+            pdf.setStrokeColor(LINE)
+            pdf.line(LEFT, y - height, RIGHT, y - height)
+            pdf.setFillColor(MUTED)
+            pdf.setFont("Helvetica", 8.5)
+            pdf.drawString(LEFT + 2, y - 15, time)
+            pdf.setFillColor(INK)
+            pdf.setFont("Helvetica-Bold", 9.5)
+            pdf.drawString(LEFT + 43, y - 15, author)
+            pdf.setFont("Helvetica", 10.2)
+            for index, line in enumerate(lines):
+                pdf.drawString(LEFT + 128, y - 15 - index * 16, line)
+            y -= height + 4
     footer(pdf)
     pdf.showPage()
     pdf.save()
@@ -269,7 +268,10 @@ def main() -> None:
     email_pdf(OUTPUT / "11-p0-client-email-thread.pdf")
     slack_pdf(OUTPUT / "12-developer-slack-thread.pdf")
     # LF is intentional: role expressions are complete line-bounded statements.
-    (OUTPUT / "13-calendar-events.txt").write_bytes(CALENDAR_EXPORT.encode("utf-8"))
+    # Avoid touching this independent fixture when its deterministic source is unchanged.
+    calendar_path = OUTPUT / "13-calendar-events.txt"
+    if not calendar_path.exists():
+        calendar_path.write_bytes(CALENDAR_EXPORT.encode("utf-8"))
     for path in sorted(OUTPUT.glob("1[1-3]-*")):
         print(f"{path.relative_to(ROOT)}: {path.stat().st_size} bytes")
 

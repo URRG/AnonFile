@@ -43,6 +43,66 @@ _EXPLICIT_ROLE_NAME = re.compile(
 )
 
 
+def _boxes_overlap(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> bool:
+    """Return whether two half-open pixel rectangles share any pixels."""
+    return left[0] < right[2] and left[2] > right[0] and left[1] < right[3] and left[3] > right[1]
+
+
+def _line_ink_box(line: dict[str, Any]) -> tuple[int, int, int, int]:
+    """Use the tight OCR extent when available, never a guessed text width."""
+    value = line.get("ink_box", line["box"])
+    return tuple(value)  # type: ignore[return-value]
+
+
+def _assert_unambiguous_ocr_layout(lines: list[dict[str, Any]]) -> None:
+    """Reject layouts for which top-to-bottom, then left-to-right is a guess.
+
+    This intentionally does not attempt table extraction or column ordering. OCR
+    may emit a plausible linear transcript for those layouts, but repainting a
+    whole line could then alter an adjacent cell or column.
+    """
+    for index, line in enumerate(lines):
+        left = _line_ink_box(line)
+        for other in lines[index + 1:]:
+            right = _line_ink_box(other)
+            overlap_width = min(left[2], right[2]) - max(left[0], right[0])
+            overlap_height = min(left[3], right[3]) - max(left[1], right[1])
+            # One or two pixels of overlap is common detector jitter at the
+            # boundary between stacked lines; a material overlap is not.
+            if overlap_width >= 3 and overlap_height >= 3:
+                raise PayloadError("OCR layout is ambiguous for conservative visual review.")
+            vertical_overlap = min(left[3], right[3]) - max(left[1], right[1])
+            # A material shared vertical band with separated horizontal boxes is
+            # a row of cells or concurrent columns, not a dependable text line.
+            horizontal_gap = max(left[0], right[0]) - min(left[2], right[2])
+            same_baseline = abs((left[1] + left[3]) - (right[1] + right[3])) <= max(
+                4, min(left[3] - left[1], right[3] - right[1]) // 2)
+            same_row_count = sum(
+                abs((left[1] + left[3]) - (candidate["ink_box"][1] + candidate["ink_box"][3])) <= max(
+                    4, min(left[3] - left[1], candidate["ink_box"][3] - candidate["ink_box"][1]) // 2)
+                for candidate in lines)
+            if (vertical_overlap >= max(3, min(left[3] - left[1], right[3] - right[1]) // 2)
+                    and horizontal_gap >= 8 and same_baseline
+                    and same_row_count == 2 and min(left[2] - left[0], right[2] - right[0]) >= 50):
+                raise PayloadError("OCR layout is ambiguous for conservative visual review.")
+
+
+def _assert_repaint_is_isolated(line: dict[str, Any], lines: list[dict[str, Any]]) -> None:
+    """Abstain when the actual erased rectangle could touch another OCR line.
+
+    This guard intentionally never shrinks a repaint box: a crop can leave
+    source pixels behind. Tight OCR boxes diagnose reading-order ambiguity,
+    but the renderer erases the padded box, so safety must use that full area.
+    """
+    repaint = tuple(line["box"])
+    for other in lines:
+        if other is line:
+            continue
+        ink_box = _line_ink_box(other)
+        if _boxes_overlap(repaint, ink_box):
+            raise PayloadError("A visual repaint region touches another OCR line; no visual candidate was made.")
+
+
 @lru_cache(maxsize=1)
 def _engine() -> Any:
     from rapidocr import RapidOCR
@@ -50,7 +110,7 @@ def _engine() -> Any:
     return RapidOCR()
 
 
-def _ocr_lines(image: Any, *, require_confidence: bool = True) -> list[dict[str, Any]]:
+def _ocr_lines(image: Any, *, require_confidence: bool = True, validate_layout: bool = True) -> list[dict[str, Any]]:
     import numpy as np
 
     with _OCR_LOCK:
@@ -73,12 +133,17 @@ def _ocr_lines(image: Any, *, require_confidence: bool = True) -> list[dict[str,
         if (len(xs) != 4 or any(not math.isfinite(number) for number in (*xs, *ys)) or
                 min(xs) < -2 or min(ys) < -2 or max(xs) > image.width + 2 or max(ys) > image.height + 2):
             raise PayloadError("The demo OCR geometry is invalid.")
+        ink_box = (max(0, math.floor(min(xs))), max(0, math.floor(min(ys))),
+                   min(image.width, math.ceil(max(xs))), min(image.height, math.ceil(max(ys))))
         bounds = (max(0, math.floor(min(xs)) - 5), max(0, math.floor(min(ys)) - 5),
                   min(image.width, math.ceil(max(xs)) + 5), min(image.height, math.ceil(max(ys)) + 5))
-        if bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
+        if ink_box[2] <= ink_box[0] or ink_box[3] <= ink_box[1] or bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
             raise PayloadError("The demo OCR geometry is invalid.")
-        lines.append({"text": text, "box": bounds, "confidence": round(score, 4)})
-    return sorted(lines, key=lambda line: (line["box"][1], line["box"][0]))
+        lines.append({"text": text, "box": bounds, "ink_box": ink_box, "confidence": round(score, 4)})
+    lines = sorted(lines, key=lambda line: (line["ink_box"][1], line["ink_box"][0]))
+    if validate_layout:
+        _assert_unambiguous_ocr_layout(lines)
+    return lines
 
 
 def _image_pages(raw: bytes, extension: str) -> list[Any]:
@@ -293,6 +358,7 @@ def render_candidate(pages: list[dict[str, Any]], matches: list[dict[str, Any]],
             applied = [match for match in line_matches if match["applied"]]
             if not applied:
                 continue
+            _assert_repaint_is_isolated(line, page["lines"])
             parts = []
             cursor = line["start"]
             for match in applied:
@@ -301,7 +367,12 @@ def render_candidate(pages: list[dict[str, Any]], matches: list[dict[str, Any]],
                 cursor = match["end"]
                 page_sources.add(match["source"])
             parts.append(line["text"][cursor - line["start"]:])
-            fallback_lines += _draw_line(candidate, line["box"], "".join(parts))
+            fallback = _draw_line(candidate, line["box"], "".join(parts))
+            if fallback:
+                # A solid mark avoids corruption, but it is not a readable
+                # replacement and must not be presented as a candidate.
+                raise PayloadError("A replacement cannot fit its OCR line; no visual candidate was made.")
+            fallback_lines += fallback
         # Reviewer coordinates are opaque visual corrections.  They are applied
         # after OCR-line substitutions, never produce text/entity matches, and
         # therefore cannot inflate text scoring or alter candidate_text.
@@ -315,7 +386,9 @@ def render_candidate(pages: list[dict[str, Any]], matches: list[dict[str, Any]],
         # itself lower candidate OCR confidence across platforms; it does not
         # restore the original pixels. Count that uncertainty separately, and
         # never present this same-engine recheck as a safety certificate.
-        candidate_lines = _ocr_lines(candidate, require_confidence=False)
+        # This OCR pass only detects residual source strings; it does not
+        # drive a repaint or claim a reading order for the candidate.
+        candidate_lines = _ocr_lines(candidate, require_confidence=False, validate_layout=False)
         candidate_low_confidence_lines += sum(line["confidence"] < 0.60 for line in candidate_lines)
         candidate_ocr = "\n".join(line["text"] for line in candidate_lines)
         for source in page_sources:

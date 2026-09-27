@@ -627,7 +627,7 @@ export async function inspectSyntheticBatch(request: { apiBase: string; token: s
       } catch { throw new DemoInspectionFailure('Cannot reach the synthetic batch service. No result was produced.') }
       if (!response.ok) {
         const messages: Record<number, string> = { 401: 'Authentication required.', 403: 'Synthetic batch mode is not enabled or permitted.',
-          413: 'The batch exceeds the service limit.', 422: 'A file or correction is invalid. Check media size, OCR readability, format, and alias length.', 503: 'Synthetic batch mode is unavailable.' }
+          413: 'The batch exceeds the service limit.', 422: 'A file or correction is invalid. Check media size, OCR readability, layout, format, and alias length.', 503: 'Synthetic batch mode is unavailable.' }
         throw new DemoInspectionFailure(messages[response.status] || 'The synthetic batch request failed.')
       }
       try { const payload = await response.json(); await verifyCoordinateDigestBindings(payload, expectedSourceHashes, coordinateCorrections); return batchInspection(payload, request.files, reference || null,

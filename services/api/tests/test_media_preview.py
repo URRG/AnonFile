@@ -8,7 +8,7 @@ from pypdf import PdfReader
 import pytest
 
 from app.contracts import PayloadError
-from app.media_preview import _image_pdf, _verify_pdf_text_layer, render_candidate
+from app.media_preview import _image_pdf, _ocr_lines, _verify_pdf_text_layer, render_candidate
 
 
 def test_raster_pdf_has_only_new_image_content_and_no_extracted_text():
@@ -60,6 +60,63 @@ def test_candidate_low_confidence_is_reported_without_weakening_input_ocr(monkey
     preview = render_candidate([page], [match], "image")
     assert preview["candidate_low_confidence_lines"] == 1
     assert preview["self_ocr_residual_sources"] == 0
+
+
+def test_ocr_geometry_accepts_unambiguous_single_column(monkeypatch):
+    from types import SimpleNamespace
+    from app import media_preview
+
+    monkeypatch.setattr(media_preview, "_engine", lambda: lambda _: SimpleNamespace(
+        txts=["first confidential line", "second confidential line", "third confidential line"],
+        boxes=[[(20, 10), (220, 10), (220, 25), (20, 25)],
+               [(20, 45), (220, 45), (220, 60), (20, 60)],
+               [(20, 80), (220, 80), (220, 95), (20, 95)]],
+        scores=[0.99, 0.99, 0.99]))
+
+    lines = _ocr_lines(Image.new("RGB", (320, 180), "white"))
+    assert [line["text"] for line in lines] == ["first confidential line", "second confidential line", "third confidential line"]
+
+
+@pytest.mark.parametrize("boxes", [
+    # Adjacent cells / two columns share a vertical band. Their OCR order is
+    # not proof of the intended reading order.
+    [[(10, 20), (100, 20), (100, 40), (10, 40)],
+     [(160, 20), (280, 20), (280, 40), (160, 40)]],
+    # OCR boxes that physically overlap cannot be safely repainted separately.
+    [[(10, 20), (180, 20), (180, 45), (10, 45)],
+     [(120, 35), (280, 35), (280, 60), (120, 60)]],
+])
+def test_ocr_geometry_abstains_on_ambiguous_layout_without_source_leak(monkeypatch, boxes):
+    from types import SimpleNamespace
+    from app import media_preview
+
+    secret = "Maya Patel private value"
+    monkeypatch.setattr(media_preview, "_engine", lambda: lambda _: SimpleNamespace(
+        txts=[secret, "ordinary adjacent value"], boxes=boxes, scores=[0.99, 0.99]))
+
+    with pytest.raises(PayloadError, match="OCR layout is ambiguous") as error:
+        _ocr_lines(Image.new("RGB", (320, 180), "white"))
+    assert secret not in str(error.value)
+
+
+def test_render_candidate_abstains_when_repaint_touches_unaffected_neighbor(monkeypatch):
+    from app import media_preview
+
+    monkeypatch.setattr(media_preview, "_ocr_lines", lambda _, **kwargs: [])
+    image = Image.new("RGB", (320, 180), "white")
+    secret = "Maya Patel"
+    page = {"number": 1, "image": image, "lines": [
+        {"text": secret, "box": (10, 10, 200, 40), "ink_box": (15, 15, 195, 35), "start": 0, "end": len(secret)},
+        # Tight OCR boxes do not overlap: only the actual padded repaint would
+        # touch the neighbour. The guard must inspect that erased rectangle.
+        {"text": "unaffected neighbour", "box": (10, 42, 200, 65), "ink_box": (15, 38, 195, 60),
+         "start": len(secret) + 1, "end": len(secret) + 20},
+    ]}
+    match = {"start": 0, "end": len(secret), "source": secret, "replacement": "John Singh", "applied": True}
+
+    with pytest.raises(PayloadError, match="visual repaint region touches") as error:
+        render_candidate([page], [match], "image")
+    assert secret not in str(error.value)
 
 
 def test_pdf_text_layer_check_requires_every_sensitive_occurrence():

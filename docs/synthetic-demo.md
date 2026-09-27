@@ -110,6 +110,14 @@ This is a visual *review candidate*, not safe redaction certification. OCR can
 miss or misread visible sensitive content; no detection outside recognized
 lines is assured. The candidate is rechecked only by the same OCR engine, so
 zero retained *detected source values* is not independent assurance.
+Materially overlapping OCR ink, padded repaint regions that touch neighboring
+OCR ink, some isolated two-cell/column layouts, and a
+replacement that cannot fit its line cause an abstention instead of a guessed
+reading order or an unreadable whole-line mark. This is deliberately partial:
+larger tables, forms, screenshots and multi-column reading order are not
+qualified, and close line padding can still affect nearby content. Inspect
+the original and candidate at native pixels before using even synthetic
+review copies; see the [fictional layout corpus](media-layout-corpus.md).
 Input OCR lines below 0.60 confidence reject the batch. A lower-confidence
 candidate OCR line is counted and shown for review: a replacement can change
 recognizer confidence without restoring source pixels, but that recheck cannot
