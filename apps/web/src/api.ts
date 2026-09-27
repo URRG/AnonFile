@@ -114,6 +114,7 @@ export type BatchMatch = { start: number; end: number; source: string; entityId:
 export type BatchMediaPage = { number: number; width: number; height: number; sourcePngBase64: string;
   candidatePngBase64: string; candidatePngSha256: string; ocrLines: number }
 export type BatchMediaPreview = { pages: BatchMediaPage[]; fallbackLines: number; selfOcrResidualSources: number;
+  candidateLowConfidenceLines: number;
   pdfRasterEvidence: { sha256: string; bytes: number; pages: number; sourceObjectsCopied: false } | null;
   candidatePdfBase64: string | null }
 export type BatchDocument = { id: string; name: string; kind: 'text' | 'csv' | 'json' | 'jsonl' | 'pdf' | 'image';
@@ -334,7 +335,7 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
       const media = raw.media_preview
       if (raw.preview_fidelity !== 'raster_ocr_review' || !object(media) || !Array.isArray(media.pages) ||
           media.pages.length < 1 || media.pages.length > 2 || !safeCount(media.fallback_lines) ||
-          !safeCount(media.self_ocr_residual_sources)) batchInvalid()
+          !safeCount(media.self_ocr_residual_sources) || !safeCount(media.candidate_low_confidence_lines)) batchInvalid()
       const pages: BatchMediaPage[] = media.pages.map((page, pageIndex) => {
         if (!object(page) || page.number !== pageIndex + 1 || !safeCount(page.width) || !safeCount(page.height) ||
             (page.width as number) < 16 || (page.height as number) < 16 ||
@@ -362,7 +363,8 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
         candidatePdfBase64 = media.candidate_pdf_base64 as string
       } else if (media.pdf_raster_evidence !== null || media.candidate_pdf_base64 !== null) batchInvalid()
       mediaPreview = { pages, fallbackLines: media.fallback_lines as number,
-        selfOcrResidualSources: media.self_ocr_residual_sources as number, pdfRasterEvidence, candidatePdfBase64 }
+        selfOcrResidualSources: media.self_ocr_residual_sources as number,
+        candidateLowConfidenceLines: media.candidate_low_confidence_lines as number, pdfRasterEvidence, candidatePdfBase64 }
     } else if (raw.media_preview !== undefined || raw.preview_fidelity !== 'source_text') batchInvalid()
     return { id: raw.id as string, name: raw.name as string, kind: raw.kind as BatchDocument['kind'], text: raw.text as string,
       candidateText: raw.candidate_text as string, sizeBytes: raw.size_bytes as number,

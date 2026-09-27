@@ -89,6 +89,10 @@ This is a visual *review candidate*, not safe redaction certification. OCR can
 miss or misread visible sensitive content; no detection outside recognized
 lines is assured. The candidate is rechecked only by the same OCR engine, so
 zero retained *detected source values* is not independent assurance. Names
+Input OCR lines below 0.60 confidence reject the batch. A lower-confidence
+candidate OCR line is counted and shown for review: a replacement can change
+recognizer confidence without restoring source pixels, but that recheck cannot
+establish the absence of other sensitive content. Names
 are replaced with same-length, readable name pseudonyms. Unsupported name
 shapes fail closed instead of turning into `Axxxxx`-style tokens. Emails linked
 by explicit mail headers, one unambiguous structured record, or a Slack-style

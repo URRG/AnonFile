@@ -982,6 +982,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
     media_documents = [doc for doc in documents if "media_preview" in doc]
     visual_residuals = sum(doc["media_preview"]["self_ocr_residual_sources"] for doc in media_documents)
     visual_fallbacks = sum(doc["media_preview"]["fallback_lines"] for doc in media_documents)
+    candidate_low_confidence = sum(doc["media_preview"]["candidate_low_confidence_lines"] for doc in media_documents)
     if any(entity["excluded"] and not entity["mentions"] for entity in entities):
         raise PayloadError("A reviewer exclusion must refer to a detected mention.")
     if any(not entities_by_id[id_by_key[(item["kind"], item["value"].casefold())]]["mentions"]
@@ -1013,7 +1014,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
                 {"name": "Residual known-rule scan", "status": "REVIEW" if residual or exclusions else "PASS",
                  "detail": f"{residual} bounded-rule matches occur in candidate text, including expected email- or PAN-shaped pseudonyms. This pattern count is not the number of retained source values; zero does not prove anonymity."},
                 {"name": "Raster media and OCR review", "status": "REVIEW" if media_documents else "NOT_TESTED",
-                 "detail": f"{len(media_documents)} media files were rasterized and OCR-reviewed; {visual_residuals} source values remain under the same OCR engine and {visual_fallbacks} lines needed solid-redaction fallback. This is not independent visual validation or release approval."
+                 "detail": f"{len(media_documents)} media files were rasterized and OCR-reviewed; {visual_residuals} source values remain under the same OCR engine, {visual_fallbacks} lines needed solid-redaction fallback, and {candidate_low_confidence} candidate OCR lines were below 0.60 confidence. Low-confidence candidate OCR cannot establish absence of source content. This is not independent visual validation or release approval."
                  if media_documents else "No PDF/image was processed in this batch."},
                 {"name": "Reference-label agreement", "status": "REVIEW" if annotation_score else "NOT_MEASURED",
                  "detail": "Exact-span counts compare the reviewed candidate with supplied synthetic labels; they are not an independent model benchmark."

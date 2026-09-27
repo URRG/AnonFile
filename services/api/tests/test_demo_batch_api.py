@@ -489,7 +489,7 @@ def test_pdf_text_layer_sensitive_value_missing_from_ocr_rejects_candidate(demo_
     canvas = reportlab.Canvas(stream)
     canvas.drawString(72, 720, "Contact riya@example.test")
     canvas.save()
-    monkeypatch.setattr(media_preview, "_ocr_lines", lambda _: [
+    monkeypatch.setattr(media_preview, "_ocr_lines", lambda _, **kwargs: [
         {"text": "Contact", "box": (20, 20, 100, 50), "confidence": 1.0}])
     request = payload()
     request["files"][0] = file("email", "thread.pdf", stream.getvalue())

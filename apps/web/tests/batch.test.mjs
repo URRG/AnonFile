@@ -143,7 +143,7 @@ test('batch client binds raster image previews to staged media and PNG dimension
   response.documents[1].media_preview = { pages: [{ number: 1, width: 16, height: 16,
     source_png_base64: png, candidate_png_base64: png,
     candidate_png_sha256: createHash('sha256').update(Buffer.from(png, 'base64')).digest('hex'), ocr_lines: 1 }], fallback_lines: 0,
-    self_ocr_residual_sources: 0, pdf_raster_evidence: null, candidate_pdf_base64: null }
+    self_ocr_residual_sources: 0, candidate_low_confidence_lines: 0, pdf_raster_evidence: null, candidate_pdf_base64: null }
   const mediaRequest = { ...request, files: [files[0], { ...files[1], name: 'b.png' }] }
   t.mock.method(globalThis, 'fetch', async () => Response.json(response))
   const result = await inspectSyntheticBatch(mediaRequest)
@@ -188,7 +188,7 @@ test('batch client requires bounded candidate PDF bytes matching raster evidence
   response.documents[1].media_preview = { pages: [{ number: 1, width: 16, height: 16,
     source_png_base64: png, candidate_png_base64: png,
     candidate_png_sha256: createHash('sha256').update(Buffer.from(png, 'base64')).digest('hex'), ocr_lines: 1 }], fallback_lines: 0,
-    self_ocr_residual_sources: 0, pdf_raster_evidence: { sha256: '0'.repeat(64),
+    self_ocr_residual_sources: 0, candidate_low_confidence_lines: 0, pdf_raster_evidence: { sha256: '0'.repeat(64),
       bytes: candidate.length, pages: 1, source_objects_copied: false },
     candidate_pdf_base64: candidate.toString('base64') }
   const mediaRequest = { ...request, files: [files[0], { ...files[1], name: 'b.pdf' }] }
