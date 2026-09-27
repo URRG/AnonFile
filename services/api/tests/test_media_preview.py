@@ -4,6 +4,7 @@ import hashlib
 from io import BytesIO
 
 from PIL import Image
+from PIL import ImageDraw, ImageFilter, ImageFont
 from pypdf import PdfReader
 import pytest
 
@@ -48,6 +49,7 @@ def test_candidate_low_confidence_is_reported_without_weakening_input_ocr(monkey
     from app import media_preview
 
     image = Image.new("RGB", (320, 180), "white")
+    ImageDraw.Draw(image).text((10, 10), "John Singh", fill="black")
     monkeypatch.setattr(media_preview, "_engine", lambda: lambda _: SimpleNamespace(
         txts=["John Singh"], boxes=[[(10, 10), (120, 10), (120, 35), (10, 35)]], scores=[0.55]))
     with pytest.raises(PayloadError, match="confidence is too low"):
@@ -73,8 +75,72 @@ def test_ocr_geometry_accepts_unambiguous_single_column(monkeypatch):
                [(20, 80), (220, 80), (220, 95), (20, 95)]],
         scores=[0.99, 0.99, 0.99]))
 
-    lines = _ocr_lines(Image.new("RGB", (320, 180), "white"))
+    image = Image.new("RGB", (320, 180), "white")
+    ImageDraw.Draw(image).text((20, 10), "first confidential line", fill="black")
+    ImageDraw.Draw(image).text((20, 45), "second confidential line", fill="black")
+    ImageDraw.Draw(image).text((20, 80), "third confidential line", fill="black")
+    lines = _ocr_lines(image)
     assert [line["text"] for line in lines] == ["first confidential line", "second confidential line", "third confidential line"]
+
+
+def test_ocr_line_without_measurable_raster_edge_abstains_on_catastrophic_blur(monkeypatch):
+    from types import SimpleNamespace
+    from app import media_preview
+
+    image = Image.new("RGB", (320, 120), "white")
+    font = ImageFont.load_default()
+    ImageDraw.Draw(image).text((20, 35), "Maya Patel", font=font, fill="black")
+    box = [(20, 30), (120, 30), (120, 55), (20, 55)]
+    monkeypatch.setattr(media_preview, "_engine", lambda: lambda _: SimpleNamespace(
+        txts=["Maya Patel"], boxes=[box], scores=[0.99]))
+    assert _ocr_lines(image)[0]["text"] == "Maya Patel"
+    with pytest.raises(PayloadError, match="lacks measurable source-raster edge detail") as error:
+        _ocr_lines(image.filter(ImageFilter.GaussianBlur(radius=12)))
+    assert "Maya Patel" not in str(error.value)
+
+
+def test_ocr_edge_guard_converts_the_source_once_for_many_claimed_lines(monkeypatch):
+    from types import SimpleNamespace
+    from app import media_preview
+
+    image = Image.new("RGB", (320, 280), "white")
+    texts = [f"fictional line {index}" for index in range(5)]
+    boxes = []
+    draw = ImageDraw.Draw(image)
+    for index, text in enumerate(texts):
+        y = 10 + index * 50
+        draw.text((20, y), text, fill="black")
+        boxes.append([(20, y), (220, y), (220, y + 25), (20, y + 25)])
+    calls = 0
+    original_convert = image.convert
+
+    def count_grayscale_conversion(mode, *args, **kwargs):
+        nonlocal calls
+        if mode == "L":
+            calls += 1
+        return original_convert(mode, *args, **kwargs)
+
+    monkeypatch.setattr(image, "convert", count_grayscale_conversion)
+    monkeypatch.setattr(media_preview, "_engine", lambda: lambda _: SimpleNamespace(
+        txts=texts, boxes=boxes, scores=[0.99] * len(texts)))
+    assert [line["text"] for line in _ocr_lines(image)] == texts
+    assert calls == 1
+
+
+def test_ocr_edge_guard_does_not_certify_text_from_a_graphic_edge(monkeypatch):
+    """A visible rule satisfies this narrow raster sanity check, not OCR proof."""
+    from types import SimpleNamespace
+    from app import media_preview
+
+    image = Image.new("RGB", (320, 120), "white")
+    ImageDraw.Draw(image).rectangle((25, 35, 115, 50), fill="black")
+    box = [(15, 25), (125, 25), (125, 60), (15, 60)]
+    monkeypatch.setattr(media_preview, "_engine", lambda: lambda _: SimpleNamespace(
+        txts=["fictional OCR claim"], boxes=[box], scores=[0.99]))
+    # A graphic edge is intentionally accepted here: the guard is only a
+    # catastrophic-flat-raster rejection and must not be presented as text,
+    # OCR-coverage, or semantic-source validation.
+    assert _ocr_lines(image)[0]["text"] == "fictional OCR claim"
 
 
 @pytest.mark.parametrize("boxes", [

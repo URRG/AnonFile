@@ -30,6 +30,10 @@ MAX_OCR_CHARS = 30_000
 MAX_PNG_BYTES = 2_500_000
 MAX_CANDIDATE_PDF_BYTES = 10_000_000
 PDF_SCALE = 1.7
+# A claimed OCR line with no pixel transition at all is not defensible source
+# geometry. This deliberately detects only catastrophic blur/flat raster data;
+# it is not a readability, language, or OCR-coverage threshold.
+MIN_OCR_LINE_EDGE_DELTA = 12
 _OCR_LOCK = Lock()
 _PDFIUM_LOCK = Lock()  # PDFium is not thread-safe, even across separate documents.
 _EXPLICIT_HEADER_NAME = re.compile(
@@ -130,6 +134,29 @@ def _assert_repaint_is_isolated(line: dict[str, Any], lines: list[dict[str, Any]
             raise PayloadError("A visual repaint region touches another OCR line; no visual candidate was made.")
 
 
+def _assert_ocr_line_has_raster_edge(source_gray: Any, line: dict[str, Any]) -> None:
+    """Reject a source OCR line whose reported ink box is visually flat.
+
+    OCR confidence is model output, not evidence that the source raster still
+    contains a locatable text edge.  This small, fail-closed check validates
+    only the latter for the already reported ink box. It cannot measure OCR
+    completeness or certify readability.
+    """
+    import numpy as np
+
+    x0, y0, x1, y1 = _line_ink_box(line)
+    line_gray = source_gray[y0:y1, x0:x1]
+    if line_gray.shape[0] < 2 or line_gray.shape[1] < 2:
+        raise PayloadError("OCR line lacks measurable source-raster edge detail; inspect the source manually.")
+    horizontal = np.abs(np.diff(line_gray, axis=1))
+    vertical = np.abs(np.diff(line_gray, axis=0))
+    horizontal_max = int(horizontal.max()) if horizontal.size else 0
+    vertical_max = int(vertical.max()) if vertical.size else 0
+    edge = max(horizontal_max, vertical_max)
+    if edge < MIN_OCR_LINE_EDGE_DELTA:
+        raise PayloadError("OCR line lacks measurable source-raster edge detail; inspect the source manually.")
+
+
 @lru_cache(maxsize=1)
 def _engine() -> Any:
     from rapidocr import RapidOCR
@@ -170,6 +197,12 @@ def _ocr_lines(image: Any, *, require_confidence: bool = True, validate_layout: 
     lines = sorted(lines, key=lambda line: (line["ink_box"][1], line["ink_box"][0]))
     if validate_layout:
         _assert_unambiguous_ocr_layout(lines)
+        # A bounded full-page grayscale buffer is made once, then each guard
+        # examines a small view of that buffer.  Do not reconvert the page per
+        # OCR line: valid pages may contain up to MAX_OCR_LINES claims.
+        source_gray = np.asarray(image.convert("L"), dtype=np.int16)
+        for line in lines:
+            _assert_ocr_line_has_raster_edge(source_gray, line)
     return lines
 
 
