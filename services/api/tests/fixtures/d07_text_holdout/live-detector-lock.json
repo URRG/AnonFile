@@ -1,0 +1,6 @@
+{
+  "schema_version": "d07-live-current-detector-text-holdout-v1",
+  "fixture_id": "synthetic-text-only-independent-annotations-v1",
+  "gold_sha256": "9ec2e92904b187112637ff65427f92694bed99790cd667233dcc20c8a8453f77",
+  "annotation_protocol_sha256": "cd42a908661a4ad7d7507c591f6703bc00f887c02e8769d35f50454a88cad8f7"
+}
