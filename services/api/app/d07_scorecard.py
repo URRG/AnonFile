@@ -29,6 +29,8 @@ _RELATION_ENDPOINTS = {
     "assigned_to": (_PROJECT_ID, _PERSON_ID),
 }
 _MAX_GRAPH_CLAIMS = 10_000
+_LOCATOR_ID = re.compile(r"^L[1-9][0-9]{0,5}$")
+_IDENTITY_DISPOSITIONS = frozenset({"MERGE", "SPLIT"})
 
 
 class ScorecardError(ValueError):
@@ -165,14 +167,158 @@ def _graph_metrics(gold: set[tuple[str, str, str]] | None,
                    for edge in predicted)):
         _reject()
     labels = sorted({edge[0] for edge in gold | predicted})
-    def counts(expected: set[tuple[str, str, str]], actual: set[tuple[str, str, str]]) -> dict[str, int]:
-        return {"true_positives": len(expected & actual), "false_positives": len(actual - expected),
-                "false_negatives": len(expected - actual)}
-    return {"status": "SCORED", "exact": counts(gold, predicted),
-            "per_type": {label: counts({edge for edge in gold if edge[0] == label},
+    return {"status": "SCORED", "exact": _counts(gold, predicted),
+            "precision_recall": {"corpus": _pr_counts(gold, predicted),
+                                  "per_type": {label: _pr_counts({edge for edge in gold if edge[0] == label},
+                                                                   {edge for edge in predicted if edge[0] == label})
+                                               for label in labels}},
+            "per_type": {label: _counts({edge for edge in gold if edge[0] == label},
                                          {edge for edge in predicted if edge[0] == label}) for label in labels},
             "limitations": ["Exact graph claims measure supplied identity keys, not real-world identity resolution.",
-                            "Evidence-location agreement and contradictory-claim adjudication are not scored by this schema."]}
+                            "Contradictory-claim adjudication is not scored by this schema."]}
+
+
+def _counts(expected: set[Any], actual: set[Any]) -> dict[str, int]:
+    return {"true_positives": len(expected & actual), "false_positives": len(actual - expected),
+            "false_negatives": len(expected - actual)}
+
+
+def _pr_counts(expected: set[Any], actual: set[Any]) -> dict[str, int | float | None]:
+    counts = _counts(expected, actual)
+    predicted_count = counts["true_positives"] + counts["false_positives"]
+    gold_count = counts["true_positives"] + counts["false_negatives"]
+    return {**counts, "precision": counts["true_positives"] / predicted_count if predicted_count else None,
+            "recall": counts["true_positives"] / gold_count if gold_count else None}
+
+
+def _evidence_locator_metrics(gold: set[tuple[str, str, str, str]] | None,
+                              predicted: set[tuple[str, str, str, str]] | None) -> dict[str, Any]:
+    """Score opaque fictional locator bindings, never source locations or IDs."""
+    if gold is None and predicted is None:
+        return {"status": "ABSTAINED", "reason": "NO_COMPLETE_EVIDENCE_LOCATOR_LABELS"}
+    if gold is None or predicted is None or type(gold) is not set or type(predicted) is not set:
+        _reject()
+    def valid(binding: Any) -> bool:
+        return (isinstance(binding, tuple) and len(binding) == 4 and isinstance(binding[3], str)
+                and _LOCATOR_ID.fullmatch(binding[3]) is not None
+                and _valid_edge(binding[:3]))
+    if len(gold) > _MAX_GRAPH_CLAIMS or len(predicted) > _MAX_GRAPH_CLAIMS or not all(valid(item) for item in gold | predicted):
+        _reject()
+    types = sorted({item[0] for item in gold | predicted})
+    return {"status": "SCORED", "precision_recall": {
+        "corpus": _pr_counts(gold, predicted),
+        "per_type": {kind: _pr_counts({item for item in gold if item[0] == kind},
+                                        {item for item in predicted if item[0] == kind}) for kind in types},
+    }}
+
+
+def _locator_gold_matches_graph(locator_gold: set[tuple[str, str, str, str]] | None,
+                                graph_gold: set[tuple[str, str, str]] | None) -> None:
+    """Keep locator gold distinct from, and complete for, relation gold."""
+    if locator_gold is None:
+        return
+    if type(locator_gold) is not set or type(graph_gold) is not set:
+        _reject()
+    try:
+        bases = {binding[:3] for binding in locator_gold}
+    except (TypeError, AttributeError):
+        _reject()
+    if bases != graph_gold:
+        _reject()
+
+
+def _locator_predictions_match_graph(locator_predictions: set[tuple[str, str, str, str]] | None,
+                                     graph_predictions: set[tuple[str, str, str]] | None) -> None:
+    """A predicted locator may only bind a relation the same output predicted."""
+    if locator_predictions is None:
+        return
+    if type(locator_predictions) is not set or type(graph_predictions) is not set:
+        _reject()
+    try:
+        bases = {binding[:3] for binding in locator_predictions}
+    except (TypeError, AttributeError):
+        _reject()
+    if not bases <= graph_predictions:
+        _reject()
+
+
+def _valid_edge(edge: Any) -> bool:
+    return (isinstance(edge, tuple) and len(edge) == 3 and isinstance(edge[0], str) and edge[0] in _RELATION_TYPES
+            and isinstance(edge[1], str) and isinstance(edge[2], str)
+            and _RELATION_ENDPOINTS[edge[0]][0].fullmatch(edge[1]) is not None
+            and _RELATION_ENDPOINTS[edge[0]][1].fullmatch(edge[2]) is not None)
+
+
+def _identity_metrics(gold: set[tuple[str, str, str]] | None,
+                      predicted: set[tuple[str, str, str]] | None) -> dict[str, Any]:
+    """Score complete fictional pair dispositions and their merge clusters.
+
+    A label set contains one MERGE or SPLIT disposition for every unordered
+    pair in its identity universe.  This prevents an omitted hard pair from
+    turning into an apparent correct merge score.
+    """
+    if gold is None and predicted is None:
+        return {"status": "ABSTAINED", "reason": "NO_COMPLETE_IDENTITY_LABELS"}
+    if gold is None or predicted is None or type(gold) is not set or type(predicted) is not set:
+        _reject()
+    def canonical(item: Any) -> tuple[str, str, str] | None:
+        if (not isinstance(item, tuple) or len(item) != 3 or not isinstance(item[0], str)
+                or item[0] not in _IDENTITY_DISPOSITIONS
+                or not isinstance(item[1], str) or not isinstance(item[2], str)
+                or _PERSON_ID.fullmatch(item[1]) is None or _PERSON_ID.fullmatch(item[2]) is None or item[1] == item[2]):
+            return None
+        return (item[0], *sorted(item[1:]))
+    if len(gold) > _MAX_GRAPH_CLAIMS or len(predicted) > _MAX_GRAPH_CLAIMS:
+        _reject()
+    normalized_gold = [canonical(item) for item in gold]
+    normalized_predicted = [canonical(item) for item in predicted]
+    if any(item is None for item in normalized_gold + normalized_predicted):
+        _reject()
+    gold_set, predicted_set = set(normalized_gold), set(normalized_predicted)
+    gold_pairs = {(item[1], item[2]) for item in gold_set}
+    predicted_pairs = {(item[1], item[2]) for item in predicted_set}
+    universe = {identifier for _, left, right in gold_set for identifier in (left, right)}
+    complete = {(left, right) for left in universe for right in universe if left < right}
+    if (len(universe) < 2 or gold_pairs != complete or predicted_pairs != complete
+            or len(gold_pairs) != len(gold_set) or len(predicted_pairs) != len(predicted_set)
+            or len(gold_set) != len(gold) or len(predicted_set) != len(predicted)):
+        _reject()
+    if (not _merge_dispositions_are_transitive(gold_set, universe)
+            or not _merge_dispositions_are_transitive(predicted_set, universe)):
+        _reject()
+    by_disposition = {kind: _pr_counts({item for item in gold_set if item[0] == kind},
+                                        {item for item in predicted_set if item[0] == kind})
+                      for kind in sorted(_IDENTITY_DISPOSITIONS)}
+    return {"status": "SCORED", "pair_dispositions": by_disposition,
+            "merge_clusters": _pr_counts(_merge_clusters(gold_set, universe), _merge_clusters(predicted_set, universe))}
+
+
+def _merge_clusters(dispositions: set[tuple[str, str, str]], universe: set[str]) -> set[frozenset[str]]:
+    parents = {identifier: identifier for identifier in universe}
+    def root(identifier: str) -> str:
+        while parents[identifier] != identifier:
+            parents[identifier] = parents[parents[identifier]]
+            identifier = parents[identifier]
+        return identifier
+    for _, left, right in (item for item in dispositions if item[0] == "MERGE"):
+        left_root, right_root = root(left), root(right)
+        if left_root != right_root:
+            parents[right_root] = left_root
+    groups: dict[str, set[str]] = {}
+    for identifier in universe:
+        groups.setdefault(root(identifier), set()).add(identifier)
+    return {frozenset(group) for group in groups.values()}
+
+
+def _merge_dispositions_are_transitive(dispositions: set[tuple[str, str, str]], universe: set[str]) -> bool:
+    """All pairs within a merge component must be labelled MERGE, not SPLIT."""
+    closed_merges = {
+        (left, right)
+        for cluster in _merge_clusters(dispositions, universe)
+        for left in cluster for right in cluster if left < right
+    }
+    labelled_merges = {(left, right) for kind, left, right in dispositions if kind == "MERGE"}
+    return labelled_merges == closed_merges
 
 
 def _final_validation(value: dict[str, Any] | None, primary_engine: str) -> dict[str, Any]:
@@ -206,7 +352,13 @@ def scorecard(*, documents: tuple[GoldDocument, ...], formats: dict[str, str], a
               reviewer_corrected: list[dict[str, Any]], abstentions: dict[str, str],
               graph_gold: set[tuple[str, str, str]] | None, graph_automatic: set[tuple[str, str, str]] | None,
               graph_reviewer_corrected: set[tuple[str, str, str]] | None, primary_engine: str,
-              final_validation: dict[str, Any] | None = None) -> dict[str, Any]:
+              final_validation: dict[str, Any] | None = None,
+              graph_evidence_gold: set[tuple[str, str, str, str]] | None = None,
+              graph_evidence_automatic: set[tuple[str, str, str, str]] | None = None,
+              graph_evidence_reviewer_corrected: set[tuple[str, str, str, str]] | None = None,
+              identity_gold: set[tuple[str, str, str]] | None = None,
+              identity_automatic: set[tuple[str, str, str]] | None = None,
+              identity_reviewer_corrected: set[tuple[str, str, str]] | None = None) -> dict[str, Any]:
     """Create a deterministic, aggregate-only synthetic D07 report."""
     if not isinstance(primary_engine, str) or not primary_engine:
         _reject()
@@ -216,6 +368,9 @@ def scorecard(*, documents: tuple[GoldDocument, ...], formats: dict[str, str], a
     reviewer_predictions = parse_predictions(reviewer_corrected, documents)
     formats = _format_map(documents, formats)
     abstention_summary = _abstentions(documents, abstentions)
+    _locator_gold_matches_graph(graph_evidence_gold, graph_gold)
+    _locator_predictions_match_graph(graph_evidence_automatic, graph_automatic)
+    _locator_predictions_match_graph(graph_evidence_reviewer_corrected, graph_reviewer_corrected)
     assessed_documents = tuple(document for document in documents if document.id not in abstentions)
     by_format = {name: {"automatic": _slice(assessed_documents, automatic_predictions, name, formats),
                         "reviewer_corrected": _slice(assessed_documents, reviewer_predictions, name, formats)}
@@ -234,6 +389,14 @@ def scorecard(*, documents: tuple[GoldDocument, ...], formats: dict[str, str], a
               "abstentions": abstention_summary,
               "graph": {"automatic": _graph_metrics(graph_gold, graph_automatic),
                         "reviewer_corrected": _graph_metrics(graph_gold, graph_reviewer_corrected)},
+              "evidence_locator_agreement": {
+                  "automatic": _evidence_locator_metrics(graph_evidence_gold, graph_evidence_automatic),
+                  "reviewer_corrected": _evidence_locator_metrics(graph_evidence_gold, graph_evidence_reviewer_corrected),
+              },
+              "identity": {
+                  "automatic": _identity_metrics(identity_gold, identity_automatic),
+                  "reviewer_corrected": _identity_metrics(identity_gold, identity_reviewer_corrected),
+              },
               "final_artifact_validation": _final_validation(final_validation, primary_engine),
               "limitations": ["Synthetic scorecard results are not representative holdout evidence.",
                               "Reviewer-corrected scores are not automatic detector performance.",

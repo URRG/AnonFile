@@ -51,6 +51,33 @@ media-redaction, residual-disclosure, or release-safety claim.
 
 It is not a benchmark, adjudication system, release gate, or identity-resolution proof. Reports omit text and document IDs. Abstained documents are excluded from every span metric and format slice; an all-abstained span set has no metrics. Empty/unsupported slices and final-artifact checks remain explicit abstentions.
 
+### Typed graph, locator, and identity accounting
+
+The optional synthetic graph inputs now add precision/recall count triples for
+the aggregate relation corpus and each relation type. They remain separate for
+automatic and reviewer-corrected inputs. The scorecard can also accept a
+complete fictional set of opaque evidence-locator bindings. A binding is a
+relation claim plus an opaque `L1`-style locator token; it emits only aggregate
+corpus/per-relation agreement and never returns an endpoint or locator token.
+Its gold bindings must cover exactly the separately supplied graph-gold claims,
+so locator agreement cannot silently grade a smaller, easier relation subset.
+Absent gold labels and assessment state produce the explicit
+`NO_COMPLETE_EVIDENCE_LOCATOR_LABELS` abstention.
+
+Identity evaluation is likewise optional and synthetic-only. It accepts a
+complete, mutually exclusive `MERGE`/`SPLIT` disposition for every unordered
+pair in its fictional person-ID universe. The scorecard rejects an incomplete,
+duplicated, or differently covered pair set rather than treating omitted pairs
+as correct. It reports separate aggregate precision/recall counts for each
+pair disposition and for merge-derived clusters; it returns neither identity
+keys nor clusters. Missing identity labels are an explicit
+`NO_COMPLETE_IDENTITY_LABELS` abstention.
+
+These are comparisons with supplied complete fictional labels, not identity
+resolution, evidence sufficiency, source correctness, self-grading, or any
+real-world qualification. They do not change D07's `NOT_QUALIFIED` status or
+authorize a release.
+
 ### Coverage-aware recall bounds
 
 The v2 synthetic scorecard additionally emits `coverage_aware_recall` for the
