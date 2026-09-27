@@ -8,7 +8,7 @@ const navigationCompiled = ts.transpileModule(navigationSource, { compilerOption
 const { isDenseReviewGraph, moveReviewFocus, readableReviewZoom } = await import(`data:text/javascript;base64,${Buffer.from(navigationCompiled).toString('base64')}`)
 const reviewSource = readFileSync(new URL('../src/relationship-review.ts', import.meta.url), 'utf8')
 const reviewCompiled = ts.transpileModule(reviewSource, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText
-const { relationshipConflictCues, reviewStatusFor } = await import(`data:text/javascript;base64,${Buffer.from(reviewCompiled).toString('base64')}`)
+const { relationshipConflictCues, reviewStatusFor, selectionForGraph } = await import(`data:text/javascript;base64,${Buffer.from(reviewCompiled).toString('base64')}`)
 const graphSource = readFileSync(new URL('../src/relationship-graph.tsx', import.meta.url), 'utf8')
 const graphCss = readFileSync(new URL('../src/relationship-graph.css', import.meta.url), 'utf8')
 const batchSource = readFileSync(new URL('../src/batch-demo.tsx', import.meta.url), 'utf8')
@@ -37,7 +37,7 @@ test('narrow layouts scroll a readable map instead of shrinking node text to an 
 })
 
 test('review graph exposes accessible navigation, live updates, and evidence controls', () => {
-  for (const required of ['aria-live="polite"', 'aria-atomic="true"', 'relationship-map-instructions', 'moveReviewFocus', 'onKeyDown', 'aria-controls="relationship-table"', '<table className="relationship-fallback-table">', 'onInspectDocument(item.documentId, item)', 'relationship-edge-review', 'aria-pressed={status === next}', 'relationship-review-note', "typeof ResizeObserver === 'undefined'", "window.addEventListener('resize', update)"]) {
+  for (const required of ['aria-live="polite"', 'aria-atomic="true"', 'relationship-map-instructions', 'moveReviewFocus', 'onKeyDown', 'aria-controls="relationship-table"', '<table className="relationship-fallback-table">', 'onInspectDocument(item.documentId, item)', 'relationship-edge-review', 'relationship-review-select', 'sourceLabel} ${edgeLabel[edge.type]} ${targetLabel}', 'relationship-review-note', "typeof ResizeObserver === 'undefined'", "window.addEventListener('resize', update)"]) {
     assert.match(graphSource, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   }
 })
@@ -62,6 +62,16 @@ test('three-document synthetic graph keeps review state ephemeral and cues only 
   assert.match(graphSource, /reviewState\.graph === graph \? reviewState\.reviews : \{\}/)
   assert.match(graphSource, /current\.graph === graph \? current\.reviews : \{\}/)
   assert.doesNotMatch(graphSource, /graphReviewKey/)
+})
+
+test('a changed graph clears selection even when response-local IDs recur', () => {
+  const original = { nodes: [{ id: 'person_1' }] }
+  const replacement = { nodes: [{ id: 'person_1' }, { id: 'person_2' }] }
+  const oldSelection = { graph: original, nodeId: 'person_2', edgeId: 'edge_1' }
+  assert.equal(selectionForGraph(original, oldSelection), oldSelection)
+  assert.deepEqual(selectionForGraph(replacement, oldSelection), { graph: replacement, nodeId: 'person_1', edgeId: null })
+  assert.match(graphSource, /const selection = selectionForGraph\(graph, selectionState\)/)
+  assert.doesNotMatch(graphSource, /aria-pressed=\{status === next\}/)
 })
 
 test('review graph preserves visible focus, touch-sized controls, responsive layout, and reduced-motion support', () => {

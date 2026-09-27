@@ -1,4 +1,4 @@
-import type { EntityGraphEdge } from './api'
+import type { EntityGraph, EntityGraphEdge } from './api'
 
 export type EphemeralEdgeReview = 'pending' | 'accepted' | 'rejected'
 export type RelationshipConflictCode = 'MULTIPLE_WORKS_AT' | 'MULTIPLE_ASSIGNED_TO'
@@ -6,6 +6,17 @@ export type RelationshipConflictCode = 'MULTIPLE_WORKS_AT' | 'MULTIPLE_ASSIGNED_
 export interface RelationshipConflictCue {
   code: RelationshipConflictCode
   edgeIds: string[]
+}
+
+export interface GraphSelection {
+  graph: EntityGraph
+  nodeId: string | null
+  edgeId: string | null
+}
+
+export function selectionForGraph(graph: EntityGraph, state: GraphSelection): GraphSelection {
+  // Graph IDs are response-local. Never apply an old selection to a new response.
+  return state.graph === graph ? state : { graph, nodeId: graph.nodes[0]?.id ?? null, edgeId: null }
 }
 
 export function reviewStatusFor(edgeId: string, reviews: Readonly<Record<string, EphemeralEdgeReview>>): EphemeralEdgeReview {
