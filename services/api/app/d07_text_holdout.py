@@ -1,8 +1,8 @@
 """Run the frozen D07 synthetic text-only holdout fixture.
 
 This is a regression fixture, not a benchmark runner.  Its reference spans
-were authored separately from the checked-in detector/demo labels, and every
-input byte is pinned by the checked-in lock before scoring.  It intentionally
+were authored separately from the checked-in detector/demo labels, and each
+input's canonical LF content is pinned by the checked-in lock before scoring. It intentionally
 does not inspect PDFs, images, OCR output, graph claims, or release artifacts.
 """
 from __future__ import annotations
@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from app import processing
-from app.evaluation import (EvaluationError, baseline_predictions, evaluate, parse_gold,
+from app.evaluation import (MAX_FILE_BYTES, EvaluationError, baseline_predictions, evaluate, parse_gold,
                             parse_predictions, read_jsonl)
 
 VERSION = "d07-frozen-text-holdout-v1"
@@ -24,8 +24,8 @@ _FIXTURE_DIRECTORY = Path(__file__).resolve().parents[1] / "tests" / "fixtures" 
 _LOCK_KEYS = frozenset({"schema_version", "fixture_id", "gold_sha256", "automatic_predictions_sha256",
                         "annotation_protocol_sha256"})
 _DIGEST_LENGTH = 64
-# The lock itself is source-pinned so changing both a fixture input and its
-# JSON lock cannot silently redefine this fixed regression case.
+# Hashes pin canonical LF content. Existing Windows worktrees may still hold
+# CRLF copies from before the raw-byte Git attribute was introduced.
 _LOCK_SHA256 = "4ec94657070e3430d5e9fc8d7a999e3a13ad3f4e85a2742dbd1ca8401b713494"
 LIVE_VERSION = "d07-live-current-detector-text-holdout-v1"
 _LIVE_LOCK_KEYS = frozenset({"schema_version", "fixture_id", "gold_sha256", "annotation_protocol_sha256"})
@@ -54,6 +54,34 @@ def _object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def _digest(value: Any) -> bool:
     return (isinstance(value, str) and len(value) == _DIGEST_LENGTH
             and all(character in "0123456789abcdef" for character in value))
+
+
+def _canonical_lf(raw: bytes) -> bytes:
+    canonical = raw.replace(b"\r\n", b"\n")
+    if b"\r" in canonical:
+        _reject()
+    return canonical
+
+
+def _bounded_bytes(path: Path, limit: int) -> bytes:
+    with path.open("rb") as stream:
+        raw = stream.read(limit + 1)
+    if len(raw) > limit:
+        _reject()
+    return raw
+
+
+def _canonical_hash(path: Path, limit: int) -> str:
+    return hashlib.sha256(_canonical_lf(_bounded_bytes(path, limit))).hexdigest()
+
+
+def _read_jsonl_canonical(path: Path) -> tuple[list[dict[str, Any]], str]:
+    rows, raw_digest = read_jsonl(path)
+    raw = _bounded_bytes(path, MAX_FILE_BYTES)
+    # Detect a changed file between the evaluator parse and canonical hash.
+    if hashlib.sha256(raw).hexdigest() != raw_digest:
+        _reject()
+    return rows, hashlib.sha256(_canonical_lf(raw)).hexdigest()
 
 
 def _code_constant(value: Any) -> Any:
@@ -121,9 +149,7 @@ def _detector_implementation_identity(detector: Any) -> dict[str, str]:
 
 def _read_lock(path: Path) -> dict[str, str]:
     try:
-        raw = path.read_bytes()
-        if len(raw) > 4096:
-            _reject()
+        raw = _canonical_lf(_bounded_bytes(path, 4096))
         if hashlib.sha256(raw).hexdigest() != _LOCK_SHA256:
             _reject()
         lock = json.loads(raw.decode("utf-8"), object_pairs_hook=_object)
@@ -139,8 +165,8 @@ def _read_lock(path: Path) -> dict[str, str]:
 
 def _read_live_lock(path: Path) -> dict[str, str]:
     try:
-        raw = path.read_bytes()
-        if len(raw) > 4096 or hashlib.sha256(raw).hexdigest() != _LIVE_LOCK_SHA256:
+        raw = _canonical_lf(_bounded_bytes(path, 4096))
+        if hashlib.sha256(raw).hexdigest() != _LIVE_LOCK_SHA256:
             _reject()
         lock = json.loads(raw.decode("utf-8"), object_pairs_hook=_object)
         if (not isinstance(lock, dict) or set(lock) != _LIVE_LOCK_KEYS
@@ -159,9 +185,9 @@ def _load_bound_fixture(directory: Path) -> tuple[tuple[Any, ...], dict[str, tup
         predictions_path = directory / "automatic-predictions.jsonl"
         protocol_path = directory / "annotation-protocol.md"
         lock = _read_lock(directory / "fixture-lock.json")
-        gold_rows, gold_sha256 = read_jsonl(gold_path)
-        prediction_rows, predictions_sha256 = read_jsonl(predictions_path)
-        protocol_sha256 = hashlib.sha256(protocol_path.read_bytes()).hexdigest()
+        gold_rows, gold_sha256 = _read_jsonl_canonical(gold_path)
+        prediction_rows, predictions_sha256 = _read_jsonl_canonical(predictions_path)
+        protocol_sha256 = _canonical_hash(protocol_path, 4096)
         if (gold_sha256 != lock["gold_sha256"]
                 or predictions_sha256 != lock["automatic_predictions_sha256"]
                 or protocol_sha256 != lock["annotation_protocol_sha256"]):
@@ -184,8 +210,8 @@ def _load_live_bound_fixture(directory: Path) -> tuple[tuple[Any, ...], dict[str
         gold_path = directory / "gold.jsonl"
         protocol_path = directory / "annotation-protocol.md"
         lock = _read_live_lock(directory / "live-detector-lock.json")
-        gold_rows, gold_sha256 = read_jsonl(gold_path)
-        protocol_sha256 = hashlib.sha256(protocol_path.read_bytes()).hexdigest()
+        gold_rows, gold_sha256 = _read_jsonl_canonical(gold_path)
+        protocol_sha256 = _canonical_hash(protocol_path, 4096)
         if gold_sha256 != lock["gold_sha256"] or protocol_sha256 != lock["annotation_protocol_sha256"]:
             _reject()
         gold = parse_gold(gold_rows)
