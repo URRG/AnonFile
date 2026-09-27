@@ -20,6 +20,8 @@ from pathlib import PurePath
 from typing import Any
 
 from app.contracts import PayloadError
+from app.demo_contextual import contextual_spans
+from app.demo_contextual_surrogates import contextual_alias
 from app.demo_surrogates import SSN_SHAPE, demo_field_kind, typed_alias
 from app.evaluation import EvaluationError, evaluate, parse_gold, parse_predictions
 from app.media_preview import extract_media, render_candidate
@@ -55,11 +57,11 @@ SIGNATURE_BLOCK = re.compile(
 ASSISTANT_TITLE = re.compile(r"^assistant\s+to\s+(?P<principal>[A-Za-z][A-Za-z .'-]{1,79})$", re.I)
 ASSISTANT_FOR_TITLE = re.compile(r"^assistant\s+for\s+(?P<organization>[A-Za-z0-9][A-Za-z0-9 &'().-]{1,100})$", re.I)
 INLINE_GRAPH_RECORD = re.compile(r"(?m)^\s*(?P<record>\{[^\r\n]{2,400}\})\s*$")
-EXPLICIT_CLIENT_OF = re.compile(r"(?im)^(?P<person>[A-Za-z][A-Za-z .'-]{1,79}) is a client of (?P<organization>[A-Za-z0-9][A-Za-z0-9 &'().-]{1,100})\.$")
-EXPLICIT_ASSISTANT_TO = re.compile(r"(?im)^(?P<assistant>[A-Za-z][A-Za-z .'-]{1,79}) is assistant to (?P<principal>[A-Za-z][A-Za-z .'-]{1,79})\.$")
-EXPLICIT_ASSISTANT_FOR = re.compile(r"(?im)^(?P<assistant>[A-Za-z][A-Za-z .'-]{1,79}) is assistant for (?P<organization>[A-Za-z0-9][A-Za-z0-9 &'().-]{1,100})\.$")
-EXPLICIT_WORKS_ON = re.compile(r"(?im)^(?P<person>[A-Za-z][A-Za-z .'-]{1,79}) works on (?P<project>[A-Za-z0-9][A-Za-z0-9 &'().-]{1,100})\.$")
-EXPLICIT_ASSIGNED_TO = re.compile(r"(?im)^(?P<project>[A-Za-z0-9][A-Za-z0-9 &'().-]{1,100}) is assigned to (?P<person>[A-Za-z][A-Za-z .'-]{1,79})\.$")
+EXPLICIT_CLIENT_OF = re.compile(r"(?im)^(?P<person>[A-Za-z][A-Za-z .'-]{1,79}) is a client of (?P<organization>[A-Za-z0-9][A-Za-z0-9 &'().-]{1,100})\.\r?$")
+EXPLICIT_ASSISTANT_TO = re.compile(r"(?im)^(?P<assistant>[A-Za-z][A-Za-z .'-]{1,79}) is assistant to (?P<principal>[A-Za-z][A-Za-z .'-]{1,79})\.\r?$")
+EXPLICIT_ASSISTANT_FOR = re.compile(r"(?im)^(?P<assistant>[A-Za-z][A-Za-z .'-]{1,79}) is assistant for (?P<organization>[A-Za-z0-9][A-Za-z0-9 &'().-]{1,100})\.\r?$")
+EXPLICIT_WORKS_ON = re.compile(r"(?im)^(?P<person>[A-Za-z][A-Za-z .'-]{1,79}) works on (?P<project>[A-Za-z0-9][A-Za-z0-9 &'().-]{1,100})\.\r?$")
+EXPLICIT_ASSIGNED_TO = re.compile(r"(?im)^(?P<project>[A-Za-z0-9][A-Za-z0-9 &'().-]{1,100}) is assigned to (?P<person>[A-Za-z][A-Za-z .'-]{1,79})\.\r?$")
 MAX_GRAPH_NODES = 100
 MAX_GRAPH_EDGES = 200
 MAX_GRAPH_EVIDENCE_PER_EDGE = 20
@@ -95,6 +97,11 @@ REVIEW_EXCLUSION_REASON = "FALSE_POSITIVE_CONFIRMED"
 SUPPRESSIBLE_KINDS = frozenset({"PERSON_NAME", "EMAIL", "PHONE", "IP_ADDRESS"})
 MANUAL_FINDING_KINDS = frozenset({"OTHER_SENSITIVE", "BUSINESS_CONFIDENTIAL", "QUASI_IDENTIFIER", "GOVERNMENT_ID", "DATE_OF_BIRTH"})
 SAFE_MANUAL_VALUE = re.compile(r"^[^\x00-\x1f\x7f]{2,80}$")
+CONTEXTUAL_FIELD_KINDS = {
+    "employeeid": "EMPLOYEE_ID", "staffid": "EMPLOYEE_ID",
+    "internalurl": "INTERNAL_URL", "intraneturl": "INTERNAL_URL",
+    "officeaddress": "ADDRESS", "mailingaddress": "ADDRESS",
+}
 TEXT_SSN = re.compile(r"(?im)\b(?:ssn|social[ -]?security[ -]?number)\s*[:=]\s*(?P<value>[0-9]{3}(?:[- ]?[0-9]{2})?[- ]?[0-9]{4})\b")
 SAMPLE_TEXT_DIGESTS = {
     "01-email-thread.txt": "ef136ed6bb9c2931a07915d8ae22a487c5899cab825d211472cd63cd8f54f8ef",
@@ -290,9 +297,12 @@ def _structured_fields(document: dict[str, Any]) -> list[tuple[int, int, str]]:
     if kind in {"json", "jsonl"}:
         for match in JSON_FIELD.finditer(text):
             try:
-                field = _field_type(json.loads('"' + match.group("key") + '"'))
+                field_name = json.loads('"' + match.group("key") + '"')
+                field = _field_type(field_name)
             except (ValueError, UnicodeError):
                 continue
+            field = field or ((CONTEXTUAL_FIELD_KINDS.get("".join(char for char in field_name.casefold() if char.isalnum())), "high")
+                              if "".join(char for char in field_name.casefold() if char.isalnum()) in CONTEXTUAL_FIELD_KINDS else None)
             if not field or match.group("value") == "null":
                 continue
             value = match.group("value")
@@ -301,7 +311,6 @@ def _structured_fields(document: dict[str, Any]) -> list[tuple[int, int, str]]:
             start, end = match.start("value") + 1, match.end("value") - 1
             if end - start > 120:
                 raise PayloadError("A sensitive structured field exceeds the review value limit.")
-            field_name = json.loads('"' + match.group("key") + '"')
             field_kind = demo_field_kind(field_name, text[start:end], field[0])
             if "".join(char for char in field_name.casefold() if char.isalnum()) in {"ssn", "socialsecuritynumber"} and SSN_SHAPE.fullmatch(text[start:end]):
                 ssn_values.add(text[start:end].casefold())
@@ -326,7 +335,9 @@ def _structured_fields(document: dict[str, Any]) -> list[tuple[int, int, str]]:
                 header = values
             else:
                 for field_name, (start, end) in zip(header, spans):
-                    field = _field_type(field_name)
+                    normalized_field = "".join(char for char in field_name.casefold() if char.isalnum())
+                    field = _field_type(field_name) or ((CONTEXTUAL_FIELD_KINDS[normalized_field], "high")
+                                                  if normalized_field in CONTEXTUAL_FIELD_KINDS else None)
                     if field and end > start:
                         if end - start > 120:
                             raise PayloadError("A sensitive structured field exceeds the review value limit.")
@@ -779,6 +790,8 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
     for doc in documents:
         for span in detect_text(doc["text"]):
             remember(span.entity_type, doc["text"][span.start:span.end])
+        for start, end, kind in contextual_spans(doc["text"]):
+            remember(kind, doc["text"][start:end])
         for start, end, kind in doc["_fields"]:
             remember(kind, doc["text"][start:end])
         for start, end in doc["_labelled_ssns"]:
@@ -825,6 +838,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
     source_values = {source.casefold() for source in names_by_key.values()} | {source.casefold() for source in source_by_key.values()}
     used_typed_aliases: set[str] = set()
     typed_ordinals = {"PAN": 0, "GOVERNMENT_ID": 0, "PHONE": 0}
+    contextual_ordinals = {"EMPLOYEE_ID": 0, "INTERNAL_URL": 0, "ADDRESS": 0}
     entities: list[dict[str, Any]] = []
     for kind, normalized in keys:
         entity_id = id_by_key[(kind, normalized)]
@@ -860,6 +874,16 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
                         alias, strategy = proposal
                         used_typed_aliases.add(alias.casefold())
                         break
+            if kind in contextual_ordinals:
+                while contextual_ordinals[kind] < 999_999:
+                    contextual_ordinals[kind] += 1
+                    proposal = contextual_alias(kind, source_by_key[(kind, normalized)], contextual_ordinals[kind])
+                    if proposal is None:
+                        break
+                    if proposal[0].casefold() not in source_values and proposal[0].casefold() not in used_typed_aliases:
+                        alias, strategy = proposal
+                        used_typed_aliases.add(alias.casefold())
+                        break
         entities.append({"id": entity_id, "kind": kind, "source": display, "alias": alias,
                          "strategy": strategy, "mentions": 0, "excluded": entity_id in exclusions})
     entities_by_id = {entity["id"]: entity for entity in entities}
@@ -877,6 +901,9 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
         for span in detect_text(text):
             entity_id = id_by_key[(span.entity_type, text[span.start:span.end].casefold())]
             spans.append((span.start, span.end, entity_id, 2, "AUTOMATIC"))
+        for start, end, kind in contextual_spans(text):
+            entity_id = id_by_key[(kind, text[start:end].casefold())]
+            spans.append((start, end, entity_id, 2, "AUTOMATIC"))
         for normalized in names_by_key:
             for match in re.finditer(r"(?<!\w)" + re.escape(normalized) + r"(?!\w)", text, re.I):
                 spans.append((match.start(), match.end(), id_by_key[("PERSON_NAME", normalized)], 1,
@@ -955,6 +982,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
     media_documents = [doc for doc in documents if "media_preview" in doc]
     visual_residuals = sum(doc["media_preview"]["self_ocr_residual_sources"] for doc in media_documents)
     visual_fallbacks = sum(doc["media_preview"]["fallback_lines"] for doc in media_documents)
+    candidate_low_confidence = sum(doc["media_preview"]["candidate_low_confidence_lines"] for doc in media_documents)
     if any(entity["excluded"] and not entity["mentions"] for entity in entities):
         raise PayloadError("A reviewer exclusion must refer to a detected mention.")
     if any(not entities_by_id[id_by_key[(item["kind"], item["value"].casefold())]]["mentions"]
@@ -986,7 +1014,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
                 {"name": "Residual known-rule scan", "status": "REVIEW" if residual or exclusions else "PASS",
                  "detail": f"{residual} bounded-rule matches occur in candidate text, including expected email- or PAN-shaped pseudonyms. This pattern count is not the number of retained source values; zero does not prove anonymity."},
                 {"name": "Raster media and OCR review", "status": "REVIEW" if media_documents else "NOT_TESTED",
-                 "detail": f"{len(media_documents)} media files were rasterized and OCR-reviewed; {visual_residuals} source values remain under the same OCR engine and {visual_fallbacks} lines needed solid-redaction fallback. This is not independent visual validation or release approval."
+                 "detail": f"{len(media_documents)} media files were rasterized and OCR-reviewed; {visual_residuals} source values remain under the same OCR engine, {visual_fallbacks} lines needed solid-redaction fallback, and {candidate_low_confidence} candidate OCR lines were below 0.60 confidence. Low-confidence candidate OCR cannot establish absence of source content. This is not independent visual validation or release approval."
                  if media_documents else "No PDF/image was processed in this batch."},
                 {"name": "Reference-label agreement", "status": "REVIEW" if annotation_score else "NOT_MEASURED",
                  "detail": "Exact-span counts compare the reviewed candidate with supplied synthetic labels; they are not an independent model benchmark."

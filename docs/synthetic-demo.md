@@ -89,6 +89,10 @@ This is a visual *review candidate*, not safe redaction certification. OCR can
 miss or misread visible sensitive content; no detection outside recognized
 lines is assured. The candidate is rechecked only by the same OCR engine, so
 zero retained *detected source values* is not independent assurance. Names
+Input OCR lines below 0.60 confidence reject the batch. A lower-confidence
+candidate OCR line is counted and shown for review: a replacement can change
+recognizer confidence without restoring source pixels, but that recheck cannot
+establish the absence of other sensitive content. Names
 are replaced with same-length, readable name pseudonyms. Unsupported name
 shapes fail closed instead of turning into `Axxxxx`-style tokens. Emails linked
 by explicit mail headers, one unambiguous structured record, or a Slack-style
@@ -107,7 +111,16 @@ bounded detector can miss prose names and other sensitive information. CSV
 review is limited to one-line cells, and ambiguous or unsupported structured
 values are rejected. Replacements are proposals for human review only.
 The current rules do not automatically classify every employee ID, internal
-URL, postal address, or phone broken across OCR lines. Use the manual
+URL, postal address, or phone broken across OCR lines. A narrow contextual
+demo recognizer now handles labelled employee IDs and EMP-tagged identifiers,
+internal/synthetic HTTP hosts or explicitly internal/intranet-labelled links,
+bounded US-style prose street addresses, and explicit structured
+`office_address`/`mailing_address` fields regardless of locale.
+It emits review-only references and reserved `.invalid` URLs; it does not infer
+ordinary public links, other international free-text addresses, or issuer-valid
+employee IDs. Structured address replacements are review labels, not usable
+postal addresses.
+Use the manual
 exact-value review control where a supported correction is possible; do not
 interpret a clean selected-span count as complete coverage.
 

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from app.contracts import PayloadError
-from app.demo_batch import _choose_alias
+from app.demo_batch import _choose_alias, analyze_batch
 from test_demo_inspect_api import demo_client
 from test_access import auth, client
 
@@ -473,6 +473,7 @@ def test_batch_pdf_is_rasterized_into_new_image_only_candidate_preview(demo_clie
     assert "gita@example.test" in document["candidate_text"]
     assert "[EMAIL_" not in document["candidate_text"]
     media = document["media_preview"]
+    assert isinstance(media["candidate_low_confidence_lines"], int)
     assert len(media["pages"]) == 1
     assert media["pages"][0]["source_png_base64"] != media["pages"][0]["candidate_png_base64"]
     assert base64.b64decode(media["pages"][0]["candidate_png_base64"]).startswith(b"\x89PNG\r\n\x1a\n")
@@ -489,7 +490,7 @@ def test_pdf_text_layer_sensitive_value_missing_from_ocr_rejects_candidate(demo_
     canvas = reportlab.Canvas(stream)
     canvas.drawString(72, 720, "Contact riya@example.test")
     canvas.save()
-    monkeypatch.setattr(media_preview, "_ocr_lines", lambda _: [
+    monkeypatch.setattr(media_preview, "_ocr_lines", lambda _, **kwargs: [
         {"text": "Contact", "box": (20, 20, 100, 50), "confidence": 1.0}])
     request = payload()
     request["files"][0] = file("email", "thread.pdf", stream.getvalue())
@@ -519,6 +520,76 @@ def test_curated_mixed_media_demo_fixture_is_reviewable_as_one_batch(demo_client
     assert "Sita" not in body["documents"][1]["candidate_text"]
     assert body["verification"]["status"] == "REVIEW_REQUIRED"
     assert body["export_available"] is False
+
+
+def test_rich_three_file_fixture_redacts_contextual_values_without_releasing(demo_client):
+    root = Path(__file__).resolve().parents[3] / "apps" / "web" / "public" / "demo-media"
+    request = {"synthetic_only": True, "files": [
+        file("mail", "11-p0-client-email-thread.pdf", (root / "11-p0-client-email-thread.pdf").read_bytes()),
+        file("slack", "12-developer-slack-thread.pdf", (root / "12-developer-slack-thread.pdf").read_bytes()),
+        file("calendar", "13-calendar-events.txt", (root / "13-calendar-events.txt").read_bytes()),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    if response.status_code != 200:
+        # The public route correctly suppresses rejection details. Keep a
+        # fixture-only diagnostic so platform-specific OCR mismatches can be
+        # fixed without weakening that fail-closed response contract.
+        analyze_batch(request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["verification"]["status"] == "REVIEW_REQUIRED"
+    assert body["release_authorized"] is False and body["export_available"] is False
+    assert {"client_of", "assistant_to", "assistant_for", "works_at", "works_on", "assigned_to"}.issubset(
+        {edge["type"] for edge in body["entity_graph"]["edges"]})
+    assert {"EMPLOYEE_ID", "INTERNAL_URL", "ADDRESS"}.issubset({entity["kind"] for entity in body["entities"]})
+    assert {"CONTEXTUAL_REVIEW_REF", "INTERNAL_URL_RESERVED_DOMAIN"}.issubset(
+        {entity["strategy"] for entity in body["entities"]})
+    candidate = "\n".join(document["candidate_text"] for document in body["documents"])
+    assert "HS-EMP-1042" not in candidate
+    assert "25 Sample Street" not in candidate
+    assert "github.example.test" not in candidate
+    assert "confluence.example.test" not in candidate
+    assert "review-" in candidate and ".invalid/resource" in candidate
+    assert body["verification"]["source_value_residuals"] == 0
+
+
+def test_contextual_structured_fields_link_across_json_and_csv(demo_client):
+    address = "25 Sample Street, Example City, CA 90000"
+    link = "https://intranet.example.test/private/HS-EMP-1042"
+    request = {"synthetic_only": True, "files": [
+        file("json", "staff.json", json.dumps([{"employee_id": "HS-EMP-1042",
+                                               "internal_url": link, "office_address": address}])),
+        file("csv", "staff.csv", "employee_id,runbook_url,mailing_address\n"
+             f'HS-EMP-1042,{link},"{address}"\n'),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    for kind, source in (("EMPLOYEE_ID", "HS-EMP-1042"), ("INTERNAL_URL", link), ("ADDRESS", address)):
+        entity = next(item for item in body["entities"] if item["kind"] == kind and item["source"] == source)
+        assert entity["mentions"] == 2
+        assert all(entity["alias"] in document["candidate_text"] for document in body["documents"])
+        assert all(source not in document["candidate_text"] for document in body["documents"])
+    assert all(document["structure_check"] == "pass" for document in body["documents"])
+
+
+def test_explicit_structured_international_address_is_reviewed_without_classifying_public_link(demo_client):
+    address = "Flat 4, 12 Sample Road, Pune"
+    public_link = "https://public.example.com/pr/4"
+    request = {"synthetic_only": True, "files": [
+        file("json", "staff.json", json.dumps([{"office_address": address, "review_link": public_link}])),
+        file("csv", "staff.csv", f'office_address,review_link\n"{address}",{public_link}\n'),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    address_entity = next(item for item in body["entities"] if item["kind"] == "ADDRESS")
+    assert address_entity["source"] == address
+    assert address_entity["alias"].startswith("Postal address [review ")
+    assert address_entity["mentions"] == 2
+    assert all(address not in doc["candidate_text"] for doc in body["documents"])
+    assert all(public_link in doc["candidate_text"] for doc in body["documents"])
+    assert not any(item["kind"] == "INTERNAL_URL" for item in body["entities"])
 
 
 def test_image_ocr_preview_reencodes_pixels_without_source_metadata(demo_client):

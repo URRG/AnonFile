@@ -23,7 +23,7 @@ def test_raster_pdf_has_only_new_image_content_and_no_extracted_text():
 
 
 def test_render_candidate_carries_only_bounded_rebuilt_pdf_bytes(monkeypatch):
-    monkeypatch.setattr("app.media_preview._ocr_lines", lambda _: [])
+    monkeypatch.setattr("app.media_preview._ocr_lines", lambda _, **kwargs: [])
     image = Image.new("RGB", (320, 180), "white")
     page = {"number": 1, "image": image, "lines": [
         {"text": "Maya Patel", "box": (10, 10, 200, 40), "start": 0, "end": 10},
@@ -43,6 +43,25 @@ def test_render_candidate_carries_only_bounded_rebuilt_pdf_bytes(monkeypatch):
     assert image_preview["pdf_raster_evidence"] is None
 
 
+def test_candidate_low_confidence_is_reported_without_weakening_input_ocr(monkeypatch):
+    from types import SimpleNamespace
+    from app import media_preview
+
+    image = Image.new("RGB", (320, 180), "white")
+    monkeypatch.setattr(media_preview, "_engine", lambda: lambda _: SimpleNamespace(
+        txts=["John Singh"], boxes=[[(10, 10), (120, 10), (120, 35), (10, 35)]], scores=[0.55]))
+    with pytest.raises(PayloadError, match="confidence is too low"):
+        media_preview._ocr_lines(image)
+    assert media_preview._ocr_lines(image, require_confidence=False)[0]["confidence"] == 0.55
+    page = {"number": 1, "image": image, "lines": [
+        {"text": "Maya Patel", "box": (10, 10, 200, 40), "start": 0, "end": 10},
+    ]}
+    match = {"start": 0, "end": 10, "source": "Maya Patel", "replacement": "John Singh", "applied": True}
+    preview = render_candidate([page], [match], "image")
+    assert preview["candidate_low_confidence_lines"] == 1
+    assert preview["self_ocr_residual_sources"] == 0
+
+
 def test_pdf_text_layer_check_requires_every_sensitive_occurrence():
     native = "Call +1 415 555 0148. Call +1 415 555 0148 again."
     one_phone = [{"text": "Call +1 415 555 0148."}]
@@ -59,3 +78,11 @@ def test_pdf_text_layer_check_rejects_explicit_name_missing_from_ocr():
     _verify_pdf_text_layer(native, [{"text": "Name: Maya Patel"},
                                     {"text": "Title: Incident Lead"},
                                     {"text": "Company: Harborline Systems"}])
+
+
+def test_pdf_text_layer_check_rejects_missing_contextual_identifier_or_url():
+    native = "Employee ID: HS-EMP-1042\nReview link: https://github.example.test/private"
+    with pytest.raises(PayloadError, match="PDF text-layer and OCR disagree"):
+        _verify_pdf_text_layer(native, [{"text": "Employee ID: HS-EMP-1042"}])
+    with pytest.raises(PayloadError, match="PDF text-layer and OCR disagree"):
+        _verify_pdf_text_layer(native, [{"text": "Review link: https://github.example.test/private"}])

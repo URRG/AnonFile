@@ -114,13 +114,15 @@ export type BatchMatch = { start: number; end: number; source: string; entityId:
 export type BatchMediaPage = { number: number; width: number; height: number; sourcePngBase64: string;
   candidatePngBase64: string; candidatePngSha256: string; ocrLines: number }
 export type BatchMediaPreview = { pages: BatchMediaPage[]; fallbackLines: number; selfOcrResidualSources: number;
+  candidateLowConfidenceLines: number;
   pdfRasterEvidence: { sha256: string; bytes: number; pages: number; sourceObjectsCopied: false } | null;
   candidatePdfBase64: string | null }
 export type BatchDocument = { id: string; name: string; kind: 'text' | 'csv' | 'json' | 'jsonl' | 'pdf' | 'image';
   text: string; candidateText: string; sizeBytes: number; previewFidelity: 'source_text' | 'raster_ocr_review';
   structureCheck: 'pass' | 'fail' | 'not_applicable'; matches: BatchMatch[]; mediaPreview: BatchMediaPreview | null }
 export type BatchAliasStrategy = 'NAME_LENGTH_MATCH' | 'EMAIL_TEST_ADDRESS' | 'PAN_INVALID_TEST' |
-  'US_SSN_INVALID' | 'NANP_FICTIONAL' | 'OPAQUE_REDACTION'
+  'US_SSN_INVALID' | 'NANP_FICTIONAL' | 'OPAQUE_REDACTION' |
+  'CONTEXTUAL_REVIEW_REF' | 'INTERNAL_URL_RESERVED_DOMAIN'
 export type BatchEntity = { id: string; kind: string; source: string; alias: string; strategy: BatchAliasStrategy;
   mentions: number; excluded: boolean }
 export type BatchRelationship = { sourceId: string; targetId: string; type: 'EMAILED' | 'ACCOUNT_OWNER_OF'; documentId: string; basis: string }
@@ -274,13 +276,18 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
       !Array.isArray(value.relationships) || !object(value.summary) || !object(value.verification) || !Array.isArray(value.limitations)) batchInvalid()
   const entities: BatchEntity[] = value.entities.map(raw => {
     if (!object(raw) || typeof raw.id !== 'string' || !/^E\d{1,4}$/.test(raw.id) || !safeText(raw.kind, 64) || !safeText(raw.source, 120) || !safeText(raw.alias, 120) || !safeCount(raw.mentions) || typeof raw.excluded !== 'boolean') batchInvalid()
-    if (!['NAME_LENGTH_MATCH', 'EMAIL_TEST_ADDRESS', 'PAN_INVALID_TEST', 'US_SSN_INVALID', 'NANP_FICTIONAL', 'OPAQUE_REDACTION'].includes(String(raw.strategy))) batchInvalid()
+    if (!['NAME_LENGTH_MATCH', 'EMAIL_TEST_ADDRESS', 'PAN_INVALID_TEST', 'US_SSN_INVALID', 'NANP_FICTIONAL', 'OPAQUE_REDACTION', 'CONTEXTUAL_REVIEW_REF', 'INTERNAL_URL_RESERVED_DOMAIN'].includes(String(raw.strategy))) batchInvalid()
     if (raw.strategy === 'NAME_LENGTH_MATCH' && (raw.kind !== 'PERSON_NAME' || (raw.alias as string).length !== (raw.source as string).length)) batchInvalid()
     if (raw.strategy === 'EMAIL_TEST_ADDRESS' && raw.kind !== 'EMAIL') batchInvalid()
     if (raw.strategy === 'PAN_INVALID_TEST' && (raw.kind !== 'PAN' || !/^[A-Z]{3}Z[A-Z][0-9]{4}[A-Z]$/.test(raw.alias as string))) batchInvalid()
     if (raw.strategy === 'US_SSN_INVALID' && (raw.kind !== 'GOVERNMENT_ID' || !/^000([- ]?)01\1[0-9]{4}$/.test(raw.alias as string))) batchInvalid()
     if (raw.strategy === 'NANP_FICTIONAL' && (raw.kind !== 'PHONE' || !/^\+1[ .()\-]*202[ .()\-]*555[ .()\-]*01[0-9]{2}$/.test(raw.alias as string))) batchInvalid()
     if (raw.strategy === 'OPAQUE_REDACTION' && raw.alias !== `[${raw.kind}_${raw.id}]`) batchInvalid()
+    if (raw.strategy === 'CONTEXTUAL_REVIEW_REF' && !(
+      (raw.kind === 'EMPLOYEE_ID' && /^Employee ID \[review [0-9]{4,6}\]$/.test(raw.alias as string)) ||
+      (raw.kind === 'ADDRESS' && /^Postal address \[review [0-9]{4,6}\]$/.test(raw.alias as string)))) batchInvalid()
+    if (raw.strategy === 'INTERNAL_URL_RESERVED_DOMAIN' && (raw.kind !== 'INTERNAL_URL' ||
+        !/^https:\/\/review-[0-9]{4,6}\.invalid\/resource$/.test(raw.alias as string))) batchInvalid()
     if (raw.kind === 'EMAIL' && (!/^[a-z0-9][a-z0-9._+-]*@[a-z0-9-]+(?:\.[a-z0-9-]+)*\.test$/.test(raw.alias as string) ||
         (raw.alias as string).toLowerCase() === (raw.source as string).toLowerCase())) batchInvalid()
     return { id: raw.id, kind: raw.kind, source: raw.source, alias: raw.alias,
@@ -328,7 +335,7 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
       const media = raw.media_preview
       if (raw.preview_fidelity !== 'raster_ocr_review' || !object(media) || !Array.isArray(media.pages) ||
           media.pages.length < 1 || media.pages.length > 2 || !safeCount(media.fallback_lines) ||
-          !safeCount(media.self_ocr_residual_sources)) batchInvalid()
+          !safeCount(media.self_ocr_residual_sources) || !safeCount(media.candidate_low_confidence_lines)) batchInvalid()
       const pages: BatchMediaPage[] = media.pages.map((page, pageIndex) => {
         if (!object(page) || page.number !== pageIndex + 1 || !safeCount(page.width) || !safeCount(page.height) ||
             (page.width as number) < 16 || (page.height as number) < 16 ||
@@ -356,7 +363,8 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
         candidatePdfBase64 = media.candidate_pdf_base64 as string
       } else if (media.pdf_raster_evidence !== null || media.candidate_pdf_base64 !== null) batchInvalid()
       mediaPreview = { pages, fallbackLines: media.fallback_lines as number,
-        selfOcrResidualSources: media.self_ocr_residual_sources as number, pdfRasterEvidence, candidatePdfBase64 }
+        selfOcrResidualSources: media.self_ocr_residual_sources as number,
+        candidateLowConfidenceLines: media.candidate_low_confidence_lines as number, pdfRasterEvidence, candidatePdfBase64 }
     } else if (raw.media_preview !== undefined || raw.preview_fidelity !== 'source_text') batchInvalid()
     return { id: raw.id as string, name: raw.name as string, kind: raw.kind as BatchDocument['kind'], text: raw.text as string,
       candidateText: raw.candidate_text as string, sizeBytes: raw.size_bytes as number,

@@ -19,6 +19,7 @@ from threading import Lock
 from typing import Any
 
 from app.contracts import PayloadError
+from app.demo_contextual import contextual_spans
 from app.processing import detect_text
 
 MAX_MEDIA_PAGES = 2
@@ -36,9 +37,9 @@ _EXPLICIT_HEADER_NAME = re.compile(
 )
 _EXPLICIT_NAME_FIELD = re.compile(r"(?im)^\s*name:\s*(?P<name>[A-Za-z][A-Za-z .'-]{1,79})\s*$")
 _EXPLICIT_ROLE_NAME = re.compile(
-    r"(?im)^(?P<name>[A-Za-z][A-Za-z .'-]{1,79}) is (?:a client of|assistant (?:to|for)) [^.\r\n]{2,100}\.$|"
-    r"^(?P<worker>[A-Za-z][A-Za-z .'-]{1,79}) works on [^.\r\n]{2,100}\.$|"
-    r"^[^.\r\n]{2,100} is assigned to (?P<assignee>[A-Za-z][A-Za-z .'-]{1,79})\.$"
+    r"(?im)^(?P<name>[A-Za-z][A-Za-z .'-]{1,79}) is (?:a client of|assistant (?:to|for)) [^.\r\n]{2,100}\.\r?$|"
+    r"^(?P<worker>[A-Za-z][A-Za-z .'-]{1,79}) works on [^.\r\n]{2,100}\.\r?$|"
+    r"^[^.\r\n]{2,100} is assigned to (?P<assignee>[A-Za-z][A-Za-z .'-]{1,79})\.\r?$"
 )
 
 
@@ -49,7 +50,7 @@ def _engine() -> Any:
     return RapidOCR()
 
 
-def _ocr_lines(image: Any) -> list[dict[str, Any]]:
+def _ocr_lines(image: Any, *, require_confidence: bool = True) -> list[dict[str, Any]]:
     import numpy as np
 
     with _OCR_LOCK:
@@ -65,7 +66,8 @@ def _ocr_lines(image: Any) -> list[dict[str, Any]]:
             continue
         if len(text) > 500 or not all(char.isprintable() for char in text):
             raise PayloadError("The demo OCR text is unsupported for review.")
-        if not math.isfinite(float(confidence)) or float(confidence) < 0.60:
+        score = float(confidence)
+        if not math.isfinite(score) or not 0.0 <= score <= 1.0 or (require_confidence and score < 0.60):
             raise PayloadError("OCR confidence is too low for a visual candidate; inspect the source manually.")
         xs, ys = [float(point[0]) for point in box], [float(point[1]) for point in box]
         if (len(xs) != 4 or any(not math.isfinite(number) for number in (*xs, *ys)) or
@@ -75,7 +77,7 @@ def _ocr_lines(image: Any) -> list[dict[str, Any]]:
                   min(image.width, math.ceil(max(xs)) + 5), min(image.height, math.ceil(max(ys)) + 5))
         if bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
             raise PayloadError("The demo OCR geometry is invalid.")
-        lines.append({"text": text, "box": bounds, "confidence": round(float(confidence), 4)})
+        lines.append({"text": text, "box": bounds, "confidence": round(score, 4)})
     return sorted(lines, key=lambda line: (line["box"][1], line["box"][0]))
 
 
@@ -205,9 +207,18 @@ def _verify_pdf_text_layer(native_text: str, lines: list[dict[str, Any]]) -> Non
                 value = match.groupdict().get(group)
                 if value:
                     required[("PERSON_NAME", value.strip().casefold())] += 1
+    for start, end, kind in contextual_spans(native_text):
+        source = native_text[start:end].casefold()
+        if kind == "ADDRESS":
+            source = " ".join(source.split())
+        required[(kind, source)] += 1
     for (kind, source), count in required.items():
-        values = ("".join(char for char in line if char.isdigit()) for line in ocr_values) if kind in {"PHONE", "AADHAAR", "CARD"} else iter(ocr_values)
-        if sum(line.count(source) for line in values) < count:
+        if kind == "ADDRESS":
+            present = " ".join(" ".join(ocr_values).split()).count(source)
+        else:
+            values = ("".join(char for char in line if char.isdigit()) for line in ocr_values) if kind in {"PHONE", "AADHAAR", "CARD"} else iter(ocr_values)
+            present = sum(line.count(source) for line in values)
+        if present < count:
             raise PayloadError("PDF text-layer and OCR disagree on a sensitive value; inspect the source manually.")
 
 
@@ -264,6 +275,7 @@ def render_candidate(pages: list[dict[str, Any]], matches: list[dict[str, Any]],
     assigned = set()
     fallback_lines = 0
     visual_residuals = 0
+    candidate_low_confidence_lines = 0
     for page in pages:
         source_image = page["image"]
         candidate = source_image.copy()
@@ -288,7 +300,13 @@ def render_candidate(pages: list[dict[str, Any]], matches: list[dict[str, Any]],
                 page_sources.add(match["source"])
             parts.append(line["text"][cursor - line["start"]:])
             fallback_lines += _draw_line(candidate, line["box"], "".join(parts))
-        candidate_ocr = "\n".join(line["text"] for line in _ocr_lines(candidate))
+        # Input OCR still requires 0.60 confidence. A newly rendered alias can
+        # itself lower candidate OCR confidence across platforms; it does not
+        # restore the original pixels. Count that uncertainty separately, and
+        # never present this same-engine recheck as a safety certificate.
+        candidate_lines = _ocr_lines(candidate, require_confidence=False)
+        candidate_low_confidence_lines += sum(line["confidence"] < 0.60 for line in candidate_lines)
+        candidate_ocr = "\n".join(line["text"] for line in candidate_lines)
         for source in page_sources:
             if re.search(r"(?<!\w)" + re.escape(source) + r"(?!\w)", candidate_ocr, re.I):
                 visual_residuals += 1
@@ -312,5 +330,6 @@ def render_candidate(pages: list[dict[str, Any]], matches: list[dict[str, Any]],
                         "pages": len(candidate_images), "source_objects_copied": False}
         candidate_pdf_base64 = base64.b64encode(generated).decode("ascii")
     return {"pages": public_pages, "fallback_lines": fallback_lines,
+            "candidate_low_confidence_lines": candidate_low_confidence_lines,
             "self_ocr_residual_sources": visual_residuals, "pdf_raster_evidence": pdf_evidence,
             "candidate_pdf_base64": candidate_pdf_base64}

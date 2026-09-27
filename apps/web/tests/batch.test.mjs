@@ -96,6 +96,34 @@ test('batch client binds declared PAN strategy to a deliberately invalid alias',
   }
 })
 
+test('batch client accepts only bounded review references and reserved internal URLs', async t => {
+  for (const [kind, source, alias, strategy] of [
+    ['EMPLOYEE_ID', 'HS-EMP-1042', 'Employee ID [review 0001]', 'CONTEXTUAL_REVIEW_REF'],
+    ['ADDRESS', '25 Sample Street, Example City, CA 90000', 'Postal address [review 0001]', 'CONTEXTUAL_REVIEW_REF'],
+    ['INTERNAL_URL', 'https://github.example.test/private', 'https://review-0001.invalid/resource', 'INTERNAL_URL_RESERVED_DOMAIN'],
+  ]) {
+    const contextual = valid()
+    contextual.documents[0].text = source
+    contextual.documents[0].candidate_text = alias
+    contextual.documents[0].size_bytes = Buffer.byteLength(source)
+    contextual.documents[0].matches[0] = { start: 0, end: source.length, source, entity_id: 'E1', kind,
+      replacement: alias, applied: true, origin: 'AUTOMATIC' }
+    contextual.entities[0] = { id: 'E1', kind, source, alias, strategy, mentions: 1, excluded: false }
+    const contextualRequest = { ...request, files: [{ ...files[0], size: Buffer.byteLength(source),
+      contentBase64: Buffer.from(source).toString('base64') }, files[1]] }
+    t.mock.method(globalThis, 'fetch', async () => Response.json(contextual))
+    assert.equal((await inspectSyntheticBatch(contextualRequest)).entities[0].alias, alias)
+    t.mock.restoreAll()
+    const tampered = structuredClone(contextual)
+    tampered.entities[0].alias = kind === 'INTERNAL_URL' ? 'https://review-0001.example.com/resource' : 'Employee ID [review source]'
+    tampered.documents[0].matches[0].replacement = tampered.entities[0].alias
+    tampered.documents[0].candidate_text = tampered.entities[0].alias
+    t.mock.method(globalThis, 'fetch', async () => Response.json(tampered))
+    await assert.rejects(inspectSyntheticBatch(contextualRequest), /invalid review result/)
+    t.mock.restoreAll()
+  }
+})
+
 test('batch client sends bounded reviewer corrections and rejects invalid values before transport', async t => {
   const mock = t.mock.method(globalThis, 'fetch', async () => Response.json(valid()))
   await inspectSyntheticBatch({ ...request, manualFindings: [{ value: 'DEMO-4821', kind: 'OTHER_SENSITIVE' }] })
@@ -115,7 +143,7 @@ test('batch client binds raster image previews to staged media and PNG dimension
   response.documents[1].media_preview = { pages: [{ number: 1, width: 16, height: 16,
     source_png_base64: png, candidate_png_base64: png,
     candidate_png_sha256: createHash('sha256').update(Buffer.from(png, 'base64')).digest('hex'), ocr_lines: 1 }], fallback_lines: 0,
-    self_ocr_residual_sources: 0, pdf_raster_evidence: null, candidate_pdf_base64: null }
+    self_ocr_residual_sources: 0, candidate_low_confidence_lines: 0, pdf_raster_evidence: null, candidate_pdf_base64: null }
   const mediaRequest = { ...request, files: [files[0], { ...files[1], name: 'b.png' }] }
   t.mock.method(globalThis, 'fetch', async () => Response.json(response))
   const result = await inspectSyntheticBatch(mediaRequest)
@@ -125,6 +153,8 @@ test('batch client binds raster image previews to staged media and PNG dimension
     value => { value.documents[1].media_preview.pages[0].width = 17 },
     value => { value.documents[1].media_preview.pages[0].candidate_png_base64 = 'not-a-png' },
     value => { value.documents[1].media_preview.pages[0].candidate_png_sha256 = 'bad' },
+    value => { delete value.documents[1].media_preview.candidate_low_confidence_lines },
+    value => { value.documents[1].media_preview.candidate_low_confidence_lines = -1 },
     value => { value.documents[1].media_preview.pdf_raster_evidence = { sha256: '0'.repeat(64), bytes: 500, pages: 1, source_objects_copied: false } },
     value => { value.documents[1].media_preview.candidate_pdf_base64 = 'JVBERi0xLjQ=' },
     value => { value.documents[1].kind = 'pdf' },
@@ -160,7 +190,7 @@ test('batch client requires bounded candidate PDF bytes matching raster evidence
   response.documents[1].media_preview = { pages: [{ number: 1, width: 16, height: 16,
     source_png_base64: png, candidate_png_base64: png,
     candidate_png_sha256: createHash('sha256').update(Buffer.from(png, 'base64')).digest('hex'), ocr_lines: 1 }], fallback_lines: 0,
-    self_ocr_residual_sources: 0, pdf_raster_evidence: { sha256: '0'.repeat(64),
+    self_ocr_residual_sources: 0, candidate_low_confidence_lines: 0, pdf_raster_evidence: { sha256: '0'.repeat(64),
       bytes: candidate.length, pages: 1, source_objects_copied: false },
     candidate_pdf_base64: candidate.toString('base64') }
   const mediaRequest = { ...request, files: [files[0], { ...files[1], name: 'b.pdf' }] }

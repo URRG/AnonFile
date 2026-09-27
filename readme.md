@@ -30,6 +30,8 @@ With Docker Compose installed, `docker compose up --build` serves localhost port
 For a local, no-Docker synthetic upload and rules-preview walkthrough, see the
 [demo guide](docs/synthetic-demo.md). The complete set of remaining product
 gates is tracked in the [demo-to-product roadmap](docs/demo-to-product-roadmap.md).
+The [product gap tracker](docs/pending-product-gaps.md) is the live checkbox
+list of remaining work and records completion evidence.
 The synthetic review UI's typed relationship model and strict evidence rules
 are documented in the [entity graph contract](docs/entity-relationship-graph.md);
 identifier replacement safety tiers are in the [format-aware pseudonym policy](docs/format-aware-pseudonyms.md).

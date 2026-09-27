@@ -10,7 +10,7 @@ workbench must never be described as a production-safe redaction service.
 | Gate | Current evidence | Required exit test |
 | --- | --- | --- |
 | Untrusted parser isolation | PDFium, Pillow and OCR run in-process in the opt-in development API. Files and pixels are bounded, but a malicious parser input can still affect the API process. | Dedicated non-root worker/container, no network egress, read-only filesystem, cgroup/OS CPU and memory budgets, wall-clock timeout, patched parsers, and malformed-file/fuzz regression. API must not decode untrusted media. |
-| Artifact rewriting | Raster pages are newly encoded; PDF candidates are built image-only in memory without copied source objects. UI gets raster previews and digest, not a download. | Deliver a separately reviewed, immutable artifact only after source/candidate provenance binding, hidden-layer/metadata checks, visual QA and reviewer approval. Test real mixed PDF/image cases and failure paths. |
+| Artifact rewriting | Raster pages are newly encoded; PDF candidates are built image-only in memory without copied source objects. The synthetic workbench can save an unqualified local review copy after explicit acknowledgement; PDF/PNG bytes are digest-checked before download. | Deliver a separately reviewed, immutable artifact only after source/candidate provenance binding, hidden-layer/metadata checks, visual QA and reviewer approval. Test real mixed PDF/image cases and failure paths. |
 | Detection coverage | Rule matching plus OCR can miss prose names, oblique text, handwriting, low contrast, language variants, images, and sensitive context. Same-engine OCR residual count is not independent. | Independently annotated, rights-cleared, blinded holdout by format/language/entity type; report exact false negatives and uncertainty. Independently inspect final pixels/objects; abstain on unreadable content. See [holdout protocol](holdout-evaluation.md). |
 | Privacy and utility | Span agreement does not measure re-identification, linkability, or task utility. | Threat-model buyer and auxiliary data, run linkage/re-identification exercises, quantify task utility, set and validate policy thresholds and escalation decisions for each release profile. |
 | Durable data plane | PostgreSQL metadata, encrypted object, key, and worker contracts exist, but are not wired into a deployable end-to-end lifecycle. | Operate the full path with tenant-bound OIDC, encrypted object custody, KMS, fenced queue workers, transactional metadata, immutable audit, controlled delivery, and failure/recovery tests. |
@@ -38,3 +38,5 @@ degrade to an unverified path.
    scanned and mixed PDFs, image formats, and context-sensitive identifiers.
 5. Integrate the durable data plane and execute a security/operational pilot
    before changing the production guard.
+
+The actively maintained checkbox tracker is [pending-product-gaps.md](pending-product-gaps.md).
