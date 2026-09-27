@@ -53,7 +53,7 @@ It is not a benchmark, adjudication system, release gate, or identity-resolution
 
 ### Coverage-aware recall bounds
 
-The synthetic scorecard additionally emits `coverage_aware_recall` for the
+The v2 synthetic scorecard additionally emits `coverage_aware_recall` for the
 automatic and reviewer-corrected inputs, overall and per source format/entity
 type. It preserves the existing assessed-only exact-span measurements and
 adds eligible, assessed, and abstained document and gold-positive counts.

@@ -28,7 +28,9 @@ def test_scorecard_separates_automatic_reviewed_format_type_and_graph_results():
 
 
 def test_coverage_aware_recall_retains_abstained_gold_positives_in_bounds():
-    report = scorecard(**inputs())["coverage_aware_recall"]
+    full_report = scorecard(**inputs())
+    assert full_report["schema_version"] == "d07-scorecard-v2"
+    report = full_report["coverage_aware_recall"]
     automatic = report["automatic"]["all_formats"]
     corpus = automatic["corpus"]
     assert automatic["status"] == "SCORED"
@@ -52,6 +54,35 @@ def test_coverage_aware_recall_retains_abstained_gold_positives_in_bounds():
     assert json_slice["corpus"]["eligible_gold_positives"] == 1
     assert json_slice["corpus"]["operational_recall_lower_bound"] == 0.0
     assert json_slice["corpus"]["operational_recall_upper_bound"] == 1.0
+
+
+def test_coverage_bounds_are_per_format_and_type_and_zero_gold_is_never_perfect():
+    documents = (
+        GoldDocument("text", "Ada", (Annotation(0, 3, "PERSON_NAME"),)),
+        GoldDocument("json", "a@example.test", (Annotation(0, 14, "EMAIL"),)),
+        GoldDocument("image", "no labels", ()),
+    )
+    automatic = [
+        {"id": "text", "annotations": [{"start": 0, "end": 3, "entity_type": "PERSON_NAME"}]},
+        {"id": "json", "annotations": []},
+        {"id": "image", "annotations": []},
+    ]
+    values = dict(documents=documents, formats={"text": "text", "json": "json", "image": "image"},
+                  automatic=automatic, reviewer_corrected=automatic, abstentions={},
+                  graph_gold=None, graph_automatic=None, graph_reviewer_corrected=None, primary_engine="synthetic")
+    report = scorecard(**values)["coverage_aware_recall"]["automatic"]["by_format"]
+    text_person = report["text"]["per_entity"]["PERSON_NAME"]
+    assert (text_person["eligible_documents"], text_person["assessed_documents"],
+            text_person["abstained_documents"], text_person["eligible_gold_positives"],
+            text_person["conditional_recall"], text_person["operational_recall_lower_bound"],
+            text_person["operational_recall_upper_bound"]) == (1, 1, 0, 1, 1.0, 1.0, 1.0)
+    json_email = report["json"]["per_entity"]["EMAIL"]
+    assert (json_email["eligible_gold_positives"], json_email["assessed_gold_positives"],
+            json_email["abstained_gold_positives"], json_email["conditional_recall"],
+            json_email["operational_recall_lower_bound"], json_email["operational_recall_upper_bound"]) == (1, 1, 0, 0.0, 0.0, 0.0)
+    image = report["image"]["corpus"]
+    assert (image["eligible_documents"], image["eligible_gold_positives"], image["conditional_recall"],
+            image["operational_recall_lower_bound"], image["operational_recall_upper_bound"]) == (1, 0, None, None, None)
 
 
 def test_all_abstained_documents_have_no_span_metrics_or_format_scores():

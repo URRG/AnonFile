@@ -14,7 +14,7 @@ from typing import Any
 
 from app.evaluation import GoldDocument, canonical_hash, evaluate, parse_gold, parse_predictions
 
-VERSION = "d07-scorecard-v1"
+VERSION = "d07-scorecard-v2"
 _FORMATS = frozenset({"text", "csv", "json", "jsonl", "pdf", "image"})
 _ABSTENTIONS = frozenset({"UNSUPPORTED_FORMAT", "LOW_CONFIDENCE", "NO_DEFENSIBLE_LOCATOR",
                           "INDEPENDENT_ENGINE_UNAVAILABLE", "UNTOUCHED_ARTIFACT_UNAVAILABLE"})
