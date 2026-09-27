@@ -26,7 +26,22 @@ def test_current_edge_decisions_map_to_transient_claims():
     assert report["decisions"] == {"accepted": 1, "rejected": 1, "pending": 1}
 
 
-@pytest.mark.parametrize("change", [lambda g: g["edges"][0].update(id="edge_bad"), lambda g: g["edges"][0]["evidence"][0].update(document_id="foreign"), lambda g: g["edges"][0]["evidence"][0].pop("locator")])
+@pytest.mark.parametrize("change", [lambda g: g["edges"][0].update(id="edge_bad"),
+                                  lambda g: g["edges"][0].update(type="client_of"),
+                                  lambda g: g["edges"].append(dict(g["edges"][0])),
+                                  lambda g: g["edges"][0]["evidence"][0].update(document_id="foreign"),
+                                  lambda g: next(edge for edge in g["edges"] if edge["type"] == "works_at")["evidence"][0].update(document_id="upload-b"),
+                                  lambda g: g["edges"][0]["evidence"][0].pop("locator")])
 def test_tampered_live_graph_fails_closed(change):
     value = graph(); change(value)
     with pytest.raises(GraphAdjudicationError): adapt_live_graph(entity_graph=value, batch_document_ids=frozenset({"upload-a", "upload-b", "upload-c"}))
+
+
+def test_unknown_or_repeated_edge_decisions_fail_closed():
+    value = graph()
+    current = value["edges"][0]["id"]
+    for decisions in ((("edge_0000000000000000", "ACCEPT"),),
+                      ((current, "ACCEPT"), (current, "REJECT"))):
+        with pytest.raises(GraphAdjudicationError):
+            adapt_live_graph(entity_graph=value, batch_document_ids=frozenset({"upload-a", "upload-b", "upload-c"}),
+                             decisions=decisions)
