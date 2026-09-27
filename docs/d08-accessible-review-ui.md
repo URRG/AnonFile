@@ -14,8 +14,10 @@ does not authorize release, export, or processing of real supplier data.
   evidence buttons, table scroller, and controls. Motion is disabled when the
   operating system requests reduced motion.
 - The layout collapses from the map/detail columns at narrow widths and keeps
-  the large map and relationship table horizontally scrollable. Controls meet
-  a 44px minimum height, supporting touch and 200–400% browser zoom.
+  the large map and relationship table horizontally scrollable. Resize-driven
+  zoom never shrinks map labels below 80%; narrow views open the table instead
+  of making an illegible whole-map overview. Controls meet a 44px minimum
+  height. Automated checks cover these rules, not actual 200–400% use.
 - A batch with more than 24 visible nodes or 36 visible edges opens the
   semantic relationship table automatically. Each table source/target selects
   that node; each evidence button opens the same precise evidence workflow as

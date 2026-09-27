@@ -5,7 +5,7 @@ import ts from 'typescript'
 
 const navigationSource = readFileSync(new URL('../src/review-navigation.ts', import.meta.url), 'utf8')
 const navigationCompiled = ts.transpileModule(navigationSource, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText
-const { isDenseReviewGraph, moveReviewFocus } = await import(`data:text/javascript;base64,${Buffer.from(navigationCompiled).toString('base64')}`)
+const { isDenseReviewGraph, moveReviewFocus, readableReviewZoom } = await import(`data:text/javascript;base64,${Buffer.from(navigationCompiled).toString('base64')}`)
 const graphSource = readFileSync(new URL('../src/relationship-graph.tsx', import.meta.url), 'utf8')
 const graphCss = readFileSync(new URL('../src/relationship-graph.css', import.meta.url), 'utf8')
 
@@ -24,6 +24,12 @@ test('larger relationship batches select the accessible table fallback', () => {
   assert.equal(isDenseReviewGraph(24, 36), false)
   assert.equal(isDenseReviewGraph(25, 1), true)
   assert.equal(isDenseReviewGraph(1, 37), true)
+})
+
+test('narrow layouts scroll a readable map instead of shrinking node text to an illegible overview', () => {
+  assert.equal(readableReviewZoom(320, 1100), .8)
+  assert.equal(readableReviewZoom(1100, 1100), .9818181818181818)
+  assert.equal(readableReviewZoom(1200, 1100), 1)
 })
 
 test('review graph exposes accessible navigation, live updates, and evidence controls', () => {

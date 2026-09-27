@@ -1,7 +1,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown, ChevronUp, Focus, Minus, Plus } from 'lucide-react'
 import type { EntityGraph, EntityGraphEdge, EntityGraphEvidence, EntityGraphNode } from './api'
-import { isDenseReviewGraph, moveReviewFocus } from './review-navigation'
+import { isDenseReviewGraph, moveReviewFocus, readableReviewZoom } from './review-navigation'
 import './relationship-graph.css'
 
 const edgeLabel: Record<EntityGraphEdge['type'], string> = {
@@ -39,6 +39,7 @@ export function RelationshipGraph({ graph, documentNames, onInspectDocument }: {
   const [showCommunication, setShowCommunication] = useState(false)
   const [zoom, setZoom] = useState(1)
   const [tableOpen, setTableOpen] = useState(false)
+  const [compact, setCompact] = useState(false)
   const viewport = useRef<HTMLDivElement | null>(null)
   const nodeButtons = useRef(new Map<string, HTMLButtonElement>())
   const visibleEdges = useMemo(() => graph.edges.filter(edge => showCommunication || edge.type !== 'sent_to'), [graph.edges, showCommunication])
@@ -59,13 +60,18 @@ export function RelationshipGraph({ graph, documentNames, onInspectDocument }: {
   const focusGraph = () => {
     const bounds = viewport.current?.getBoundingClientRect()
     if (!bounds) return
-    setZoom(Math.max(.35, Math.min(1, (bounds.width - 36) / width, (bounds.height - 36) / height)))
+    setZoom(readableReviewZoom(bounds.width, width))
   }
   useLayoutEffect(() => {
-    const available = viewport.current?.clientWidth
-    if (available) setZoom(Math.max(.35, Math.min(1, (available - 20) / width)))
+    const element = viewport.current
+    if (!element) return
+    const update = () => { setZoom(readableReviewZoom(element.clientWidth, width)); setCompact(element.clientWidth < 760) }
+    update()
+    const observer = new ResizeObserver(update)
+    observer.observe(element)
+    return () => observer.disconnect()
   }, [width])
-  useEffect(() => { if (dense) setTableOpen(true) }, [dense])
+  useEffect(() => { if (dense || compact) setTableOpen(true) }, [dense, compact])
   useEffect(() => {
     if (selectedId && visibleNodes.some(node => node.id === selectedId)) return
     setSelectedId(visibleNodes[0]?.id ?? null); setSelectedEdgeId(null)
@@ -77,13 +83,13 @@ export function RelationshipGraph({ graph, documentNames, onInspectDocument }: {
     <div className="relationship-map-toolbar">
       <label className="relationship-toggle"><input type="checkbox" checked={showCommunication} onChange={event => setShowCommunication(event.target.checked)} /> Include mail links (sent to)</label>
       <div role="group" aria-label="Map view controls" className="relationship-map-controls">
-        <button type="button" onClick={() => setZoom(value => Math.max(.35, value - .15))} aria-label="Zoom out" title="Zoom out"><Minus aria-hidden="true" size={16} /></button>
+        <button type="button" onClick={() => setZoom(value => Math.max(.8, value - .15))} aria-label="Zoom out" title="Zoom out"><Minus aria-hidden="true" size={16} /></button>
         <span aria-live="polite" aria-label={`Map zoom ${Math.round(zoom * 100)} percent`}>{Math.round(zoom * 100)}%</span>
         <button type="button" onClick={() => setZoom(value => Math.min(1.5, value + .15))} aria-label="Zoom in" title="Zoom in"><Plus aria-hidden="true" size={16} /></button>
         <button type="button" onClick={focusGraph}><Focus aria-hidden="true" size={16} /> Fit map</button>
       </div>
     </div>
-    {dense && <p className="relationship-density-notice" role="status">This batch has a dense map. The accessible relationship table is open below for faster review.</p>}
+    {(dense || compact) && <p className="relationship-density-notice" role="status">{dense ? 'This batch has a dense map.' : 'This view is narrow.'} The accessible relationship table is open below for faster review.</p>}
     <p id="relationship-map-instructions" className="relationship-keyboard-help">Select a node to inspect its facts. Use Left/Right or Up/Down arrow keys to move between map nodes; Home and End jump to the first or last node.</p>
     <div className="relationship-map-layout">
       <div ref={viewport} className="relationship-map-viewport" role="region" tabIndex={0} aria-label="Directed relationship graph" aria-describedby="relationship-map-instructions">

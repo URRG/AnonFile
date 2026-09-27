@@ -14,3 +14,9 @@ export function moveReviewFocus(currentIndex: number, itemCount: number, key: st
 export function isDenseReviewGraph(nodeCount: number, edgeCount: number) {
   return nodeCount > 24 || edgeCount > 36
 }
+
+/** Keep node labels legible and let the viewport scroll instead of shrinking them away. */
+export function readableReviewZoom(viewportWidth: number, graphWidth: number) {
+  if (!Number.isFinite(viewportWidth) || !Number.isFinite(graphWidth) || viewportWidth <= 0 || graphWidth <= 0) return 1
+  return Math.max(.8, Math.min(1, (viewportWidth - 20) / graphWidth))
+}
