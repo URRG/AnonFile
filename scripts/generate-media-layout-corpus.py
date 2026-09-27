@@ -13,7 +13,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from reportlab.pdfgen import canvas
 import reportlab
 
@@ -118,6 +118,49 @@ def build_corpus(output: Path) -> dict[str, dict[str, Any]]:
         scan_draw.text((90, y), text, font=ImageFont.truetype(regular, 32), fill=faint)
     scan.save(output / "blurred-low-contrast-scan.png", format="PNG", optimize=True)
     manifest["blurred-low-contrast-scan.png"] = {"kind": "png", "expected": "abstain", "reason": "low_confidence_or_no_text"}
+
+    # Keep this distinct from the faint scan: it begins as a high-contrast,
+    # fictional label, but the committed construction deliberately destroys
+    # its local edge detail. A provider that nevertheless returns a confident
+    # claim must not authorize a visual candidate.
+    blur_claim = {"text": "Maya Patel", "box": [35, 42, 350, 140]}
+    blurred = Image.new("RGB", (480, 180), (244, 244, 244))
+    blurred_draw = ImageDraw.Draw(blurred)
+    blurred_draw.text((55, 62), blur_claim["text"], font=ImageFont.truetype(bold, 38), fill=(20, 20, 20))
+    blurred = blurred.filter(ImageFilter.GaussianBlur(radius=24))
+    blurred.save(output / "catastrophic-blur-claim.png", format="PNG", optimize=True)
+    manifest["catastrophic-blur-claim.png"] = {
+        "kind": "png", "expected": "abstain", "reason": "no_measurable_raster_edge", "claim": blur_claim,
+    }
+
+    # These two small raster cases model distinct failure boundaries without
+    # relying on OCR model output: a repaint overlapping an unprocessed line,
+    # and two materially overlapping OCR claims. All labels are fictional.
+    neighbor_lines = [
+        {"text": "Maya Patel", "draw": [55, 62], "box": [40, 50, 360, 110], "ink_box": [55, 62, 240, 96]},
+        {"text": "Example neighbor", "draw": [55, 108], "box": [50, 100, 350, 150], "ink_box": [55, 108, 330, 142]},
+    ]
+    neighbor = Image.new("RGB", (420, 190), "white")
+    neighbor_draw = ImageDraw.Draw(neighbor)
+    for line in neighbor_lines:
+        neighbor_draw.text(tuple(line["draw"]), line["text"], font=ImageFont.truetype(regular, 28), fill=(22, 47, 67))
+    neighbor.save(output / "unprocessed-neighbor.png", format="PNG", optimize=True)
+    manifest["unprocessed-neighbor.png"] = {
+        "kind": "png", "expected": "abstain", "reason": "repaint_touches_unprocessed_ocr_ink", "lines": neighbor_lines,
+    }
+
+    overlap_claims = [
+        {"text": "Fictional left", "draw": [55, 74], "box": [45, 60, 260, 120], "source_ink_box": [55, 74, 245, 112]},
+        {"text": "fictional right", "draw": [150, 90], "box": [150, 82, 375, 142], "source_ink_box": [150, 90, 370, 130]},
+    ]
+    overlap = Image.new("RGB", (420, 190), "white")
+    overlap_draw = ImageDraw.Draw(overlap)
+    for claim in overlap_claims:
+        overlap_draw.text(tuple(claim["draw"]), claim["text"], font=ImageFont.truetype(regular, 28), fill=(22, 47, 67))
+    overlap.save(output / "material-ocr-overlap.png", format="PNG", optimize=True)
+    manifest["material-ocr-overlap.png"] = {
+        "kind": "png", "expected": "abstain", "reason": "ambiguous_material_ocr_overlap", "claims": overlap_claims,
+    }
 
     rotated = Image.new("RGB", (280, 520), "white")
     rdraw = ImageDraw.Draw(rotated)

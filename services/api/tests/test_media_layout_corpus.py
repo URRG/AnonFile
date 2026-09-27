@@ -24,23 +24,36 @@ REPO = Path(__file__).resolve().parents[3]
 GENERATOR = REPO / "scripts" / "generate-media-layout-corpus.py"
 
 
-@pytest.fixture()
-def corpus(tmp_path):
+def _generator_module():
     spec = importlib.util.spec_from_file_location("media_layout_corpus", GENERATOR)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture()
+def corpus(tmp_path):
+    module = _generator_module()
     output = tmp_path / "fictional-layout-corpus"
     manifest = module.build_corpus(output)
     assert json.loads((output / "manifest.json").read_text(encoding="utf-8")) == manifest
     return output, manifest
 
 
+def _assert_declared_ink(image, box):
+    """Require a declared source-text region to contain substantial dark ink."""
+    x0, y0, x1, y1 = box
+    region = np.asarray(image.convert("L"), dtype=np.int16)[y0:y1, x0:x1]
+    assert region.size and np.count_nonzero(region <= 245) >= 40, "declared source geometry has no matching raster ink"
+
+
 def test_corpus_is_complete_fictional_and_deterministically_described(corpus):
     output, manifest = corpus
     assert set(manifest) == {
         "single-column.pdf", "two-column.pdf", "table.pdf", "static-form.pdf", "acroform.pdf",
-        "screenshot.png", "blurred-low-contrast-scan.png", "exif-rotated.jpg",
+        "screenshot.png", "blurred-low-contrast-scan.png", "catastrophic-blur-claim.png",
+        "unprocessed-neighbor.png", "material-ocr-overlap.png", "exif-rotated.jpg",
     }
     assert all((output / name).is_file() and (output / name).stat().st_size > 100 for name in manifest)
     assert manifest["table.pdf"]["rows"] == 4
@@ -48,6 +61,16 @@ def test_corpus_is_complete_fictional_and_deterministically_described(corpus):
     # The generated source has one intentional interactive boundary case only.
     assert not PdfReader(output / "static-form.pdf", strict=True).trailer["/Root"].get("/AcroForm")
     assert PdfReader(output / "acroform.pdf", strict=True).trailer["/Root"].get("/AcroForm")
+
+
+def test_corpus_build_is_byte_reproducible(corpus, tmp_path):
+    """Two independent generator calls must yield the same fictional bytes."""
+    output, manifest = corpus
+    second = tmp_path / "fictional-layout-corpus-second-build"
+    second_manifest = _generator_module().build_corpus(second)
+    assert second_manifest == manifest
+    for filename in [*sorted(manifest), "manifest.json"]:
+        assert (second / filename).read_bytes() == (output / filename).read_bytes()
 
 
 def test_single_column_control_is_accepted_and_rebuilt_with_fidelity_metrics(corpus, monkeypatch):
@@ -82,6 +105,23 @@ def test_low_contrast_scan_has_explicit_low_confidence_abstention(corpus, monkey
         txts=["Maya Patel"], boxes=[[(12, 12), (220, 12), (220, 48), (12, 48)]], scores=[0.31]))
     with pytest.raises(PayloadError, match="confidence is too low"):
         media_preview.extract_media((output / "blurred-low-contrast-scan.png").read_bytes(), ".png")
+
+
+def test_catastrophically_blurred_claim_fails_closed_even_when_provider_is_confident(corpus, monkeypatch):
+    """Confidence cannot replace a measurable source-raster edge."""
+    output, manifest = corpus
+    claim = manifest["catastrophic-blur-claim.png"]["claim"]
+    image = Image.open(output / "catastrophic-blur-claim.png").convert("RGB")
+    x0, y0, x1, y1 = claim["box"]
+    pixels = np.asarray(image.convert("L"), dtype=np.int16)[y0:y1, x0:x1]
+    assert pixels.min() < pixels.max(), "catastrophic-blur fixture must remain nonblank"
+    assert max(np.abs(np.diff(pixels, axis=0)).max(), np.abs(np.diff(pixels, axis=1)).max()) < media_preview.MIN_OCR_LINE_EDGE_DELTA
+    monkeypatch.setattr(media_preview, "_engine", lambda: lambda _: SimpleNamespace(
+        txts=[claim["text"]], boxes=[[(x0, y0), (x1, y0), (x1, y1), (x0, y1)]], scores=[0.99]))
+    with pytest.raises(PayloadError, match="lacks measurable source-raster edge detail") as error:
+        media_preview.extract_media((output / "catastrophic-blur-claim.png").read_bytes(), ".png")
+    assert manifest["catastrophic-blur-claim.png"]["expected"] == "abstain"
+    assert claim["text"] not in str(error.value)
 
 
 def test_exif_rotated_jpeg_is_normalized_before_any_layout_review(corpus):
@@ -157,14 +197,17 @@ def test_column_and_overlap_corpus_cases_abstain_without_guessing_reading_order(
 
 
 def test_unprocessed_neighbor_region_abstains_before_pixel_mutation(corpus, monkeypatch):
-    output, _ = corpus
-    image = Image.open(output / "screenshot.png").convert("RGB")
+    output, manifest = corpus
+    image = Image.open(output / "unprocessed-neighbor.png").convert("RGB")
     before = np.asarray(image).copy()
-    secret = "Maya Patel"
+    lines = manifest["unprocessed-neighbor.png"]["lines"]
+    for line in lines:
+        _assert_declared_ink(image, line["ink_box"])
+    secret = lines[0]["text"]
     page = {"number": 1, "image": image, "lines": [
-        {"text": secret, "box": (50, 160, 280, 205), "ink_box": (55, 165, 275, 200), "start": 0, "end": len(secret)},
-        {"text": "unprocessed neighbor", "box": (50, 201, 280, 245), "ink_box": (55, 203, 275, 240),
-         "start": len(secret) + 1, "end": len(secret) + 21},
+        {"text": lines[0]["text"], "box": tuple(lines[0]["box"]), "ink_box": tuple(lines[0]["ink_box"]), "start": 0, "end": len(secret)},
+        {"text": lines[1]["text"], "box": tuple(lines[1]["box"]), "ink_box": tuple(lines[1]["ink_box"]),
+         "start": len(secret) + 1, "end": len(secret) + 1 + len(lines[1]["text"])},
     ]}
     match = {"start": 0, "end": len(secret), "source": secret, "replacement": "[REDACTED]", "applied": True}
     monkeypatch.setattr(media_preview, "_ocr_lines", lambda _image, **_: [])
@@ -172,6 +215,24 @@ def test_unprocessed_neighbor_region_abstains_before_pixel_mutation(corpus, monk
         media_preview.render_candidate([page], [match], "image")
     assert secret not in str(error.value)
     assert np.array_equal(before, np.asarray(image)), "abstention must not mutate the source page"
+
+
+def test_material_ocr_overlap_fixture_fails_closed_before_reading_order_is_invented(corpus, monkeypatch):
+    output, manifest = corpus
+    image = Image.open(output / "material-ocr-overlap.png").convert("RGB")
+    claims = manifest["material-ocr-overlap.png"]["claims"]
+    for claim in claims:
+        _assert_declared_ink(image, claim["source_ink_box"])
+    before = np.asarray(image).copy()
+    monkeypatch.setattr(media_preview, "_engine", lambda: lambda _: SimpleNamespace(
+        txts=[claim["text"] for claim in claims],
+        boxes=[[(claim["box"][0], claim["box"][1]), (claim["box"][2], claim["box"][1]),
+                (claim["box"][2], claim["box"][3]), (claim["box"][0], claim["box"][3])] for claim in claims], scores=[0.99, 0.99]))
+    with pytest.raises(PayloadError, match="OCR layout is ambiguous") as error:
+        media_preview.extract_media((output / "material-ocr-overlap.png").read_bytes(), ".png")
+    assert manifest["material-ocr-overlap.png"]["expected"] == "abstain"
+    assert claims[0]["text"] not in str(error.value)
+    assert np.array_equal(before, np.asarray(image)), "overlap abstention must not mutate the source page"
 
 
 @pytest.mark.parametrize("filename", ["two-column.pdf", "table.pdf", "static-form.pdf", "screenshot.png"])
