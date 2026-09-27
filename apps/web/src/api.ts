@@ -156,8 +156,14 @@ export type BatchAggregateScorecard = { status: 'OBSERVATIONAL_ONLY'; classifica
   qualification: 'NOT_QUALIFIED'; automaticExact: BatchAnnotationCounts; reviewerCorrectedExact: BatchAnnotationCounts;
   finalArtifactValidation: { status: 'ABSTAINED'; reason: 'INDEPENDENT_ENGINE_UNAVAILABLE' | 'NO_EXECUTABLE_BOUND_INDEPENDENT_VALIDATOR' };
   relationshipReview: 'NO_GRAPH_GOLD_OR_REVIEW_STATE' }
+// Optional server-issued navigation binding. It is not user-facing
+// adjudication and does not confer any release or delivery authority.
+export type BatchGraphReviewBinding = { snapshotRef: string; nodes: { graphNodeId: string; nodeRef: string }[];
+  claims: { graphEdgeId: string; claimRef: string }[];
+  posture: 'DEVELOPMENT_BINDING_ONLY_NO_ADJUDICATION_OR_RELEASE' }
 export type BatchInspection = { posture: 'SYNTHETIC_DEMO_ONLY'; releaseAuthorized: false; exportAvailable: false;
   documents: BatchDocument[]; entities: BatchEntity[]; relationships: BatchRelationship[]; entityGraph: EntityGraph;
+  graphReview: BatchGraphReviewBinding | null;
   summary: { files: number; detectedMentions: number; transformedMentions: number; suppressedMentions: number;
     linkedEntities: number; explicitRelationships: number };
   verification: { status: 'REVIEW_REQUIRED'; knownRuleResidualMatches: number; sourceValueResiduals: number; structureFailures: number;
@@ -555,6 +561,27 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
       type: raw.type as BatchRelationship['type'], documentId: raw.document_id as string, basis: raw.basis as string }
   })
   const graph = entityGraph(value.entity_graph, documents, entities, expectedSourceHashes)
+  let graphReview: BatchGraphReviewBinding | null = null
+  if (value.graph_review !== undefined) {
+    const raw = value.graph_review
+    if (!object(raw) || raw.posture !== 'DEVELOPMENT_BINDING_ONLY_NO_ADJUDICATION_OR_RELEASE' ||
+        typeof raw.snapshot_ref !== 'string' || !/^graphsnap:v1:[A-Za-z0-9_-]{43}$/.test(raw.snapshot_ref) ||
+        !Array.isArray(raw.nodes) || !Array.isArray(raw.claims) || raw.nodes.length !== graph.nodes.length || raw.claims.length !== graph.edges.length) batchInvalid()
+    const nodeIds = new Set(graph.nodes.map(node => node.id)); const edgeIds = new Set(graph.edges.map(edge => edge.id))
+    const nodes = raw.nodes.map(item => {
+      if (!object(item) || typeof item.graph_node_id !== 'string' || !nodeIds.delete(item.graph_node_id) ||
+          typeof item.node_ref !== 'string' || !/^graphnode:v1:[A-Za-z0-9_-]{43}$/.test(item.node_ref)) batchInvalid()
+      return { graphNodeId: item.graph_node_id, nodeRef: item.node_ref }
+    })
+    const claims = raw.claims.map(item => {
+      if (!object(item) || typeof item.graph_edge_id !== 'string' || !edgeIds.delete(item.graph_edge_id) ||
+          typeof item.claim_ref !== 'string' || !/^graphclaim:v1:[A-Za-z0-9_-]{43}$/.test(item.claim_ref)) batchInvalid()
+      return { graphEdgeId: item.graph_edge_id, claimRef: item.claim_ref }
+    })
+    if (nodeIds.size || edgeIds.size || new Set(nodes.map(item => item.nodeRef)).size !== nodes.length ||
+        new Set(claims.map(item => item.claimRef)).size !== claims.length) batchInvalid()
+    graphReview = { snapshotRef: raw.snapshot_ref, nodes, claims, posture: 'DEVELOPMENT_BINDING_ONLY_NO_ADJUDICATION_OR_RELEASE' }
+  }
   const summary = value.summary
   if (summary.files !== documents.length || !safeCount(summary.detected_mentions) || !safeCount(summary.transformed_mentions) ||
       !safeCount(summary.suppressed_mentions) ||
@@ -682,7 +709,7 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
     return { name: raw.name, status: raw.status as BatchCheck['status'], detail: raw.detail }
   })
   if (!value.limitations.every(item => safeText(item, 600))) batchInvalid()
-  return { posture: 'SYNTHETIC_DEMO_ONLY', releaseAuthorized: false, exportAvailable: false, documents, entities, relationships, entityGraph: graph,
+  return { posture: 'SYNTHETIC_DEMO_ONLY', releaseAuthorized: false, exportAvailable: false, documents, entities, relationships, entityGraph: graph, graphReview,
     summary: { files: summary.files as number, detectedMentions: summary.detected_mentions as number,
       transformedMentions: summary.transformed_mentions as number, suppressedMentions: summary.suppressed_mentions as number,
       linkedEntities: summary.linked_entities as number, explicitRelationships: summary.explicit_relationships as number },

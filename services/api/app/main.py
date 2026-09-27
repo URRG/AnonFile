@@ -78,6 +78,7 @@ from app.delivery_readiness import (DeliveryReadiness, DeliveryReadinessError,
 from app.policies import TAXONOMY_CATEGORIES
 from app.durable_repository import DurableStore
 from app.durable_graph_review import DurableGraphReviewAdapter
+from app.demo_graph_review_binding import snapshot_binding
 from app.revisioned_graph_review import (GraphIdentityMerge, GraphIdentitySplit, GraphReviewConflict,
                                          GraphReviewError, GraphSplitEndpointAssignment)
 
@@ -1230,7 +1231,23 @@ def create_app() -> FastAPI:
         def inspect_synthetic_batch(request: DemoBatchCreate,
                                     principal: Principal = Depends(require_roles("processor"))):
             """Bounded synthetic review data; demo copies are never release artifacts."""
-            return analyze_batch(request.model_dump())
+            result = analyze_batch(request.model_dump())
+            # Only this trusted route can bind its freshly-produced graph.  No
+            # graph, tenant, claim, or evidence reference is ever accepted from
+            # the batch request.  Storage trouble must not break the demo.
+            if app.state.graph_reviews is not None:
+                try:
+                    tenant_ref, _ = graph_review_principal_refs(principal)
+                    binding = snapshot_binding(tenant_ref=tenant_ref, graph=result.get("entity_graph"))
+                    if binding is not None:
+                        snapshot, public_binding = binding
+                        app.state.graph_reviews.create_snapshot(snapshot, actor="demo-batch-bridge")
+                        result["graph_review"] = public_binding
+                except Exception:
+                    # This optional development navigation seam is fail-closed:
+                    # no claim of durable review is made when it cannot persist.
+                    pass
+            return result
 
         @app.post("/demo/inspect", response_model=DemoInspectView)
         def inspect_synthetic_demo(request: DemoInspectCreate,

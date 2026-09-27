@@ -17,6 +17,20 @@ from test_access import TOKENS, auth
 from test_control_plane_api import setup
 
 
+def demo_batch_payload():
+    def file(identifier, name, content):
+        return {"id": identifier, "name": name,
+                "content_base64": base64.b64encode(content.encode()).decode()}
+    return {"synthetic_only": True, "files": [
+        file("mail", "mail.txt", "From: Riya <riya@example.test>\nTo: Sita <sita@example.test>\n"),
+        file("roles", "roles.json", '[{"person_name":"Riya","works_at":"Harborline Systems"}]'),
+    ]}
+
+
+def enable_demo(monkeypatch):
+    monkeypatch.setenv("ANONFLOW_DEMO_MODE", "enabled")
+
+
 def ref(kind, value):
     return f"{kind}:v1:" + base64.urlsafe_b64encode(hashlib.sha256(value.encode()).digest()).decode().rstrip("=")
 
@@ -181,3 +195,57 @@ def test_identity_routes_are_reviewer_only_cas_and_source_free(tmp_path, monkeyp
         assert merged.status_code == 200 and merged.json()["revision"] == 1
         assert "graphevidence" not in merged.text
         assert client.post(path, headers=auth("reviewer"), json=body).status_code == 409
+
+
+def test_batch_server_binds_only_its_graph_to_encrypted_review_and_survives_restart(tmp_path, monkeypatch):
+    setup(monkeypatch, tmp_path, "sqlite"); enable_demo(monkeypatch)
+    app = create_app()
+    with TestClient(app) as client:
+        response = client.post("/demo/batch/inspect", headers=auth(), json=demo_batch_payload())
+        assert response.status_code == 200, response.text
+        body = response.json(); binding = body["graph_review"]
+        assert binding["posture"] == "DEVELOPMENT_BINDING_ONLY_NO_ADJUDICATION_OR_RELEASE"
+        assert set(binding) == {"snapshot_ref", "nodes", "claims", "posture"}
+        assert len(binding["nodes"]) == len(body["entity_graph"]["nodes"])
+        assert len(binding["claims"]) == len(body["entity_graph"]["edges"])
+        rendered = json.dumps(binding)
+        for forbidden in ("Riya", "Sita", "Harborline", "example.test", "graphevidence", TOKENS["processor"]):
+            assert forbidden not in rendered
+        review = client.get("/graph-reviews/" + binding["snapshot_ref"], headers=auth("reviewer"))
+        assert review.status_code == 200 and review.json()["revision"] == 0
+        assert "graphevidence" not in review.text
+        tenant_ref = ref("tenantref", "tenant-a")
+        stored = app.state.store.get_control("graph_review", binding["snapshot_ref"], tenant_ref)
+        assert "Riya" not in json.dumps(stored) and "Harborline" not in json.dumps(stored)
+
+    # A fresh encrypted-store instance can read the same immutable snapshot.
+    with TestClient(create_app()) as reopened:
+        assert reopened.get("/graph-reviews/" + binding["snapshot_ref"], headers=auth("reviewer")).status_code == 200
+
+
+def test_batch_binding_is_tenant_bound_and_optional_for_empty_invalid_or_unavailable_graph(tmp_path, monkeypatch):
+    setup(monkeypatch, tmp_path, "sqlite"); enable_demo(monkeypatch)
+    principals = json.loads(os.environ["ANONFLOW_DEV_PRINCIPALS"])
+    principals.append({"token": "tenant-b-reviewer".ljust(40, "-"), "subject": "tenant-b-reviewer",
+                       "tenant": "tenant-b", "roles": ["reviewer"]})
+    monkeypatch.setenv("ANONFLOW_DEV_PRINCIPALS", json.dumps(principals))
+    app = create_app()
+    with TestClient(app) as client:
+        bound = client.post("/demo/batch/inspect", headers=auth(), json=demo_batch_payload()).json()["graph_review"]
+        assert client.get("/graph-reviews/" + bound["snapshot_ref"], headers={
+            "Authorization": "Bearer " + "tenant-b-reviewer".ljust(40, "-")}).status_code == 404
+        empty = client.post("/demo/batch/inspect", headers=auth(), json={"synthetic_only": True, "files": [
+            {"id": "one", "name": "one.txt", "content_base64": base64.b64encode(b"ordinary text").decode()},
+            {"id": "two", "name": "two.txt", "content_base64": base64.b64encode(b"another ordinary text").decode()},
+        ]})
+        assert empty.status_code == 200 and "graph_review" not in empty.json()
+
+        import app.main as main
+        original = main.analyze_batch
+        def invalid(payload):
+            value = original(payload); value["entity_graph"] = {"nodes": [{"id": "bad", "kind": "person"}], "edges": []}; return value
+        monkeypatch.setattr(main, "analyze_batch", invalid)
+        assert "graph_review" not in client.post("/demo/batch/inspect", headers=auth(), json=demo_batch_payload()).json()
+        monkeypatch.setattr(main, "analyze_batch", original)
+        monkeypatch.setattr(app.state.graph_reviews, "create_snapshot", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError()))
+        assert "graph_review" not in client.post("/demo/batch/inspect", headers=auth(), json=demo_batch_payload()).json()
