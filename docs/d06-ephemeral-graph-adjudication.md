@@ -39,3 +39,29 @@ audit trail, authorization binding, revision/CAS behavior, or release effect.
 Every invocation is ephemeral and must be discarded. It does not establish
 real-world identity resolution, source correctness, evidence sufficiency, or
 permission to release data.
+
+## Revisioned identity overlay
+
+`app.revisioned_graph_review` separately provides a trusted-server, in-process
+review primitive for D06 identity overlays. It has no route, API contract,
+storage adapter, durable claim, or release effect. Its merge and split actions
+are optimistic-revision updates with a redacted public view and append-only
+review audit.
+
+A merge has exactly two *current* person members and chooses one of them as
+the canonical current person. The snapshot's original claims and evidence
+bindings are never rewritten. A merge fails closed if it would make any active
+person-to-person relationship a self-link.
+
+A split names current replacement person nodes and must provide exactly one
+assignment for every active incident person endpoint. Each assignment contains
+both the opaque claim ID and `source` or `target`; duplicates, omissions,
+unrelated endpoints, and rejected identifiers fail closed. This endpoint-level
+schema deliberately avoids assigning an entire person-to-person claim twice or
+silently overwriting one side.
+
+After every decision or overlay, the primitive recalculates its aggregate-only
+multiple-affiliation and multiple-assignment prompts. These remain
+`UNRESOLVED_REVIEW_REQUIRED`: overlays do not resolve conflicts, authorize a
+release, or establish a real-world identity fact. Evidence bindings never
+appear in the public view or overlay audit.
