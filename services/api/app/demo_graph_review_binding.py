@@ -29,7 +29,10 @@ def snapshot_binding(*, tenant_ref: str, graph: object) -> tuple[GraphSnapshot, 
     if not isinstance(graph, dict):
         return None
     nodes, edges = graph.get("nodes"), graph.get("edges")
-    if not isinstance(nodes, list) or not isinstance(edges, list) or not nodes or not edges:
+    # Fail before allocating opaque IDs for an oversized public graph.  The
+    # revisioned domain checks the same maximums as a second line of defense.
+    if (not isinstance(nodes, list) or not isinstance(edges, list) or not nodes or not edges
+            or len(nodes) > 100 or len(edges) > 200):
         return None
     node_refs: dict[str, str] = {}
     snapshots: list[GraphNodeSnapshot] = []

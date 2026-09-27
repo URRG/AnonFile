@@ -279,6 +279,30 @@ test('batch client accepts only a typed, non-source entity graph', async t => {
   }
 })
 
+test('batch client accepts only a complete opaque optional graph-review binding', async t => {
+  const response = valid()
+  response.entity_graph = { nodes: [{ id: 'E1', kind: 'person', label: 'Gita', document_ids: ['f1'] }, { id: 'organization_1', kind: 'organization', label: 'Organization 1', document_ids: ['f2'] }], edges: [{ id: 'edge_0123456789abcdef', type: 'works_at', source_id: 'E1', target_id: 'organization_1', evidence: [{ document_id: 'f2', rule: 'explicit_structured_field_pair', field: 'company', locator: { status: 'SUPPORTED', kind: 'text_span', start: 0, end: 4, line_start: 1, line_end: 1 } }] }] }
+  const ref = (kind, character) => `${kind}:v1:${character.repeat(43)}`
+  response.graph_review = { snapshot_ref: ref('graphsnap', 'a'), posture: 'DEVELOPMENT_BINDING_ONLY_NO_ADJUDICATION_OR_RELEASE',
+    nodes: [{ graph_node_id: 'E1', node_ref: ref('graphnode', 'b') }, { graph_node_id: 'organization_1', node_ref: ref('graphnode', 'c') }],
+    claims: [{ graph_edge_id: 'edge_0123456789abcdef', claim_ref: ref('graphclaim', 'd') }] }
+  t.mock.method(globalThis, 'fetch', async () => Response.json(response))
+  const accepted = await inspectSyntheticBatch(request)
+  assert.equal(accepted.graphReview.snapshotRef, response.graph_review.snapshot_ref)
+  t.mock.restoreAll()
+  for (const change of [
+    value => { value.graph_review.posture = 'REVIEW_ONLY_NO_RELEASE_OR_DELIVERY' },
+    value => { value.graph_review.nodes[1].graph_node_id = 'E1' },
+    value => { value.graph_review.claims[0].graph_edge_id = 'edge_missing' },
+    value => { value.graph_review.nodes[0].node_ref = value.graph_review.nodes[1].node_ref },
+  ]) {
+    const tampered = structuredClone(response); change(tampered)
+    t.mock.method(globalThis, 'fetch', async () => Response.json(tampered))
+    await assert.rejects(inspectSyntheticBatch(request), /invalid review result/)
+    t.mock.restoreAll()
+  }
+})
+
 test('graph locators are bounded, line-bound to source text, and preserve Unicode navigation offsets', async t => {
   const response = valid()
   response.documents[1].text = '😀\nnote'; response.documents[1].candidate_text = '😀\nnote'; response.documents[1].size_bytes = 9

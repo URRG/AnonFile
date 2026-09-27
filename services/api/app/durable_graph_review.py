@@ -19,6 +19,10 @@ from app.revisioned_graph_review import (GraphClaimSnapshot, GraphIdentityMerge,
     GraphSnapshot, GraphSplitEndpointAssignment, RevisionedGraphReviewStore)
 
 
+DEMO_BATCH_SNAPSHOT_CAP = 8
+_DEMO_BATCH_ORIGIN = "demo_batch_snapshot_binding_v1"
+
+
 def _record(*, tenant: str, snapshot: GraphSnapshot, state: dict[str, Any]) -> dict[str, Any]:
     return {"id": snapshot.snapshot_ref, "kind": "graph_review", "tenant": tenant,
             "created_at": "server", "expires_at": time.time() + 3600,
@@ -36,6 +40,36 @@ class DurableGraphReviewAdapter:
         state = RevisionedGraphReviewStore(); state.create_snapshot(snapshot)
         self._store.add_control(_record(tenant=snapshot.tenant_ref, snapshot=snapshot,
             state={"snapshot": _snapshot_dict(snapshot), "events": []}), actor)
+
+    def create_demo_batch_snapshot(self, snapshot: GraphSnapshot, *, actor: str = "demo-batch-bridge") -> bool:
+        """Atomically register one optional demo snapshot, subject to a small cap.
+
+        This deliberately does not alter generic ``create_snapshot`` semantics:
+        explicit trusted-server review snapshots and unrelated controls remain
+        governed only by their existing capacity rules.  Expired controls are
+        purged within the same DurableStore transaction before counting.
+        """
+        state = RevisionedGraphReviewStore(); state.create_snapshot(snapshot)
+        data = _record(tenant=snapshot.tenant_ref, snapshot=snapshot,
+                       state={"snapshot": _snapshot_dict(snapshot), "events": [], "origin": _DEMO_BATCH_ORIGIN})
+        with self._store._transaction():
+            self._store._purge()
+            self._store._purge_controls()
+            existing = sum(record["tenant"] == snapshot.tenant_ref
+                           and record["payload"].get("origin") == _DEMO_BATCH_ORIGIN
+                           for record in self._store.controls["graph_review"].values())
+            if existing >= DEMO_BATCH_SNAPSHOT_CAP:
+                return False
+            self._store._validate_control(data)
+            if data["id"] in self._store.controls["graph_review"] or self._store._used_identifier(data["id"], "graph_review"):
+                raise HTTPException(409, "Object already exists")
+            if (sum(len(values) for values in self._store.controls.values()) >= self._store.MAX_CONTROLS
+                    or sum(item["tenant"] == data["tenant"] for values in self._store.controls.values()
+                           for item in values.values()) >= self._store.MAX_CONTROLS_PER_TENANT):
+                raise HTTPException(429, "Development control capacity exceeded")
+            self._store._append_event(data["tenant"], "graph_review.created", data["id"], actor, record=data)
+            self._store.controls["graph_review"][data["id"]] = data
+            return True
 
     def read(self, *, tenant_ref: str, snapshot_ref: str) -> dict[str, Any]:
         raw = self._store.get_control("graph_review", snapshot_ref, tenant_ref)

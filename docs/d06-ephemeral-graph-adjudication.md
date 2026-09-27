@@ -100,3 +100,10 @@ user-facing adjudication**. It has no UI control, no new authority, and no
 release, delivery, qualification, or identity-resolution effect. Empty,
 invalid, or unavailable durable graph state simply omits the optional binding
 and leaves the current synthetic demo response unchanged.
+
+To keep this optional development seam from consuming shared control capacity,
+at most eight active bridge-created snapshots may exist per tenant. The cap is
+checked and inserted with its audit event in one encrypted-store transaction.
+When saturated, the batch response simply omits `graph_review`; existing
+trusted-server graph snapshots and unrelated controls are not subject to this
+bridge-only cap.

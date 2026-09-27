@@ -1241,8 +1241,8 @@ def create_app() -> FastAPI:
                     binding = snapshot_binding(tenant_ref=tenant_ref, graph=result.get("entity_graph"))
                     if binding is not None:
                         snapshot, public_binding = binding
-                        app.state.graph_reviews.create_snapshot(snapshot, actor="demo-batch-bridge")
-                        result["graph_review"] = public_binding
+                        if app.state.graph_reviews.create_demo_batch_snapshot(snapshot):
+                            result["graph_review"] = public_binding
                 except Exception:
                     # This optional development navigation seam is fail-closed:
                     # no claim of durable review is made when it cannot persist.

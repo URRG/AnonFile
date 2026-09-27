@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from app.durable_graph_review import DurableGraphReviewAdapter, _snapshot_dict
 from app.durable_repository import DurableStore
+from app.demo_graph_review_binding import snapshot_binding
 from app.main import create_app
 from app.revisioned_graph_review import (GraphClaimSnapshot, GraphIdentityMerge, GraphIdentitySplit,
     GraphNodeSnapshot, GraphReviewConflict, GraphSnapshot, GraphSplitEndpointAssignment)
@@ -247,5 +248,41 @@ def test_batch_binding_is_tenant_bound_and_optional_for_empty_invalid_or_unavail
         monkeypatch.setattr(main, "analyze_batch", invalid)
         assert "graph_review" not in client.post("/demo/batch/inspect", headers=auth(), json=demo_batch_payload()).json()
         monkeypatch.setattr(main, "analyze_batch", original)
-        monkeypatch.setattr(app.state.graph_reviews, "create_snapshot", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError()))
+        monkeypatch.setattr(app.state.graph_reviews, "create_demo_batch_snapshot", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError()))
         assert "graph_review" not in client.post("/demo/batch/inspect", headers=auth(), json=demo_batch_payload()).json()
+
+
+def test_demo_batch_snapshot_cap_is_atomic_and_does_not_consume_unrelated_control_capacity(tmp_path, monkeypatch):
+    setup(monkeypatch, tmp_path, "sqlite"); enable_demo(monkeypatch)
+    app = create_app(); tenant = ref("tenantref", "tenant-a")
+    with TestClient(app) as client:
+        replies = [client.post("/demo/batch/inspect", headers=auth(), json=demo_batch_payload()) for _ in range(9)]
+        assert all(reply.status_code == 200 for reply in replies)
+        assert all("graph_review" in reply.json() for reply in replies[:8])
+        assert "graph_review" not in replies[8].json()
+        demo_records = app.state.store.list_controls("graph_review", tenant)
+        assert len(demo_records) == 8
+
+        # Generic trusted-server graph registration retains its existing limit,
+        # and an unrelated control still has normal shared capacity available.
+        original = snapshot(tenant)
+        app.state.graph_reviews.create_snapshot(GraphSnapshot(
+            tenant, ref("graphsnap", "generic-after-demo-cap"), original.nodes, original.claims))
+        app.state.store.add_control({"id": "unrelated-control", "kind": "policy_snapshot", "tenant": tenant,
+                                     "created_at": "server", "expires_at": time.time() + 60, "size_bytes": 0,
+                                     "payload": {"test": "unrelated"}}, "test")
+        assert len(app.state.store.list_controls("graph_review", tenant)) == 9
+        assert len(app.state.store.list_controls("policy_snapshot", tenant)) == 1
+
+
+def test_demo_binding_rejects_oversized_graph_before_generating_snapshot_references():
+    tenant = ref("tenantref", "oversized")
+    nodes = [{"id": f"node-{index}", "kind": "person", "label": "Alias", "document_ids": []}
+             for index in range(101)]
+    assert snapshot_binding(tenant_ref=tenant, graph={"nodes": nodes, "edges": [{
+        "id": "edge", "type": "sent_to", "source_id": "node-0", "target_id": "node-1", "evidence": [{}]}]}) is None
+    nodes = [{"id": "person", "kind": "person", "label": "Alias", "document_ids": []},
+             {"id": "organization", "kind": "organization", "label": "Organization 1", "document_ids": []}]
+    edges = [{"id": f"edge-{index}", "type": "works_at", "source_id": "person", "target_id": "organization",
+              "evidence": [{}]} for index in range(201)]
+    assert snapshot_binding(tenant_ref=tenant, graph={"nodes": nodes, "edges": edges}) is None
