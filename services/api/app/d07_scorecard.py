@@ -68,6 +68,14 @@ def _abstentions(documents: tuple[GoldDocument, ...], value: dict[str, str]) -> 
             "by_reason": {reason: counts[reason] for reason in sorted(counts)}}
 
 
+def _span_metrics(documents: tuple[GoldDocument, ...], predictions: dict[str, tuple[Any, ...]]) -> dict[str, Any]:
+    """Score only assessed documents; an empty assessed set is an abstention."""
+    if not documents:
+        return {"status": "ABSTAINED", "reason": "NO_ASSESSED_DOCUMENTS", "exact": None}
+    selected_predictions = {document.id: predictions[document.id] for document in documents}
+    return {"status": "SCORED", **evaluate(documents, selected_predictions)}
+
+
 def _graph_metrics(gold: set[tuple[str, str, str]] | None,
                    predicted: set[tuple[str, str, str]] | None) -> dict[str, Any]:
     # Validate both containers before any set operation.  Direct callers must
@@ -142,13 +150,15 @@ def scorecard(*, documents: tuple[GoldDocument, ...], formats: dict[str, str], a
     automatic_predictions = parse_predictions(automatic, documents)
     reviewer_predictions = parse_predictions(reviewer_corrected, documents)
     formats = _format_map(documents, formats)
-    by_format = {name: {"automatic": _slice(documents, automatic_predictions, name, formats),
-                        "reviewer_corrected": _slice(documents, reviewer_predictions, name, formats)}
+    abstention_summary = _abstentions(documents, abstentions)
+    assessed_documents = tuple(document for document in documents if document.id not in abstentions)
+    by_format = {name: {"automatic": _slice(assessed_documents, automatic_predictions, name, formats),
+                        "reviewer_corrected": _slice(assessed_documents, reviewer_predictions, name, formats)}
                  for name in sorted(set(formats.values()))}
     result = {"schema_version": VERSION, "classification": "SYNTHETIC_INTERNAL_EVALUATION_ONLY",
-              "qualification": "NOT_QUALIFIED", "automatic": evaluate(documents, automatic_predictions),
-              "reviewer_corrected": evaluate(documents, reviewer_predictions), "by_format": by_format,
-              "abstentions": _abstentions(documents, abstentions),
+              "qualification": "NOT_QUALIFIED", "automatic": _span_metrics(assessed_documents, automatic_predictions),
+              "reviewer_corrected": _span_metrics(assessed_documents, reviewer_predictions), "by_format": by_format,
+              "abstentions": abstention_summary,
               "graph": {"automatic": _graph_metrics(graph_gold, graph_automatic),
                         "reviewer_corrected": _graph_metrics(graph_gold, graph_reviewer_corrected)},
               "final_artifact_validation": _final_validation(final_validation, primary_engine),

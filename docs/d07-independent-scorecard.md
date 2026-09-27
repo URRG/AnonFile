@@ -2,7 +2,7 @@
 
 `app.d07_scorecard` is an aggregate-only, synthetic evaluation helper. It reports exact false negatives separately for automatic detector output and reviewer-corrected output, by source format and entity type. It also records bounded abstention counts and exact supplied graph-claim agreement by relation type.
 
-It is not a benchmark, adjudication system, release gate, or identity-resolution proof. Reports omit text and document IDs. Empty/unsupported slices and final-artifact checks remain explicit abstentions.
+It is not a benchmark, adjudication system, release gate, or identity-resolution proof. Reports omit text and document IDs. Abstained documents are excluded from every span metric and format slice; an all-abstained span set has no metrics. Empty/unsupported slices and final-artifact checks remain explicit abstentions.
 
 ## Synthetic demo integration
 

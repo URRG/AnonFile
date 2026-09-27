@@ -17,13 +17,26 @@ def inputs():
 
 def test_scorecard_separates_automatic_reviewed_format_type_and_graph_results():
     report = scorecard(**inputs())
-    assert report["automatic"]["exact"]["corpus"]["false_negatives"] == 2
+    assert report["automatic"]["exact"]["corpus"]["false_negatives"] == 1
     assert report["reviewer_corrected"]["exact"]["corpus"]["false_negatives"] == 0
     assert report["by_format"]["text"]["automatic"]["exact"]["per_entity"]["EMAIL"]["false_negatives"] == 1
+    assert report["by_format"]["json"]["automatic"] == {"documents": 0, "status": "NO_DOCUMENTS", "exact": None}
     assert report["abstentions"] == {"abstained_documents": 1, "assessed_documents": 1, "by_reason": {"LOW_CONFIDENCE": 1}}
     assert report["graph"]["automatic"]["exact"]["false_negatives"] == 1
     assert report["graph"]["reviewer_corrected"]["exact"]["true_positives"] == 1
     assert "Ada" not in str(report) and "a@example.test" not in str(report)
+
+
+def test_all_abstained_documents_have_no_span_metrics_or_format_scores():
+    values = inputs(); values["abstentions"] = {"one": "LOW_CONFIDENCE", "two": "NO_DEFENSIBLE_LOCATOR"}
+    report = scorecard(**values)
+    expected = {"status": "ABSTAINED", "reason": "NO_ASSESSED_DOCUMENTS", "exact": None}
+    assert report["automatic"] == expected
+    assert report["reviewer_corrected"] == expected
+    assert all(value["automatic"] == {"documents": 0, "status": "NO_DOCUMENTS", "exact": None}
+               and value["reviewer_corrected"] == {"documents": 0, "status": "NO_DOCUMENTS", "exact": None}
+               for value in report["by_format"].values())
+    assert report["abstentions"]["assessed_documents"] == 0
 
 
 def test_same_engine_or_missing_final_validation_abstains_not_independent():
