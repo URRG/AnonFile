@@ -195,6 +195,30 @@ def test_ocr_geometry_rejects_one_overbroad_line_that_hides_adjacent_source_ink(
     assert hidden not in str(error.value)
 
 
+def test_ocr_geometry_rejects_underlined_gap_between_two_source_regions(monkeypatch):
+    """A one-pixel horizontal rule must not bridge separate ink components."""
+    from types import SimpleNamespace
+    from app import media_preview
+
+    source = "Maya"
+    hidden = "4932"
+    image = Image.new("RGB", (260, 90), "white")
+    draw = ImageDraw.Draw(image)
+    # Compact blocks model two same-baseline source strings in an eight-pixel
+    # OCR box. A one-pixel rule spans their otherwise blank horizontal gap.
+    draw.rectangle((20, 35, 65, 40), fill="black")
+    draw.rectangle((175, 35, 220, 40), fill="black")
+    draw.line((65, 42, 175, 42), fill="black", width=1)
+    box = [(15, 35), (225, 35), (225, 43), (15, 43)]
+    monkeypatch.setattr(media_preview, "_engine", lambda: lambda _: SimpleNamespace(
+        txts=[source], boxes=[box], scores=[0.99]))
+
+    with pytest.raises(PayloadError, match="separate source-ink regions") as error:
+        _ocr_lines(image)
+    assert source not in str(error.value)
+    assert hidden not in str(error.value)
+
+
 def test_ocr_geometry_rejects_one_overbroad_line_that_hides_stacked_source_ink(monkeypatch):
     """A vertical ink island must not bypass the horizontal-gap guard."""
     from types import SimpleNamespace

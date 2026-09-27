@@ -182,8 +182,15 @@ def _assert_ocr_line_has_no_separate_ink_island(source_gray: Any, line: dict[str
     # Substantial support avoids letting antialiasing/noise bridge a blank gap.
     # An uncertain raster abstains; this guard never tightens a repaint box.
     column_support = np.count_nonzero(line_gray <= 245, axis=0)
-    active_columns = np.flatnonzero(column_support >= max(1, height // 8))
-    horizontal_gap_limit = max(MIN_OCR_LINE_SEPARATE_INK_GAP, height // 2)
+    # A one-pixel underline/rule can otherwise make every gap column active,
+    # especially in short OCR boxes where height // 8 is one. Require two dark
+    # pixels before a column can bridge regions; this preserves ordinary glyph
+    # strokes while treating rule-connected components as ambiguous.
+    active_columns = np.flatnonzero(column_support >= max(2, height // 8))
+    # Long legitimate header strings can contain a wider typography separator.
+    # Scale only the material-gap threshold to the claimed box width; the
+    # renderer still abstains on a separate island rather than tightening it.
+    horizontal_gap_limit = max(MIN_OCR_LINE_SEPARATE_INK_GAP, height // 2, width // 24)
     horizontal_gaps = np.diff(active_columns) - 1
     if horizontal_gaps.size and int(horizontal_gaps.max()) >= horizontal_gap_limit:
         raise PayloadError("OCR line spans separate source-ink regions; inspect the source manually.")

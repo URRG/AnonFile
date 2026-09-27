@@ -35,7 +35,9 @@ touches an otherwise unprocessed OCR neighbor. It also rejects one overbroad
 OCR line whose box contains a separate, unrecognised fictional ink region: a
 local edge alone cannot authorize repainting both regions. Separate islands in
 either horizontal or vertical bands abstain; unusually tracked or justified
-single lines can therefore abstain as an intentional fail-closed tradeoff. A real OCR screenshot case also
+single lines can therefore abstain as an intentional fail-closed tradeoff. A
+thin horizontal rule/underline is excluded from the component projection, so
+it cannot bridge two otherwise separate regions. A real OCR screenshot case also
 repaints a fictional name and checks that pixels outside its OCR box are
 unchanged. This does **not** establish general table parsing, multi-column
 reading order, or general scan quality. The interactive AcroForm is required
