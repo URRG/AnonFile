@@ -213,6 +213,11 @@ supplier data. `Blocked externally` is not the same as done.
     rules and the dense-batch table threshold have automated coverage. Evidence:
     [D08 review UI notes](d08-accessible-review-ui.md) and
     `apps/web/tests/review-ui.test.mjs`.
+  - [x] An automated rendered three-file browser walkthrough exercised keyboard
+    result/graph navigation and exact evidence focus. The 320 CSS-pixel header
+    overflow found in that walkthrough was fixed; 320/427/640 CSS-pixel page
+    widths now have no document-level horizontal overflow. This is not a human
+    screen-reader or actual browser-zoom result.
   - [ ] A human keyboard, screen-reader, 200–400% zoom and dense synthetic
     batch walkthrough is still required. The prescribed evidence is in the
     D08 review UI notes; no walkthrough is claimed yet.
