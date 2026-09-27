@@ -160,6 +160,7 @@ export default function BatchDemo() {
   const [dragging, setDragging] = useState(false)
   const [error, setError] = useState('')
   const [inspection, setInspection] = useState<BatchInspection | null>(null)
+  const [inspectionEpoch, setInspectionEpoch] = useState(0)
   const [referenceManifest, setReferenceManifest] = useState<BatchReferenceManifest | null>(null)
   const [referenceAttested, setReferenceAttested] = useState(false)
   const [sampleMode, setSampleMode] = useState<'text' | 'media' | null>(null)
@@ -293,6 +294,7 @@ export default function BatchDemo() {
         signal: controller.signal })
       if (request.current !== controller || controller.signal.aborted) return
       setInspection(value)
+      setInspectionEpoch(epoch => epoch + 1)
       setDemoDownloadAcknowledged(false)
       setManualNames(nextNames)
       setManualFindings(nextFindings)
@@ -556,7 +558,7 @@ export default function BatchDemo() {
           {resultTab === 'relationships' && <section className="batch-card result-panel relationship-panel">
             <div className="card-header"><div><p className="overline">CROSS-DOCUMENT CONTEXT</p><h2>Entity relationship map</h2></div><span className="quiet-tag">Explicit evidence only</span></div>
             <p className="panel-intro">This map separates people, organizations, and projects. Arrows carry a typed relationship; it never derives a tie from proximity or co-mentions.</p>
-            <RelationshipGraph graph={inspection.entityGraph} documentNames={new Map(inspection.documents.map((document, index) => [document.id, `Document ${String(index + 1).padStart(2, '0')} · ${document.kind.toUpperCase()}`]))} onInspectDocument={(id, evidence) => { setProvenanceTarget(evidence); setSelectedDoc(id); setComparisonMode('split'); setResultTab('documents') }} />
+            <RelationshipGraph key={inspectionEpoch} graph={inspection.entityGraph} documentNames={new Map(inspection.documents.map((document, index) => [document.id, `Document ${String(index + 1).padStart(2, '0')} · ${document.kind.toUpperCase()}`]))} onInspectDocument={(id, evidence) => { setProvenanceTarget(evidence); setSelectedDoc(id); setComparisonMode('split'); setResultTab('documents') }} />
           </section>}
           {resultTab === 'verification' && <section className="batch-card result-panel"><div className="card-header"><div><p className="overline">EVIDENCE, NOT A VANITY SCORE</p><h2>Verification scorecard</h2></div><span className="status-pill">REVIEW REQUIRED</span></div>
             <p className="panel-intro">These are observable checks for this run. Reference-label agreement appears only when complete synthetic labels were supplied; it does not measure anonymity or performance on other datasets.</p>

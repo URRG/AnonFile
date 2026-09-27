@@ -89,6 +89,14 @@ test('identity merge proposal requires two current people and rejects a collapse
   assert.match(graphSource, /Identity split is not available in this preview/)
 })
 
+test('each successful inspection remounts ephemeral relationship review state', () => {
+  // A -> B -> A can reuse the exact same graph object and response-local IDs.
+  // The parent inspection epoch must still discard every draft and proposal.
+  assert.match(batchSource, /const \[inspectionEpoch, setInspectionEpoch\] = useState\(0\)/)
+  assert.match(batchSource, /setInspection\(value\)\s*setInspectionEpoch\(epoch => epoch \+ 1\)/)
+  assert.match(batchSource, /<RelationshipGraph key=\{inspectionEpoch\} graph=\{inspection\.entityGraph\}/)
+})
+
 test('review graph preserves visible focus, touch-sized controls, responsive layout, and reduced-motion support', () => {
   for (const required of ['min-height:44px', ':focus-visible', '@media (prefers-reduced-motion:reduce)', '@media(max-width:760px)', 'overflow:auto']) {
     assert.match(graphCss, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
