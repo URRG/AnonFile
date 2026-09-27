@@ -252,6 +252,54 @@ def test_real_ocr_pdf_locator_is_reachable_only_for_an_exact_relationship_line()
     assert locator["page"] == 1 and locator["line_boxes"]
 
 
+def test_real_ocr_pdf_graph_locator_binds_the_displayed_source_raster(demo_client):
+    """Exercise extraction, graph creation, raster rendering and binding together."""
+    from reportlab.pdfgen import canvas
+    from app.demo_batch import _text_locator
+    from app.media_preview import extract_media
+
+    expected = "Maya Patel works on Orion Project."
+    stream = BytesIO()
+    pdf = canvas.Canvas(stream)
+    pdf.setFont("Helvetica", 18)
+    pdf.drawString(72, 720, expected)
+    pdf.save()
+    raw = stream.getvalue()
+    try:
+        text, pages = extract_media(raw, ".pdf")
+    except PayloadError:
+        # The public batch follows the same fail-closed OCR boundary.
+        response = demo_client.post("/demo/batch/inspect", headers=auth(), json={"synthetic_only": True, "files": [
+            file("media", "relationship.pdf", raw),
+            file("record", "record.json", '[{"full_name":"Maya Patel"}]'),
+        ]})
+        assert response.status_code == 422
+        return
+    document = {"kind": "pdf", "text": text, "source_sha256": hashlib.sha256(raw).hexdigest(),
+                "_media_pages": pages}
+    if text.count(expected) != 1:
+        # Without the exact parser relationship span, geometry is deliberately
+        # not promoted to graph navigation evidence.
+        assert _text_locator(document, "Maya Patel", "Orion Project") == {
+            "status": "UNSUPPORTED", "reason": "NO_DEFENSIBLE_SOURCE_LOCATOR"}
+        return
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json={"synthetic_only": True, "files": [
+        file("media", "relationship.pdf", raw),
+        file("record", "record.json", '[{"full_name":"Maya Patel"}]'),
+    ]})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    edge = next(item for item in body["entity_graph"]["edges"] if item["type"] == "works_on")
+    locator = edge["evidence"][0]["locator"]
+    preview = body["documents"][0]["media_preview"]
+    page = next(item for item in preview["pages"] if item["number"] == locator["page"])
+    assert locator["status"] == "SUPPORTED" and locator["kind"] == "ocr_line_boxes"
+    assert locator["source_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert locator["source_png_sha256"] == page["source_png_sha256"]
+    assert hashlib.sha256(base64.b64decode(page["source_png_base64"])).hexdigest() == locator["source_png_sha256"]
+    assert (locator["width"], locator["height"]) == (page["width"], page["height"])
+
+
 def test_locator_abstains_for_duplicate_or_nonrecord_text_occurrences():
     from app.demo_batch import _text_locator
 
