@@ -1,3 +1,4 @@
 *.pdf binary
 *.png binary
 services/api/tests/fixtures/d07_text_holdout/* -text
+services/api/tests/fixtures/d07_media_holdout/manifest.json -text

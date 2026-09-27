@@ -1,0 +1,8 @@
+{
+  "schema_version": "d07-synthetic-media-final-pixels-v1",
+  "fixture_id": "d07-synthetic-media-final-pixels-v1",
+  "cases": [
+    {"case_id": "pdf-page-1", "kind": "pdf_rendered_page", "expected_markers": ["D07-SYNTH-ALPHA-91"]},
+    {"case_id": "image-1", "kind": "image", "expected_markers": ["D07-SYNTH-BRAVO-27"]}
+  ]
+}
