@@ -59,6 +59,12 @@ test('document selector implements roving ARIA tabs and document-level evidence 
   }
 })
 
+test('top-level result views use the same roving ARIA tab behavior with labelled panels', () => {
+  for (const required of ['const resultTabs = useRef(new Map<ResultTab, HTMLButtonElement>())', 'id={`result-tab-${key}`}', 'aria-controls={`result-tabpanel-${key}`}', 'tabIndex={isSelected ? 0 : -1}', 'moveReviewTabFocus(index, tabs.length, event.key)', 'selectResultTab(tabs[nextIndex][0], true)', 'id="result-tabpanel-documents" role="tabpanel" aria-labelledby="result-tab-documents"', 'id="result-tabpanel-relationships" role="tabpanel" aria-labelledby="result-tab-relationships"', 'id="result-tabpanel-verification" role="tabpanel" aria-labelledby="result-tab-verification"']) {
+    assert.match(batchSource, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  }
+})
+
 test('recorded graph panel is opt-in, memory-only, and keeps durable decisions distinct from temporary review', () => {
   for (const required of ['RecordedGraphReviewPanel', 'type="password"', 'autoComplete="off"', 'getRecordedGraphReview', 'decideRecordedGraphClaim', 'Recorded · revision', 'No merge or split editor is included', 'graphReview && apiBase']) {
     assert.match(graphSource, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
