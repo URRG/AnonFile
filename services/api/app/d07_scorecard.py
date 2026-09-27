@@ -17,6 +17,7 @@ VERSION = "d07-scorecard-v1"
 _FORMATS = frozenset({"text", "csv", "json", "jsonl", "pdf", "image"})
 _ABSTENTIONS = frozenset({"UNSUPPORTED_FORMAT", "LOW_CONFIDENCE", "NO_DEFENSIBLE_LOCATOR",
                           "INDEPENDENT_ENGINE_UNAVAILABLE", "UNTOUCHED_ARTIFACT_UNAVAILABLE"})
+_MAX_GRAPH_CLAIMS = 10_000
 
 
 class ScorecardError(ValueError):
@@ -54,8 +55,16 @@ def _abstentions(documents: tuple[GoldDocument, ...], value: dict[str, str]) -> 
 
 
 def _graph_metrics(gold: set[tuple[str, str, str]], predicted: set[tuple[str, str, str]]) -> dict[str, Any]:
-    if any(not isinstance(edge, tuple) or len(edge) != 3 or any(not isinstance(value, str) or not value for value in edge)
-           for edge in gold | predicted):
+    # Validate both containers before any set operation.  Direct callers must
+    # get the same fixed error rather than a type-dependent exception.
+    if (type(gold) is not set or type(predicted) is not set or len(gold) > _MAX_GRAPH_CLAIMS
+            or len(predicted) > _MAX_GRAPH_CLAIMS
+            or any(not isinstance(edge, tuple) or len(edge) != 3
+                   or any(not isinstance(value, str) or not value or len(value) > 256 for value in edge)
+                   for edge in gold)
+            or any(not isinstance(edge, tuple) or len(edge) != 3
+                   or any(not isinstance(value, str) or not value or len(value) > 256 for value in edge)
+                   for edge in predicted)):
         _reject()
     labels = sorted({edge[0] for edge in gold | predicted})
     def counts(expected: set[tuple[str, str, str]], actual: set[tuple[str, str, str]]) -> dict[str, int]:
@@ -69,18 +78,15 @@ def _graph_metrics(gold: set[tuple[str, str, str]], predicted: set[tuple[str, st
 
 
 def _final_validation(value: dict[str, Any] | None, primary_engine: str) -> dict[str, Any]:
-    """Only accept an already independently attested aggregate comparison."""
+    """Do not accept caller assertions as independent validation evidence.
+
+    D07 has no executable second engine, artifact-byte binding, ground-truth
+    binding, or reproducible validator result.  A caller-provided engine name
+    and counts therefore cannot cross the independence boundary.
+    """
     if value is None:
         return {"status": "ABSTAINED", "reason": "INDEPENDENT_ENGINE_UNAVAILABLE"}
-    if (not isinstance(value, dict) or set(value) != {"engine_id", "artifact_kind", "assessed_units", "residual_units"}
-            or not isinstance(value["engine_id"], str) or not value["engine_id"]
-            or value["engine_id"] == primary_engine or value["artifact_kind"] not in {"text", "pixels"}
-            or any(type(value[key]) is not int or value[key] < 0 for key in ("assessed_units", "residual_units"))
-            or value["residual_units"] > value["assessed_units"]):
-        return {"status": "ABSTAINED", "reason": "NO_DEFENSIBLE_INDEPENDENT_VALIDATION"}
-    return {"status": "ASSESSED", "engine_id": value["engine_id"], "artifact_kind": value["artifact_kind"],
-            "assessed_units": value["assessed_units"], "residual_units": value["residual_units"],
-            "limitation": "Aggregate comparison only; it does not establish absence of unrecognized content or release safety."}
+    return {"status": "ABSTAINED", "reason": "NO_EXECUTABLE_BOUND_INDEPENDENT_VALIDATOR"}
 
 
 def scorecard(*, documents: tuple[GoldDocument, ...], formats: dict[str, str], automatic: list[dict[str, Any]],

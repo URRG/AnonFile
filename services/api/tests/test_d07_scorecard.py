@@ -29,17 +29,27 @@ def test_scorecard_separates_automatic_reviewed_format_type_and_graph_results():
 def test_same_engine_or_missing_final_validation_abstains_not_independent():
     assert scorecard(**inputs())["final_artifact_validation"] == {"status": "ABSTAINED", "reason": "INDEPENDENT_ENGINE_UNAVAILABLE"}
     report = scorecard(**inputs(), final_validation={"engine_id": "rapidocr", "artifact_kind": "pixels", "assessed_units": 3, "residual_units": 0})
-    assert report["final_artifact_validation"] == {"status": "ABSTAINED", "reason": "NO_DEFENSIBLE_INDEPENDENT_VALIDATION"}
+    assert report["final_artifact_validation"] == {"status": "ABSTAINED", "reason": "NO_EXECUTABLE_BOUND_INDEPENDENT_VALIDATOR"}
 
 
-def test_distinct_engine_can_only_report_aggregate_final_validation():
+def test_spoofed_distinct_engine_is_not_independent_validation():
     report = scorecard(**inputs(), final_validation={"engine_id": "tesseract", "artifact_kind": "pixels", "assessed_units": 3, "residual_units": 1})
-    assert report["final_artifact_validation"]["status"] == "ASSESSED"
-    assert "Ada" not in str(report)
+    assert report["final_artifact_validation"] == {
+        "status": "ABSTAINED", "reason": "NO_EXECUTABLE_BOUND_INDEPENDENT_VALIDATOR"}
 
 
 def test_invalid_document_coverage_or_abstention_fails_closed():
     values = inputs(); values["abstentions"] = {"missing": "LOW_CONFIDENCE"}
+    try:
+        scorecard(**values)
+    except ScorecardError as error:
+        assert str(error) == "Invalid D07 scorecard input."
+    else:
+        assert False
+
+
+def test_graph_container_type_and_bounds_fail_closed():
+    values = inputs(); values["graph_gold"] = [("works_at", "p1", "o1")]
     try:
         scorecard(**values)
     except ScorecardError as error:
