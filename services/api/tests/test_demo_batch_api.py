@@ -1118,6 +1118,7 @@ def test_reference_labels_measure_exact_reviewed_spans_without_approval(demo_cli
     body = response.json()
     score = body["verification"]["annotation_score"]
     aggregate = body["verification"]["aggregate_scorecard"]
+    final_text = body["verification"]["final_text_validation"]
     assert score["basis"] == "REVIEWER_ATTESTED_EXHAUSTIVE"
     assert score["status"] == "OBSERVATIONAL_ONLY"
     assert score["labelled_documents"] == 2 and score["gold_annotations"] == 8
@@ -1136,7 +1137,31 @@ def test_reference_labels_measure_exact_reviewed_spans_without_approval(demo_cli
         "final_artifact_validation": {"status": "ABSTAINED", "reason": "INDEPENDENT_ENGINE_UNAVAILABLE"},
         "relationship_review": "NO_GRAPH_GOLD_OR_REVIEW_STATE",
     }
+    assert final_text == {"status": "INDEPENDENT_RULE_SCANNER_TEXT_ONLY", "bound_artifacts": 2,
+                          "assessed_categories": ["CREDENTIAL", "PAYMENT", "PII"],
+                          "residual_units_by_category": {"CREDENTIAL": 0, "PAYMENT": 0, "PII": 2},
+                          "abstained_artifacts": 0}
     assert "email" not in str(aggregate) and "riya@example.test" not in str(aggregate)
+    assert "email" not in str(final_text) and "riya@example.test" not in str(final_text)
+
+
+def test_final_text_scan_runs_without_labels_and_flags_email_aliases_without_calling_them_leaks(demo_client):
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=payload())
+    assert response.status_code == 200, response.text
+    body = response.json()
+    verification = body["verification"]
+    assert verification["annotation_score"] is None
+    assert verification["aggregate_scorecard"] is None
+    assert verification["source_value_residuals"] == 0
+    assert verification["final_text_validation"] == {
+        "status": "INDEPENDENT_RULE_SCANNER_TEXT_ONLY", "bound_artifacts": 2,
+        "assessed_categories": ["CREDENTIAL", "PAYMENT", "PII"],
+        "residual_units_by_category": {"CREDENTIAL": 0, "PAYMENT": 0, "PII": 2},
+        "abstained_artifacts": 0,
+    }
+    candidate = "\n".join(document["candidate_text"] for document in body["documents"])
+    assert "riya@example.test" not in candidate
+    assert "@example.test" in candidate
 
 
 @pytest.mark.parametrize("change", [

@@ -150,6 +150,8 @@ export type BatchAnnotationScore = { basis: BatchReferenceManifest['basis']; sta
   labelledDocuments: number; goldAnnotations: number; exact: BatchAnnotationCounts; automaticExact: BatchAnnotationCounts;
   perType: Record<string, BatchAnnotationCounts>;
   perDocument: BatchFileScore[] }
+export type BatchFinalTextValidation = { status: 'INDEPENDENT_RULE_SCANNER_TEXT_ONLY'; boundArtifacts: number; assessedCategories: string[];
+  residualUnitsByCategory: Record<string, number>; abstainedArtifacts: number }
 export type BatchAggregateScorecard = { status: 'OBSERVATIONAL_ONLY'; classification: 'SYNTHETIC_INTERNAL_EVALUATION_ONLY';
   qualification: 'NOT_QUALIFIED'; automaticExact: BatchAnnotationCounts; reviewerCorrectedExact: BatchAnnotationCounts;
   finalArtifactValidation: { status: 'ABSTAINED'; reason: 'INDEPENDENT_ENGINE_UNAVAILABLE' | 'NO_EXECUTABLE_BOUND_INDEPENDENT_VALIDATOR' };
@@ -159,7 +161,7 @@ export type BatchInspection = { posture: 'SYNTHETIC_DEMO_ONLY'; releaseAuthorize
   summary: { files: number; detectedMentions: number; transformedMentions: number; suppressedMentions: number;
     linkedEntities: number; explicitRelationships: number };
   verification: { status: 'REVIEW_REQUIRED'; knownRuleResidualMatches: number; sourceValueResiduals: number; structureFailures: number;
-    annotationScore: BatchAnnotationScore | null; aggregateScorecard: BatchAggregateScorecard | null; checks: BatchCheck[] };
+    annotationScore: BatchAnnotationScore | null; finalTextValidation: BatchFinalTextValidation; aggregateScorecard: BatchAggregateScorecard | null; checks: BatchCheck[] };
   limitations: string[] }
 
 const BATCH_EXTENSIONS = new Set(['txt', 'csv', 'json', 'jsonl', 'pdf', 'png', 'jpg', 'jpeg'])
@@ -640,6 +642,21 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
       labelledDocuments: documents.length, goldAnnotations: rawScore.gold_annotations as number, exact, automaticExact,
       perType, perDocument }
   }
+  const finalText = verification.final_text_validation
+  const expectedTextArtifacts = documents.filter(document => ['text', 'csv', 'json', 'jsonl'].includes(document.kind)).length
+  if (!object(finalText)) batchInvalid()
+  const residualUnits = finalText.residual_units_by_category
+  const boundArtifacts = finalText.bound_artifacts
+  if (finalText.status !== 'INDEPENDENT_RULE_SCANNER_TEXT_ONLY' || !safeCount(boundArtifacts) ||
+      boundArtifacts !== expectedTextArtifacts || !safeCount(finalText.abstained_artifacts) ||
+      finalText.abstained_artifacts > boundArtifacts ||
+      JSON.stringify(finalText.assessed_categories) !== JSON.stringify(['CREDENTIAL', 'PAYMENT', 'PII']) ||
+      !object(residualUnits) || Object.keys(residualUnits).sort().join(',') !== 'CREDENTIAL,PAYMENT,PII' ||
+      !['CREDENTIAL', 'PAYMENT', 'PII'].every(key => safeCount(residualUnits[key]) &&
+        (residualUnits[key] as number) <= boundArtifacts)) batchInvalid()
+  const finalTextValidation: BatchFinalTextValidation = { status: 'INDEPENDENT_RULE_SCANNER_TEXT_ONLY',
+    boundArtifacts: finalText.bound_artifacts as number, assessedCategories: finalText.assessed_categories as string[],
+    residualUnitsByCategory: residualUnits as Record<string, number>, abstainedArtifacts: finalText.abstained_artifacts as number }
   let aggregateScorecard: BatchAggregateScorecard | null = null
   if (object(rawAggregate)) {
     const countTriple = (raw: unknown): BatchAnnotationCounts => {
@@ -671,7 +688,7 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
       linkedEntities: summary.linked_entities as number, explicitRelationships: summary.explicit_relationships as number },
     verification: { status: 'REVIEW_REQUIRED', knownRuleResidualMatches: verification.known_rule_residual_matches as number,
       sourceValueResiduals: verification.source_value_residuals as number,
-      structureFailures: verification.structure_failures as number, annotationScore, aggregateScorecard, checks }, limitations: value.limitations as string[] }
+      structureFailures: verification.structure_failures as number, annotationScore, finalTextValidation, aggregateScorecard, checks }, limitations: value.limitations as string[] }
 }
 
 export async function inspectSyntheticBatch(request: { apiBase: string; token: string; files: BatchUpload[]; manualNames: string[];

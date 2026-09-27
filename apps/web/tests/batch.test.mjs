@@ -20,6 +20,8 @@ const valid = () => ({ posture: 'SYNTHETIC_DEMO_ONLY', release_authorized: false
   ], entities: [{ id: 'E1', kind: 'PERSON_NAME', source: 'Riya', alias: 'Gita', strategy: 'NAME_LENGTH_MATCH', mentions: 1, excluded: false }], relationships: [], entity_graph: { nodes: [], edges: [] },
   summary: { files: 2, detected_mentions: 1, transformed_mentions: 1, suppressed_mentions: 0, linked_entities: 1, explicit_relationships: 0 },
   verification: { status: 'REVIEW_REQUIRED', known_rule_residual_matches: 0, source_value_residuals: 0, structure_failures: 0,
+    final_text_validation: { status: 'INDEPENDENT_RULE_SCANNER_TEXT_ONLY', bound_artifacts: 2,
+      assessed_categories: ['CREDENTIAL', 'PAYMENT', 'PII'], residual_units_by_category: { CREDENTIAL: 0, PAYMENT: 0, PII: 0 }, abstained_artifacts: 0 },
     checks: [{ name: 'Application', status: 'PASS', detail: 'One match applied.' }, { name: 'Residual', status: 'REVIEW', detail: 'Review.' },
       { name: 'Benchmark', status: 'NOT_MEASURED', detail: 'No ground truth.' }] }, limitations: ['Synthetic only.'] })
 
@@ -139,6 +141,7 @@ test('batch client binds raster image previews to staged media and PNG dimension
   const response = valid()
   response.documents[1].name = 'b.png'
   response.documents[1].kind = 'image'
+  response.verification.final_text_validation.bound_artifacts = 1
   response.documents[1].preview_fidelity = 'raster_ocr_review'
   response.documents[1].media_preview = { pages: [{ number: 1, width: 16, height: 16,
     source_png_base64: png, candidate_png_base64: png,
@@ -179,6 +182,7 @@ test('graph media locators bind source, page and approximate OCR boxes before na
   const response = valid()
   const sourceHash = createHash('sha256').update(Buffer.from(files[1].contentBase64, 'base64')).digest('hex')
   response.documents[1].name = 'b.png'; response.documents[1].kind = 'image'; response.documents[1].preview_fidelity = 'raster_ocr_review'
+  response.verification.final_text_validation.bound_artifacts = 1
   response.documents[1].source_sha256 = sourceHash
   response.documents[1].media_preview = { pages: [{ number: 1, width: 16, height: 16,
     source_png_base64: png, candidate_png_base64: png,
@@ -240,6 +244,7 @@ test('coordinate corrections bind exact returned regions and source digests', as
   })
   const response = valid()
   response.documents[1].name = 'b.png'; response.documents[1].kind = 'image'; response.documents[1].preview_fidelity = 'raster_ocr_review'
+  response.verification.final_text_validation.bound_artifacts = 1
   const correction = { documentId: 'f2', page: 1, x0: 1, y0: 2, x1: 8, y1: 9, kind: 'OTHER_SENSITIVE' }
   response.documents[0].source_sha256 = createHash('sha256').update(Buffer.from(files[0].contentBase64, 'base64')).digest('hex')
   response.documents[1].source_sha256 = createHash('sha256').update(Buffer.from(files[1].contentBase64, 'base64')).digest('hex')
@@ -301,6 +306,7 @@ test('batch client requires bounded candidate PDF bytes matching raster evidence
   const response = valid()
   response.documents[1].name = 'b.pdf'
   response.documents[1].kind = 'pdf'
+  response.verification.final_text_validation.bound_artifacts = 1
   response.documents[1].preview_fidelity = 'raster_ocr_review'
   response.documents[1].media_preview = { pages: [{ number: 1, width: 16, height: 16,
     source_png_base64: png, candidate_png_base64: png,
@@ -427,6 +433,7 @@ test('batch client binds annotation-score counts to submitted labels and detecto
   assert.equal(result.verification.annotationScore.automaticExact.falseNegatives, 1)
   assert.equal(result.verification.aggregateScorecard.qualification, 'NOT_QUALIFIED')
   assert.equal(result.verification.aggregateScorecard.finalArtifactValidation.status, 'ABSTAINED')
+  assert.equal(result.verification.finalTextValidation.status, 'INDEPENDENT_RULE_SCANNER_TEXT_ONLY')
   assert.deepEqual(result.verification.annotationScore.perDocument[1].missed,
     [{ start: 0, end: 4, entity_type: 'OTHER_SENSITIVE' }])
   const sent = JSON.parse(mock.mock.calls[0].arguments[1].body)
@@ -443,10 +450,24 @@ test('batch client binds annotation-score counts to submitted labels and detecto
     value => { value.verification.aggregate_scorecard.qualification = 'QUALIFIED' },
     value => { value.verification.aggregate_scorecard.automatic_exact.false_negatives = 0 },
     value => { value.verification.aggregate_scorecard.relationship_review = 'SCORED' },
+    value => { value.verification.final_text_validation.bound_artifacts = 3 },
+    value => { value.verification.final_text_validation.abstained_artifacts = 3 },
+    value => { value.verification.final_text_validation.residual_units_by_category.PII = 3 },
   ]) {
     const tampered = structuredClone(response); change(tampered)
     t.mock.method(globalThis, 'fetch', async () => Response.json(tampered))
     await assert.rejects(inspectSyntheticBatch({ ...request, referenceManifest }), /invalid review result/)
     t.mock.restoreAll()
   }
+})
+
+test('batch client retains the text-only final scan without reference labels', async t => {
+  const response = valid()
+  const mock = t.mock.method(globalThis, 'fetch', async () => Response.json(response))
+  const result = await inspectSyntheticBatch(request)
+  assert.equal(result.verification.annotationScore, null)
+  assert.equal(result.verification.aggregateScorecard, null)
+  assert.equal(result.verification.finalTextValidation.boundArtifacts, 2)
+  assert.equal(result.verification.finalTextValidation.abstainedArtifacts, 0)
+  assert.equal(mock.mock.calls.length, 1)
 })
