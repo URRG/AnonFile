@@ -17,6 +17,7 @@ from app.repository import detached, unavailable
 from app.revisioned_graph_review import (GraphClaimSnapshot, GraphIdentityMerge,
     GraphIdentitySplit, GraphNodeSnapshot, GraphReviewConflict, GraphReviewError,
     GraphSnapshot, GraphSplitEndpointAssignment, RevisionedGraphReviewStore)
+from app.revisioned_graph_review import conflict_groups
 
 
 DEMO_BATCH_SNAPSHOT_CAP = 8
@@ -228,4 +229,6 @@ def _public(engine: RevisionedGraphReviewStore) -> dict[str, Any]:
                                                   for x in item.endpoint_assignments]}
                                  for item in view.identity_actions],
             "conflicts": [{"kind": x[0], "subjects": x[1], "relationships": x[2]} for x in view.conflicts],
+            "conflict_groups": [{"kind": kind, "subject_ref": subject, "claim_refs": list(claims)}
+                                for kind, subject, claims in conflict_groups(view)],
             "posture": "REVIEW_ONLY_NO_RELEASE_OR_DELIVERY"}
