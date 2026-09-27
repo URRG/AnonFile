@@ -27,6 +27,7 @@ from app.d07_scorecard import ScorecardError, scorecard
 from app.evaluation import EvaluationError, evaluate, parse_gold, parse_predictions
 from app.independent_residual import ASSESSED_CATEGORIES, scan_residual_candidate
 from app.media_preview import extract_media, render_candidate
+from app.graph_live_adapter import build_private_graph_ledger
 from app.processing import _field_type, detect_text
 
 MAX_FILES = 3
@@ -863,6 +864,13 @@ def _public_entity_graph(facts: list[dict[str, Any]], person_ids: dict[str, str]
     return {"nodes": nodes, "edges": edges}
 
 
+def _public_entity_graph_with_ledger(facts: list[dict[str, Any]], person_ids: dict[str, str],
+                                     person_labels: dict[str, str]) -> tuple[dict[str, list[dict[str, Any]]], object]:
+    """Build the response graph and its private, non-serialized review ledger together."""
+    graph = _public_entity_graph(facts, person_ids, person_labels)
+    return graph, build_private_graph_ledger(graph)
+
+
 def _email_aliases(keys: list[tuple[str, str]], names_by_key: dict[str, str],
                    name_aliases: dict[str, str], owners: dict[str, str],
                    exclusions: dict[str, str], id_by_key: dict[tuple[str, str], str]) -> dict[str, str]:
@@ -1230,7 +1238,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
     person_id = {value: id_by_key[("PERSON_NAME", value)] for value in names_by_key}
     graph_person_labels = {value: ("Source retained" if person_id[value] in exclusions else name_aliases[value])
                            for value in person_id}
-    entity_graph = _public_entity_graph(graph_facts, person_id, graph_person_labels)
+    entity_graph, _private_graph_ledger = _public_entity_graph_with_ledger(graph_facts, person_id, graph_person_labels)
     relationships = []
     seen_edges: set[tuple[str, str, str, str]] = set()
     for sender, recipient, document_id, _, _ in raw_edges:
