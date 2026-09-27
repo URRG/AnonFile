@@ -108,7 +108,196 @@ def test_media_locator_abstains_without_a_public_page_box():
 
     assert _text_locator({"kind": "image", "text": "Maya Patel works on Dispatch Guard."},
                          "Maya Patel", "Dispatch Guard") == {
-                             "status": "UNSUPPORTED", "reason": "NO_DEFENSIBLE_SOURCE_LOCATOR"}
+                              "status": "UNSUPPORTED", "reason": "NO_DEFENSIBLE_SOURCE_LOCATOR"}
+
+
+def test_api_graph_media_evidence_uses_bound_approximate_ocr_line_boxes(demo_client, monkeypatch):
+    """A media relationship gets navigation geometry, never source text."""
+    from PIL import Image
+    from app import demo_batch
+
+    text = "Maya Patel works on Dispatch Guard."
+    page = {"number": 1, "image": Image.new("RGB", (640, 320), "white"), "lines": [
+        {"text": text, "start": 0, "end": len(text), "box": (40, 80, 440, 125),
+         "ink_box": (45, 85, 435, 120), "confidence": 0.99},
+    ]}
+    raster = BytesIO()
+    page["image"].save(raster, format="PNG")
+    source_png = raster.getvalue()
+    monkeypatch.setattr(demo_batch, "extract_media", lambda _raw, _extension: (text, [page]))
+    monkeypatch.setattr(demo_batch, "render_candidate", lambda *_args, **_kwargs: {
+        "pages": [{"number": 1, "width": 640, "height": 320,
+                   "source_png_base64": base64.b64encode(source_png).decode("ascii"),
+                   "source_png_sha256": hashlib.sha256(source_png).hexdigest()}],
+        "fallback_lines": 0, "self_ocr_residual_sources": 0,
+        "candidate_low_confidence_lines": 0, "pdf_raster_evidence": None,
+        "candidate_pdf_base64": None,
+    })
+    raw = b"fictional-media-evidence"
+    request = {"synthetic_only": True, "files": [
+        file("media", "relationship.png", raw),
+        file("record", "record.json", '[{"full_name":"Maya Patel"}]'),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    edge = next(item for item in response.json()["entity_graph"]["edges"] if item["type"] == "works_on")
+    locator = edge["evidence"][0]["locator"]
+    assert locator == {
+        "status": "SUPPORTED", "kind": "ocr_line_boxes", "precision": "OCR_LINE_BOX_APPROXIMATE",
+        "source_sha256": hashlib.sha256(raw).hexdigest(), "page": 1, "width": 640, "height": 320,
+        "source_png_sha256": hashlib.sha256(source_png).hexdigest(),
+        "line_boxes": [{"x0": 40, "y0": 80, "x1": 440, "y1": 125}],
+    }
+    assert "Maya Patel" not in json.dumps(locator)
+
+
+def test_media_locator_abstains_when_returned_source_raster_digest_does_not_match():
+    from app import demo_batch
+
+    facts = [{"document_id": "media", "locator": {"status": "SUPPORTED", "kind": "ocr_line_boxes",
+              "page": 1, "width": 100, "height": 100}}]
+    documents = [{"id": "media", "media_preview": {"pages": [
+        {"number": 1, "width": 100, "height": 100, "source_png_base64": "bm90LWEtcG5n",
+         "source_png_sha256": "0" * 64}]} }]
+    demo_batch._bind_media_locator_rasters(facts, documents)
+    assert facts[0]["locator"] == {"status": "UNSUPPORTED", "reason": "NO_DEFENSIBLE_SOURCE_LOCATOR"}
+
+
+def test_api_graph_media_evidence_abstains_for_cross_page_or_invalid_ocr_geometry(demo_client, monkeypatch):
+    """Never stitch OCR relationship evidence across pages or malformed boxes."""
+    from PIL import Image
+    from app import demo_batch
+
+    text = "Name: Maya Patel\nTitle: Incident Lead\nCompany: Harborline Systems"
+    first_end = text.index("\nTitle")
+    company_start = text.index("Company:")
+
+    def extract_cross_page(_raw, _extension):
+        image = Image.new("RGB", (400, 240), "white")
+        return text, [
+            {"number": 1, "image": image, "lines": [
+                {"text": text[:first_end], "start": 0, "end": first_end, "box": (20, 20, 300, 50),
+                 "ink_box": (25, 25, 295, 45), "confidence": 0.99},
+                {"text": text[first_end + 1:company_start - 1], "start": first_end + 1,
+                 "end": company_start - 1, "box": (20, 65, 300, 95), "ink_box": (25, 70, 295, 90),
+                 "confidence": 0.99},
+            ]},
+            {"number": 2, "image": image, "lines": [
+                {"text": text[company_start:], "start": company_start, "end": len(text), "box": (20, 20, 300, 50),
+                 "ink_box": (25, 25, 295, 45), "confidence": 0.99},
+            ]},
+        ]
+
+    monkeypatch.setattr(demo_batch, "extract_media", extract_cross_page)
+    monkeypatch.setattr(demo_batch, "render_candidate", lambda *_args, **_kwargs: {
+        "pages": [], "fallback_lines": 0, "self_ocr_residual_sources": 0,
+        "candidate_low_confidence_lines": 0, "pdf_raster_evidence": None,
+        "candidate_pdf_base64": None,
+    })
+    request = {"synthetic_only": True, "files": [
+        file("media", "relationship.pdf", b"%PDF-fictional"),
+        file("record", "record.json", '[{"full_name":"Maya Patel"}]'),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    edge = next(item for item in response.json()["entity_graph"]["edges"] if item["type"] == "works_at")
+    assert edge["evidence"][0]["locator"] == {
+        "status": "UNSUPPORTED", "reason": "NO_DEFENSIBLE_SOURCE_LOCATOR"}
+
+    malformed_text = "Maya Patel works on Dispatch Guard."
+    malformed = {"kind": "image", "text": malformed_text,
+                 "source_sha256": "a" * 64,
+                 "_media_pages": [{"number": 1, "image": Image.new("RGB", (100, 100), "white"),
+                                   "lines": [{"start": 0, "end": len(malformed_text), "box": (1, 1, 101, 20)}]}]}
+    assert demo_batch._text_locator(malformed, "Maya Patel", "Dispatch Guard", (0, len(malformed_text))) == {
+        "status": "UNSUPPORTED", "reason": "NO_DEFENSIBLE_SOURCE_LOCATOR"}
+    stale = {"kind": "image", "text": malformed_text, "source_sha256": "a" * 64,
+             "_media_pages": [{"number": 1, "image": Image.new("RGB", (100, 100), "white"),
+                               "lines": [{"text": "a stale OCR line", "start": 0, "end": len(malformed_text),
+                                          "box": (1, 1, 99, 20)}]}]}
+    assert demo_batch._text_locator(stale, "Maya Patel", "Dispatch Guard", (0, len(malformed_text))) == {
+        "status": "UNSUPPORTED", "reason": "NO_DEFENSIBLE_SOURCE_LOCATOR"}
+
+
+def test_real_ocr_pdf_locator_is_reachable_only_for_an_exact_relationship_line():
+    """Exercise the locator against real extraction, without treating OCR drift as proof."""
+    from reportlab.pdfgen import canvas
+    from app.demo_batch import _text_locator
+    from app.media_preview import extract_media
+
+    expected = "Maya Patel works on Orion Project."
+    stream = BytesIO()
+    pdf = canvas.Canvas(stream)
+    pdf.setFont("Helvetica", 18)
+    pdf.drawString(72, 720, expected)
+    pdf.save()
+    raw = stream.getvalue()
+    try:
+        text, pages = extract_media(raw, ".pdf")
+    except PayloadError:
+        # A provider that cannot make a bounded OCR transcript cannot make a
+        # graph locator either; this is an intentional abstention, not a pass.
+        return
+    document = {"kind": "pdf", "text": text, "source_sha256": hashlib.sha256(raw).hexdigest(),
+                "_media_pages": pages}
+    if text.count(expected) != 1:
+        assert _text_locator(document, "Maya Patel", "Orion Project") == {
+            "status": "UNSUPPORTED", "reason": "NO_DEFENSIBLE_SOURCE_LOCATOR"}
+        return
+    start = text.index(expected)
+    locator = _text_locator(document, "Maya Patel", "Orion Project", (start, start + len(expected)))
+    assert locator["status"] == "SUPPORTED"
+    assert locator["kind"] == "ocr_line_boxes"
+    assert locator["precision"] == "OCR_LINE_BOX_APPROXIMATE"
+    assert locator["page"] == 1 and locator["line_boxes"]
+
+
+def test_real_ocr_pdf_graph_locator_binds_the_displayed_source_raster(demo_client):
+    """Exercise extraction, graph creation, raster rendering and binding together."""
+    from reportlab.pdfgen import canvas
+    from app.demo_batch import _text_locator
+    from app.media_preview import extract_media
+
+    expected = "Maya Patel works on Orion Project."
+    stream = BytesIO()
+    pdf = canvas.Canvas(stream)
+    pdf.setFont("Helvetica", 18)
+    pdf.drawString(72, 720, expected)
+    pdf.save()
+    raw = stream.getvalue()
+    try:
+        text, pages = extract_media(raw, ".pdf")
+    except PayloadError:
+        # The public batch follows the same fail-closed OCR boundary.
+        response = demo_client.post("/demo/batch/inspect", headers=auth(), json={"synthetic_only": True, "files": [
+            file("media", "relationship.pdf", raw),
+            file("record", "record.json", '[{"full_name":"Maya Patel"}]'),
+        ]})
+        assert response.status_code == 422
+        return
+    document = {"kind": "pdf", "text": text, "source_sha256": hashlib.sha256(raw).hexdigest(),
+                "_media_pages": pages}
+    if text.count(expected) != 1:
+        # Without the exact parser relationship span, geometry is deliberately
+        # not promoted to graph navigation evidence.
+        assert _text_locator(document, "Maya Patel", "Orion Project") == {
+            "status": "UNSUPPORTED", "reason": "NO_DEFENSIBLE_SOURCE_LOCATOR"}
+        return
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json={"synthetic_only": True, "files": [
+        file("media", "relationship.pdf", raw),
+        file("record", "record.json", '[{"full_name":"Maya Patel"}]'),
+    ]})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    edge = next(item for item in body["entity_graph"]["edges"] if item["type"] == "works_on")
+    locator = edge["evidence"][0]["locator"]
+    preview = body["documents"][0]["media_preview"]
+    page = next(item for item in preview["pages"] if item["number"] == locator["page"])
+    assert locator["status"] == "SUPPORTED" and locator["kind"] == "ocr_line_boxes"
+    assert locator["source_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert locator["source_png_sha256"] == page["source_png_sha256"]
+    assert hashlib.sha256(base64.b64decode(page["source_png_base64"])).hexdigest() == locator["source_png_sha256"]
+    assert (locator["width"], locator["height"]) == (page["width"], page["height"])
 
 
 def test_locator_abstains_for_duplicate_or_nonrecord_text_occurrences():

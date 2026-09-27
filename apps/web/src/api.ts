@@ -130,10 +130,12 @@ export type BatchEntity = { id: string; kind: string; source: string; alias: str
 export type BatchRelationship = { sourceId: string; targetId: string; type: 'EMAILED' | 'ACCOUNT_OWNER_OF'; documentId: string; basis: string }
 export type EntityGraphNode = { id: string; kind: 'person' | 'organization' | 'project'; label: string; documentIds: string[] }
 export type EntityGraphEdgeType = 'assistant_to' | 'assistant_for' | 'works_at' | 'client_of' | 'works_on' | 'assigned_to' | 'sent_to'
-// Locators deliberately identify review positions, never source values. Media
-// evidence abstains unless a parser can establish a stable text location.
+// Locators identify review positions, never source values. OCR boxes are
+// approximate line extents, not pixel-precise proof of a relationship.
 export type EntityGraphEvidenceLocator =
   | { status: 'SUPPORTED'; kind: 'text_span'; start: number; end: number; lineStart: number; lineEnd: number }
+  | { status: 'SUPPORTED'; kind: 'ocr_line_boxes'; precision: 'OCR_LINE_BOX_APPROXIMATE'; sourceSha256: string;
+      sourcePngSha256: string; page: number; width: number; height: number; lineBoxes: { x0: number; y0: number; x1: number; y1: number }[] }
   | { status: 'UNSUPPORTED'; reason: 'NO_DEFENSIBLE_SOURCE_LOCATOR' }
 export type EntityGraphEvidence = { documentId: string; rule: string; field?: string; locator: EntityGraphEvidenceLocator }
 export type EntityGraphEdge = { id: string; type: EntityGraphEdgeType; sourceId: string; targetId: string; evidence: EntityGraphEvidence[] }
@@ -251,10 +253,11 @@ function graphTextIndex(text: string): GraphTextIndex {
   return { utf16AtCodePoint, lineAtCodePoint }
 }
 
-function entityGraph(raw: unknown, documents: BatchDocument[], entities: BatchEntity[]): EntityGraph {
+function entityGraph(raw: unknown, documents: BatchDocument[], entities: BatchEntity[], expectedSourceHashes: Map<string, string | null>): EntityGraph {
   // This graph is deliberately aliases and rule names only: no source spans, filenames, or mail addresses.
   if (!object(raw) || !Array.isArray(raw.nodes) || !Array.isArray(raw.edges)) batchInvalid()
   const documentIds = new Set(documents.map(document => document.id))
+  const documentsById = new Map(documents.map(document => [document.id, document]))
   const textIndexes = new Map(documents.filter(document => !document.mediaPreview).map(document => [document.id, graphTextIndex(document.text)]))
   if (raw.nodes.length > 100 || raw.edges.length > 200) batchInvalid()
   const aliases = new Map(entities.filter(entity => entity.kind === 'PERSON_NAME').map(entity => [entity.id, entity.excluded ? 'Source retained' : entity.alias]))
@@ -288,15 +291,36 @@ function entityGraph(raw: unknown, documents: BatchDocument[], entities: BatchEn
           typeof item.rule !== 'string' || !rules.has(item.rule) || typeof item.field !== 'string' || !fields.has(item.field) || !object(item.locator)) batchInvalid()
       let locator: EntityGraphEvidenceLocator
       if (item.locator.status === 'SUPPORTED') {
-        const textIndex = textIndexes.get(item.document_id)
-        const { start, end, line_start: lineStart, line_end: lineEnd } = item.locator
-        if (item.locator.kind !== 'text_span' || !textIndex || !safeCount(start) || !safeCount(end) || end <= start || end >= textIndex.utf16AtCodePoint.length ||
-            !safeCount(lineStart) || !safeCount(lineEnd) || lineStart < 1 || lineEnd < lineStart) batchInvalid()
-        // Bind reported line bounds to the returned original text before allowing a UI jump.
-        const actualStartLine = textIndex.lineAtCodePoint[start]
-        const actualEndLine = textIndex.lineAtCodePoint[end - 1]
-        if (lineStart !== actualStartLine || lineEnd !== actualEndLine) batchInvalid()
-        locator = { status: 'SUPPORTED', kind: 'text_span', start: textIndex.utf16AtCodePoint[start], end: textIndex.utf16AtCodePoint[end], lineStart, lineEnd }
+        if (item.locator.kind === 'text_span') {
+          const textIndex = textIndexes.get(item.document_id)
+          const { start, end, line_start: lineStart, line_end: lineEnd } = item.locator
+          if (!textIndex || !safeCount(start) || !safeCount(end) || end <= start || end >= textIndex.utf16AtCodePoint.length ||
+              !safeCount(lineStart) || !safeCount(lineEnd) || lineStart < 1 || lineEnd < lineStart) batchInvalid()
+          // Bind reported line bounds to the returned original text before allowing a UI jump.
+          const actualStartLine = textIndex.lineAtCodePoint[start]
+          const actualEndLine = textIndex.lineAtCodePoint[end - 1]
+          if (lineStart !== actualStartLine || lineEnd !== actualEndLine) batchInvalid()
+          locator = { status: 'SUPPORTED', kind: 'text_span', start: textIndex.utf16AtCodePoint[start], end: textIndex.utf16AtCodePoint[end], lineStart, lineEnd }
+        } else if (item.locator.kind === 'ocr_line_boxes') {
+          const document = documentsById.get(item.document_id)
+          const locatorPage = item.locator.page
+          const page = document?.mediaPreview?.pages.find(page => page.number === locatorPage)
+          const boxes = item.locator.line_boxes
+          if (!document || !page || item.locator.precision !== 'OCR_LINE_BOX_APPROXIMATE' ||
+              typeof item.locator.source_sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(item.locator.source_sha256) ||
+              typeof item.locator.source_png_sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(item.locator.source_png_sha256) ||
+              document.sourceSha256 !== item.locator.source_sha256 ||
+              expectedSourceHashes.get(document.id) !== item.locator.source_sha256 ||
+              page.sourcePngSha256 !== item.locator.source_png_sha256 ||
+              item.locator.width !== page.width || item.locator.height !== page.height ||
+              !Array.isArray(boxes) || boxes.length < 1 || boxes.length > 4 || !boxes.every(box => object(box) &&
+                safeCount(box.x0) && safeCount(box.y0) && safeCount(box.x1) && safeCount(box.y1) &&
+                box.x0 < box.x1 && box.y0 < box.y1 && box.x1 <= page.width && box.y1 <= page.height)) batchInvalid()
+          locator = { status: 'SUPPORTED', kind: 'ocr_line_boxes', precision: 'OCR_LINE_BOX_APPROXIMATE',
+            sourceSha256: item.locator.source_sha256, sourcePngSha256: item.locator.source_png_sha256,
+            page: page.number, width: page.width, height: page.height,
+            lineBoxes: boxes.map(box => ({ x0: box.x0 as number, y0: box.y0 as number, x1: box.x1 as number, y1: box.y1 as number })) }
+        } else batchInvalid()
       } else if (item.locator.status === 'UNSUPPORTED' && item.locator.reason === 'NO_DEFENSIBLE_SOURCE_LOCATOR') {
         locator = { status: 'UNSUPPORTED', reason: 'NO_DEFENSIBLE_SOURCE_LOCATOR' }
       } else batchInvalid()
@@ -364,6 +388,22 @@ async function verifyCoordinateDigestBindings(value: unknown, expectedSourceHash
       await verifyOpaqueCandidateRegions(page.candidate_png_base64, page.width, page.height,
         coordinates.filter(item => item.documentId === document.id && item.page === page.number))
     }
+  }
+}
+async function verifyGraphMediaRasterBindings(inspection: BatchInspection) {
+  const documents = new Map(inspection.documents.map(document => [document.id, document]))
+  const checked = new Set<string>()
+  for (const edge of inspection.entityGraph.edges) for (const evidence of edge.evidence) {
+    const locator = evidence.locator
+    if (locator.status !== 'SUPPORTED' || locator.kind !== 'ocr_line_boxes') continue
+    const page = documents.get(evidence.documentId)?.mediaPreview?.pages.find(item => item.number === locator.page)
+    if (!page || !page.sourcePngSha256 || page.sourcePngSha256 !== locator.sourcePngSha256) batchInvalid()
+    const key = `${evidence.documentId}:${locator.page}`
+    if (checked.has(key)) continue
+    checked.add(key)
+    // A matching metadata field is insufficient: bind navigation to the actual
+    // PNG bytes the user will see, including when no coordinate edit was made.
+    if (await sha256Base64(page.sourcePngBase64) !== locator.sourcePngSha256) batchInvalid()
   }
 }
 type RawCoordinateCorrection = { document_id: string; page: number; x0: number; y0: number; x1: number; y1: number; kind: BatchManualFinding['kind']; origin?: string }
@@ -508,7 +548,7 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
     return { sourceId: raw.source_id as string, targetId: raw.target_id as string,
       type: raw.type as BatchRelationship['type'], documentId: raw.document_id as string, basis: raw.basis as string }
   })
-  const graph = entityGraph(value.entity_graph, documents, entities)
+  const graph = entityGraph(value.entity_graph, documents, entities, expectedSourceHashes)
   const summary = value.summary
   if (summary.files !== documents.length || !safeCount(summary.detected_mentions) || !safeCount(summary.transformed_mentions) ||
       !safeCount(summary.suppressed_mentions) ||
@@ -669,8 +709,11 @@ export async function inspectSyntheticBatch(request: { apiBase: string; token: s
           413: 'The batch exceeds the service limit.', 422: 'A file or correction is invalid. Check media size, OCR readability, layout, format, and alias length.', 503: 'Synthetic batch mode is unavailable.' }
         throw new DemoInspectionFailure(messages[response.status] || 'The synthetic batch request failed.')
       }
-      try { const payload = await response.json(); await verifyCoordinateDigestBindings(payload, expectedSourceHashes, coordinateCorrections); return batchInspection(payload, request.files, reference || null,
-        request.reviewExclusions || {}, coordinateCorrections, expectedSourceHashes) } catch (cause) {
+      try { const payload = await response.json(); await verifyCoordinateDigestBindings(payload, expectedSourceHashes, coordinateCorrections);
+        const inspection = batchInspection(payload, request.files, reference || null,
+          request.reviewExclusions || {}, coordinateCorrections, expectedSourceHashes)
+        await verifyGraphMediaRasterBindings(inspection)
+        return inspection } catch (cause) {
         if (cause instanceof DemoInspectionFailure) throw cause
         return batchInvalid()
       }

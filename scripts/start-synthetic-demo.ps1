@@ -51,7 +51,7 @@ try {
         if ($api.HasExited -or $web.HasExited) { break }
         try {
             $health = Invoke-RestMethod -Uri "http://127.0.0.1:$ApiPort/health" -TimeoutSec 1
-            $page = Invoke-WebRequest -Uri "http://127.0.0.1:$WebPort/" -TimeoutSec 1
+            $page = Invoke-WebRequest -Uri "http://127.0.0.1:$WebPort/" -TimeoutSec 1 -UseBasicParsing
             if ($health.mode -eq 'development' -and $page.StatusCode -eq 200) { $ready = $true; break }
         } catch { }
         Start-Sleep -Milliseconds 500

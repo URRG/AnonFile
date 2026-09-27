@@ -100,7 +100,7 @@ function FileScorecard({ score, documents, onInspect, onCorrect }: {
 }
 
 function HighlightedSource({ document, provenance }: { document: BatchDocument; provenance: EntityGraphEvidence | null }) {
-  const target = provenance?.locator.status === 'SUPPORTED' ? provenance.locator : null
+  const target = provenance?.locator.status === 'SUPPORTED' && provenance.locator.kind === 'text_span' ? provenance.locator : null
   const points = new Set([0, document.text.length])
   document.matches.forEach(match => { points.add(match.start); points.add(match.end) })
   if (target) { points.add(target.start); points.add(target.end) }
@@ -117,9 +117,12 @@ function HighlightedSource({ document, provenance }: { document: BatchDocument; 
   })}</pre>
 }
 
-function MediaPages({ document, candidate, zoom, pending = [], onDraw }: { document: BatchDocument; candidate: boolean; zoom: MediaZoom;
-  pending?: BatchCoordinateCorrection[]; onDraw?: (page: number, x0: number, y0: number, x1: number, y1: number) => void }) {
+function MediaPages({ document, candidate, zoom, pending = [], provenance = null, onDraw }: { document: BatchDocument; candidate: boolean; zoom: MediaZoom;
+  pending?: BatchCoordinateCorrection[]; provenance?: EntityGraphEvidence | null;
+  onDraw?: (page: number, x0: number, y0: number, x1: number, y1: number) => void }) {
   const drawStart = useRef<{ pointerId: number; page: number; x: number; y: number; rect: DOMRect } | null>(null)
+  const mediaEvidence = !candidate && provenance?.locator.status === 'SUPPORTED' && provenance.locator.kind === 'ocr_line_boxes'
+    ? provenance.locator : null
   const pointFor = (event: React.PointerEvent<HTMLImageElement>, page: { width: number; height: number }, rect: DOMRect) => ({
     x: Math.max(0, Math.min(page.width, Math.round((event.clientX - rect.left) * page.width / rect.width))),
     y: Math.max(0, Math.min(page.height, Math.round((event.clientY - rect.top) * page.height / rect.height))),
@@ -136,7 +139,12 @@ function MediaPages({ document, candidate, zoom, pending = [], onDraw }: { docum
       onPointerCancel={event => { if (drawStart.current?.pointerId === event.pointerId) drawStart.current = null }}
       onLostPointerCapture={() => { drawStart.current = null }}
       alt={`${candidate ? 'Raster candidate' : 'Source rendering'} of ${document.name}, page ${page.number}`} />
-      {[...(page.manualRegions || []), ...pending.filter(region => region.documentId === document.id && region.page === page.number)].map((region, index) => <span key={`${region.x0}-${region.y0}-${region.x1}-${region.y1}-${index}`} className={`media-region ${index < page.manualRegions.length ? 'applied' : 'pending'}`} style={{ left: `${100 * region.x0 / page.width}%`, top: `${100 * region.y0 / page.height}%`, width: `${100 * (region.x1 - region.x0) / page.width}%`, height: `${100 * (region.y1 - region.y0) / page.height}%` }} />)}</div>
+      {[...(page.manualRegions || []), ...pending.filter(region => region.documentId === document.id && region.page === page.number)].map((region, index) => <span key={`${region.x0}-${region.y0}-${region.x1}-${region.y1}-${index}`} className={`media-region ${index < page.manualRegions.length ? 'applied' : 'pending'}`} style={{ left: `${100 * region.x0 / page.width}%`, top: `${100 * region.y0 / page.height}%`, width: `${100 * (region.x1 - region.x0) / page.width}%`, height: `${100 * (region.y1 - region.y0) / page.height}%` }} />)}
+      {mediaEvidence?.page === page.number && mediaEvidence.lineBoxes.map((box, index) => <span key={`graph-evidence-${index}`} className="media-provenance-region" role="note"
+          tabIndex={index === 0 ? -1 : undefined} data-provenance-target={index === 0 ? 'true' : undefined}
+          aria-label={`Approximate OCR line box ${index + 1} of ${mediaEvidence.lineBoxes.length} for graph evidence on page ${page.number}`}
+          style={{ left: `${100 * box.x0 / page.width}%`, top: `${100 * box.y0 / page.height}%`,
+            width: `${100 * (box.x1 - box.x0) / page.width}%`, height: `${100 * (box.y1 - box.y0) / page.height}%` }} />)}</div>
     <figcaption>Page {page.number} · {page.width} × {page.height} px · {page.ocrLines} OCR lines{onDraw && !candidate ? ' · drag to stage a region' : ''}</figcaption>
   </figure>)}</div>
 }
@@ -488,7 +496,7 @@ export default function BatchDemo() {
           {resultTab === 'documents' && selected && <section className="batch-card result-panel">
             <div className="card-header"><div><p className="overline">DOCUMENT COMPARISON</p><h2>Inspect the source and proposed candidate</h2></div><span className="quiet-tag">{selected.matches.length} matches in this file</span></div>
             <div className="doc-selector" role="tablist" aria-label="Documents">{inspection.documents.map(document => <button type="button" role="tab" aria-selected={selected.id === document.id} className={selected.id === document.id ? 'selected' : ''} key={document.id} onClick={() => { setProvenanceTarget(null); setSelectedDoc(document.id) }}>{fileIcon(document.name)}<span>{document.name}</span><small>{document.matches.length}</small></button>)}</div>
-            {provenanceTarget?.documentId === selected.id && <p className={`provenance-navigation ${provenanceTarget.locator.status === 'SUPPORTED' ? 'is-precise' : ''}`} role="status">{provenanceTarget.locator.status === 'SUPPORTED' ? <>Opened graph evidence at source lines {provenanceTarget.locator.lineStart}{provenanceTarget.locator.lineEnd === provenanceTarget.locator.lineStart ? '' : `–${provenanceTarget.locator.lineEnd}`}. The highlighted text is a navigation aid, not a release-safety finding.</> : <>Graph evidence supports this document only. No defensible text span, PDF page, or bounding box is available for this relationship.</>}</p>}
+            {provenanceTarget?.documentId === selected.id && <p className={`provenance-navigation ${provenanceTarget.locator.status === 'SUPPORTED' ? 'is-precise' : ''}`} role="status">{provenanceTarget.locator.status !== 'SUPPORTED' ? <>Graph evidence supports this document only. No defensible text span, PDF page, or bounding box is available for this relationship.</> : provenanceTarget.locator.kind === 'ocr_line_boxes' ? <>Opened page {provenanceTarget.locator.page} at approximate OCR line boxes. These boxes locate recognized text, not exact glyphs or independently verified relationship proof.</> : <>Opened graph evidence at source lines {provenanceTarget.locator.lineStart}{provenanceTarget.locator.lineEnd === provenanceTarget.locator.lineStart ? '' : `–${provenanceTarget.locator.lineEnd}`}. The highlighted text is a navigation aid, not a release-safety finding.</>}</p>}
             <div className="comparison-toolbar">
               <div className="comparison-layout" role="group" aria-label="Comparison layout">
                 {([['split', 'Side by side'], ['original', 'Original only'], ['candidate', 'Candidate only']] as const).map(([mode, label]) =>
@@ -522,7 +530,7 @@ export default function BatchDemo() {
             <div className={`comparison ${comparisonMode !== 'split' ? 'is-single' : ''}`}>
               {comparisonMode !== 'candidate' && <div className="comparison-column"><div className="pane-heading"><span>ORIGINAL · SYNTHETIC INPUT</span><span>{selected.matches.length} highlighted matches</span></div>
                 <div className="document-pane" ref={sourcePane} onScroll={event => syncPaneScroll(event.currentTarget, candidatePane.current)}>
-                  {selected.mediaPreview && <MediaPages document={selected} candidate={false} zoom={mediaZoom} pending={coordinateCorrections} onDraw={(page, x0, y0, x1, y1) => stageCoordinate(selected.id, page, x0, y0, x1, y1)} />}
+                  {selected.mediaPreview && <MediaPages document={selected} candidate={false} zoom={mediaZoom} pending={coordinateCorrections} provenance={provenanceTarget?.documentId === selected.id ? provenanceTarget : null} onDraw={(page, x0, y0, x1, y1) => stageCoordinate(selected.id, page, x0, y0, x1, y1)} />}
                   <details className="ocr-transcript" open={!selected.mediaPreview}><summary>{selected.mediaPreview ? 'OCR transcript' : 'Source text'}</summary><HighlightedSource document={selected} provenance={provenanceTarget?.documentId === selected.id ? provenanceTarget : null} /></details>
                 </div></div>}
               {comparisonMode === 'split' && <div className="compare-divider"><ArrowDown size={17} /></div>}
@@ -547,7 +555,7 @@ export default function BatchDemo() {
           {resultTab === 'relationships' && <section className="batch-card result-panel relationship-panel">
             <div className="card-header"><div><p className="overline">CROSS-DOCUMENT CONTEXT</p><h2>Entity relationship map</h2></div><span className="quiet-tag">Explicit evidence only</span></div>
             <p className="panel-intro">This map separates people, organizations, and projects. Arrows carry a typed relationship; it never derives a tie from proximity or co-mentions.</p>
-            <RelationshipGraph graph={inspection.entityGraph} documentNames={new Map(inspection.documents.map((document, index) => [document.id, `Document ${String(index + 1).padStart(2, '0')} · ${document.kind.toUpperCase()}`]))} onInspectDocument={(id, evidence) => { setProvenanceTarget(evidence); setSelectedDoc(id); setResultTab('documents') }} />
+            <RelationshipGraph graph={inspection.entityGraph} documentNames={new Map(inspection.documents.map((document, index) => [document.id, `Document ${String(index + 1).padStart(2, '0')} · ${document.kind.toUpperCase()}`]))} onInspectDocument={(id, evidence) => { setProvenanceTarget(evidence); setSelectedDoc(id); setComparisonMode('split'); setResultTab('documents') }} />
           </section>}
           {resultTab === 'verification' && <section className="batch-card result-panel"><div className="card-header"><div><p className="overline">EVIDENCE, NOT A VANITY SCORE</p><h2>Verification scorecard</h2></div><span className="status-pill">REVIEW REQUIRED</span></div>
             <p className="panel-intro">These are observable checks for this run. Reference-label agreement appears only when complete synthetic labels were supplied; it does not measure anonymity or performance on other datasets.</p>

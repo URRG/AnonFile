@@ -66,6 +66,7 @@ MAX_GRAPH_NODES = 100
 MAX_GRAPH_EDGES = 200
 MAX_GRAPH_EVIDENCE_PER_EDGE = 20
 MAX_GRAPH_FACTS = 500
+MAX_MEDIA_LOCATOR_LINES = 4
 # Curated fictional *name* substitutions, not arbitrary alphanumeric tokens.
 # The PDF renderer replaces OCR text in its original box, so each component
 # must have the same character width as the source component. These lists are
@@ -474,6 +475,112 @@ def _unsupported_locator() -> dict[str, str]:
     return {"status": "UNSUPPORTED", "reason": "NO_DEFENSIBLE_SOURCE_LOCATOR"}
 
 
+def _media_locator(document: dict[str, Any], span: tuple[int, int] | None) -> dict[str, Any]:
+    """Return bounded, approximate OCR evidence geometry or abstain.
+
+    These boxes are review navigation hints in the source raster coordinate
+    space, not glyph positions or a claim of pixel-precise relationship proof.
+    The relationship parser must already have supplied an exact text span.
+    """
+    text = document.get("text")
+    source_sha256 = document.get("source_sha256")
+    pages = document.get("_media_pages")
+    if (not isinstance(text, str) or not isinstance(span, tuple) or len(span) != 2
+            or any(not isinstance(value, int) or isinstance(value, bool) for value in span)
+            or not isinstance(source_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", source_sha256)
+            or not isinstance(pages, list) or not (0 <= span[0] < span[1] <= len(text))):
+        return _unsupported_locator()
+    selected: list[tuple[int, int, int, int, int, int, int, int, int]] = []
+    page_numbers: set[int] = set()
+    for expected_number, page in enumerate(pages, 1):
+        image = page.get("image") if isinstance(page, dict) else None
+        number = page.get("number") if isinstance(page, dict) else None
+        lines = page.get("lines") if isinstance(page, dict) else None
+        width, height = getattr(image, "width", None), getattr(image, "height", None)
+        if (not isinstance(number, int) or isinstance(number, bool) or number != expected_number
+                or not isinstance(width, int) or isinstance(width, bool) or width < 1
+                or not isinstance(height, int) or isinstance(height, bool) or height < 1
+                or not isinstance(lines, list)):
+            return _unsupported_locator()
+        for line in lines:
+            if not isinstance(line, dict):
+                return _unsupported_locator()
+            line_text, start, end, box = line.get("text"), line.get("start"), line.get("end"), line.get("box")
+            if (not isinstance(start, int) or isinstance(start, bool) or not isinstance(end, int)
+                    or isinstance(end, bool) or not isinstance(line_text, str)
+                    or not isinstance(box, (list, tuple)) or len(box) != 4
+                    or any(not isinstance(value, int) or isinstance(value, bool) for value in box)):
+                return _unsupported_locator()
+            x0, y0, x1, y1 = box
+            if not (0 <= start < end <= len(text) and line_text == text[start:end]
+                    and 0 <= x0 < x1 <= width and 0 <= y0 < y1 <= height):
+                return _unsupported_locator()
+            if start < span[1] and end > span[0]:
+                selected.append((start, end, number, width, height, x0, y0, x1, y1))
+                page_numbers.add(number)
+    if not selected or len(selected) > MAX_MEDIA_LOCATOR_LINES or len(page_numbers) != 1:
+        return _unsupported_locator()
+    selected.sort()
+    cursor = span[0]
+    for start, end, *_ in selected:
+        # OCR lines must cover the relationship span in a unique linear order;
+        # only their joining newlines may be omitted from line offsets.
+        if start < cursor or text[cursor:start] not in {"", "\n"}:
+            return _unsupported_locator()
+        cursor = end
+    if text[cursor:span[1]]:
+        return _unsupported_locator()
+    _, _, number, width, height, *_ = selected[0]
+    return {"status": "SUPPORTED", "kind": "ocr_line_boxes",
+            "precision": "OCR_LINE_BOX_APPROXIMATE", "source_sha256": source_sha256,
+            "page": number, "width": width, "height": height,
+            "line_boxes": [{"x0": x0, "y0": y0, "x1": x1, "y1": y1}
+                           for _, _, _, _, _, x0, y0, x1, y1 in selected]}
+
+
+def _bind_media_locator_rasters(facts: list[dict[str, Any]], documents: list[dict[str, Any]]) -> None:
+    """Bind an OCR locator to the exact source PNG returned to the browser.
+
+    The upload digest identifies source bytes, but it cannot authenticate a
+    rendered PDF page.  A supported geometry locator consequently needs both
+    identities.  Any missing, altered, or dimension-mismatched raster causes
+    an explicit abstention rather than a page-level navigation claim.
+    """
+    by_id = {document["id"]: document for document in documents}
+    for fact in facts:
+        locator = fact.get("locator")
+        if not (isinstance(locator, dict) and locator.get("status") == "SUPPORTED"
+                and locator.get("kind") == "ocr_line_boxes"):
+            continue
+        document = by_id.get(fact.get("document_id"))
+        preview = document.get("media_preview") if isinstance(document, dict) else None
+        pages = preview.get("pages") if isinstance(preview, dict) else None
+        if not isinstance(pages, list):
+            fact["locator"] = _unsupported_locator()
+            continue
+        matching = [page for page in pages if isinstance(page, dict) and page.get("number") == locator.get("page")]
+        if len(matching) != 1:
+            fact["locator"] = _unsupported_locator()
+            continue
+        page = matching[0]
+        encoded, digest = page.get("source_png_base64"), page.get("source_png_sha256")
+        if (page.get("width") != locator.get("width") or page.get("height") != locator.get("height")
+                or not isinstance(encoded, str) or not isinstance(digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+            fact["locator"] = _unsupported_locator()
+            continue
+        try:
+            raster = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error):
+            fact["locator"] = _unsupported_locator()
+            continue
+        if not raster or hashlib.sha256(raster).hexdigest() != digest:
+            fact["locator"] = _unsupported_locator()
+            continue
+        locator["source_png_sha256"] = digest
+
+
 def _csv_record_span(document: dict[str, Any], record: dict[str, Any]) -> tuple[int, int] | None:
     """Locate one exact one-line CSV record, rejecting duplicates/ambiguity."""
     lines = document["text"].splitlines(keepends=True)
@@ -510,7 +617,7 @@ def _text_locator(document: dict[str, Any], source: str, target: str,
     duplicate row, cross-record pair, or multiline form is unsupported.
     """
     if document["kind"] in {"pdf", "image"}:
-        return _unsupported_locator()
+        return _media_locator(document, span)
     text = document["text"]
     if span is None and record is not None and document["kind"] == "csv":
         span = _csv_record_span(document, record)
@@ -1082,6 +1189,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
         doc.pop("_ssn_values")
         doc.pop("_labelled_ssns")
 
+    _bind_media_locator_rasters(graph_facts, documents)
     person_id = {value: id_by_key[("PERSON_NAME", value)] for value in names_by_key}
     graph_person_labels = {value: ("Source retained" if person_id[value] in exclusions else name_aliases[value])
                            for value in person_id}

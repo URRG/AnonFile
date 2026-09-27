@@ -30,9 +30,11 @@ entity map, and a verification scorecard. The map separates people,
 organizations and projects; it supports typed role edges from explicit
 structured fields, labelled signatures or complete role statements, and
 mail-header delivery edges behind a separate toggle. Selecting text evidence
-opens and highlights a validated source span; media evidence opens the document
-with an explicit document-level-only label because no exact PDF page/box
-locator is established. It does not infer employment
+opens and highlights a validated source span. For an explicit media claim whose
+OCR text maps unambiguously to one source page, selecting evidence opens that
+page with approximate OCR-line boxes; this is a navigation aid, not exact glyph
+geometry or independent validation. Ambiguous media evidence remains
+document-level only. It does not infer employment
 or client relationships from email domains, proximity or a mere conversation.
 See the [graph contract](entity-relationship-graph.md). The
 reproducible three-file [rich relationship batch](rich-relationship-demo-fixtures.md)
