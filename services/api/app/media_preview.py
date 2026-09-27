@@ -35,6 +35,11 @@ PDF_SCALE = 1.7
 # geometry. This deliberately detects only catastrophic blur/flat raster data;
 # it is not a readability, language, or OCR-coverage threshold.
 MIN_OCR_LINE_EDGE_DELTA = 12
+# A single OCR claim may be overbroad even when it reports a plausible string
+# and has a local raster edge. Do not let its repaint erase a visibly separate
+# ink island (for example, an unrecognised adjacent value) inside that claim.
+# This is scaled to the line height so ordinary glyph/word gaps remain valid.
+MIN_OCR_LINE_SEPARATE_INK_GAP = 10
 _OCR_LOCK = Lock()
 _PDFIUM_LOCK = Lock()  # PDFium is not thread-safe, even across separate documents.
 _EXPLICIT_HEADER_NAME = re.compile(
@@ -158,6 +163,63 @@ def _assert_ocr_line_has_raster_edge(source_gray: Any, line: dict[str, Any]) -> 
         raise PayloadError("OCR line lacks measurable source-raster edge detail; inspect the source manually.")
 
 
+def _assert_ocr_line_has_no_separate_ink_island(source_gray: Any, line: dict[str, Any]) -> None:
+    """Reject one OCR box that spans visibly separate source-ink regions.
+
+    A non-flat box is not necessarily tight. A same-engine OCR result can
+    describe one value while its geometry also covers an unrecognised value;
+    then no second OCR line exists for the repaint-neighbour guard to compare.
+    A material blank run between substantial ink columns *or rows*, or a
+    long thin rule-like ink stroke, is conservative evidence of ambiguity, so
+    abstain rather than erase. This is a bounded geometry guard, not text
+    recognition or an OCR-coverage claim.
+    """
+    import numpy as np
+
+    x0, y0, x1, y1 = _line_ink_box(line)
+    line_gray = source_gray[y0:y1, x0:x1]
+    height, width = line_gray.shape
+    dark = line_gray <= 245
+
+    # Treat a *connected* long, thin horizontal/vertical component as geometry
+    # ambiguity. A projection-only check can be bridged by a one- or two-pixel
+    # rule. Component shape keeps ordinary tall glyph strokes and short `|`
+    # punctuation from becoming rules, while a full-box width never dilutes the
+    # decision. RapidOCR already requires OpenCV at runtime; use its bounded
+    # in-memory connected-component primitive instead of guessing from a line
+    # projection.
+    import cv2
+    component_count, _, stats, _ = cv2.connectedComponentsWithStats(
+        dark.astype(np.uint8), connectivity=8)
+    for index in range(1, component_count):
+        _, _, component_width, component_height, _ = stats[index]
+        if (component_width >= max(24, component_height * 12)
+                and component_height <= max(2, height // 5)):
+            raise PayloadError("OCR line has ambiguous rule-like source ink; inspect the source manually.")
+        if (component_height >= max(24, component_width * 12)
+                and component_width <= max(2, width // 5)):
+            raise PayloadError("OCR line has ambiguous rule-like source ink; inspect the source manually.")
+
+    # Substantial support avoids antialiasing/noise bridging a blank gap. An
+    # uncertain raster abstains; this guard never tightens a repaint box.
+    column_support = np.count_nonzero(dark, axis=0)
+    active_columns = np.flatnonzero(column_support >= max(2, height // 8))
+    horizontal_gap_limit = max(MIN_OCR_LINE_SEPARATE_INK_GAP, height)
+    horizontal_gaps = np.diff(active_columns) - 1
+    if horizontal_gaps.size and int(horizontal_gaps.max()) >= horizontal_gap_limit:
+        raise PayloadError("OCR line spans separate source-ink regions; inspect the source manually.")
+    # The horizontal projection alone misses two vertically stacked source
+    # strings at the same x-position. Keep the row threshold small but bounded:
+    # it must retain thin glyph strokes while rejecting only a material blank
+    # band, never attempting to split or tighten the OCR claim.
+    row_support = np.count_nonzero(dark, axis=1)
+    active_rows = np.flatnonzero(row_support >= max(1, min(4, width // 20)))
+    vertical_gap_limit = max(12, height // 3)
+    vertical_gaps = np.diff(active_rows) - 1
+    if vertical_gaps.size and int(vertical_gaps.max()) >= vertical_gap_limit:
+        raise PayloadError("OCR line spans separate source-ink regions; inspect the source manually.")
+
+
 @lru_cache(maxsize=1)
 def _engine() -> Any:
     from rapidocr import RapidOCR
@@ -204,6 +266,7 @@ def _ocr_lines(image: Any, *, require_confidence: bool = True, validate_layout: 
         source_gray = np.asarray(image.convert("L"), dtype=np.int16)
         for line in lines:
             _assert_ocr_line_has_raster_edge(source_gray, line)
+            _assert_ocr_line_has_no_separate_ink_island(source_gray, line)
     return lines
 
 
