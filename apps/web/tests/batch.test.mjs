@@ -96,6 +96,34 @@ test('batch client binds declared PAN strategy to a deliberately invalid alias',
   }
 })
 
+test('batch client accepts only bounded review references and reserved internal URLs', async t => {
+  for (const [kind, source, alias, strategy] of [
+    ['EMPLOYEE_ID', 'HS-EMP-1042', 'Employee ID [review 0001]', 'CONTEXTUAL_REVIEW_REF'],
+    ['ADDRESS', '25 Sample Street, Example City, CA 90000', 'Postal address [review 0001]', 'CONTEXTUAL_REVIEW_REF'],
+    ['INTERNAL_URL', 'https://github.example.test/private', 'https://review-0001.invalid/resource', 'INTERNAL_URL_RESERVED_DOMAIN'],
+  ]) {
+    const contextual = valid()
+    contextual.documents[0].text = source
+    contextual.documents[0].candidate_text = alias
+    contextual.documents[0].size_bytes = Buffer.byteLength(source)
+    contextual.documents[0].matches[0] = { start: 0, end: source.length, source, entity_id: 'E1', kind,
+      replacement: alias, applied: true, origin: 'AUTOMATIC' }
+    contextual.entities[0] = { id: 'E1', kind, source, alias, strategy, mentions: 1, excluded: false }
+    const contextualRequest = { ...request, files: [{ ...files[0], size: Buffer.byteLength(source),
+      contentBase64: Buffer.from(source).toString('base64') }, files[1]] }
+    t.mock.method(globalThis, 'fetch', async () => Response.json(contextual))
+    assert.equal((await inspectSyntheticBatch(contextualRequest)).entities[0].alias, alias)
+    t.mock.restoreAll()
+    const tampered = structuredClone(contextual)
+    tampered.entities[0].alias = kind === 'INTERNAL_URL' ? 'https://review-0001.example.com/resource' : 'Employee ID [review source]'
+    tampered.documents[0].matches[0].replacement = tampered.entities[0].alias
+    tampered.documents[0].candidate_text = tampered.entities[0].alias
+    t.mock.method(globalThis, 'fetch', async () => Response.json(tampered))
+    await assert.rejects(inspectSyntheticBatch(contextualRequest), /invalid review result/)
+    t.mock.restoreAll()
+  }
+})
+
 test('batch client sends bounded reviewer corrections and rejects invalid values before transport', async t => {
   const mock = t.mock.method(globalThis, 'fetch', async () => Response.json(valid()))
   await inspectSyntheticBatch({ ...request, manualFindings: [{ value: 'DEMO-4821', kind: 'OTHER_SENSITIVE' }] })

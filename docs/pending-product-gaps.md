@@ -13,16 +13,23 @@ supplier data. `Blocked externally` is not the same as done.
   and UI, and the documentation test/lint path passes. Evidence: PR #86 demo
   guide plus updated roadmap/production gate on this branch; `git diff --check`
   and linked-file existence checks pass. No dedicated Markdown linter exists.
-- [ ] **D02 — Contextual sensitive-value coverage.** Detect explicitly labelled
-  employee IDs, internal URLs and postal addresses in TXT, structured files,
+- [x] **D02 — Contextual sensitive-value coverage.** Detect explicitly labelled
+  employee IDs, internal URLs, bounded US-style prose postal addresses, and
+  explicitly named structured address fields in TXT or structured files,
   and OCR text without promoting arbitrary prose or public links into PII.
   Exit: positive, negative, cross-file and OCR-regression tests; findings and
-  residuals are visible in the review register and candidate.
-- [ ] **D03 — Safe, useful replacements for D02.** Preserve relationship and
+  residuals are visible in the review register and candidate. Evidence:
+  contextual unit tests, JSON/CSV cross-file and rich PDF/PDF/TXT API tests,
+  native-PDF/OCR disagreement test and local Edge walkthrough on this branch.
+  Scope remains deliberately narrow; R01 covers broader recall.
+- [x] **D03 — Safe, useful replacements for D02.** Preserve relationship and
   document utility while avoiding live internal hosts, contact points and
   fake claims of non-issuable employee IDs or addresses. Exit: deterministic
   batch-local surrogates, collision tests, format/safety labels, and explicit
-  abstention when no safe profile exists.
+  abstention when no safe profile exists. Evidence: source-free review
+  references, `.invalid` URL host/path, bounded fallback to opaque marker,
+  client response validation and browser candidate-download check on this
+  branch. These are review labels, not issuer-valid replacements.
 - [ ] **D04 — Media coordinate review.** Let a reviewer add or correct a missed
   region on a PDF/image, not only a phrase already found by OCR. Exit: bounded
   page boxes, visual diff, source/candidate provenance and rejection of

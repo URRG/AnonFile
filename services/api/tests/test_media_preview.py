@@ -59,3 +59,11 @@ def test_pdf_text_layer_check_rejects_explicit_name_missing_from_ocr():
     _verify_pdf_text_layer(native, [{"text": "Name: Maya Patel"},
                                     {"text": "Title: Incident Lead"},
                                     {"text": "Company: Harborline Systems"}])
+
+
+def test_pdf_text_layer_check_rejects_missing_contextual_identifier_or_url():
+    native = "Employee ID: HS-EMP-1042\nReview link: https://github.example.test/private"
+    with pytest.raises(PayloadError, match="PDF text-layer and OCR disagree"):
+        _verify_pdf_text_layer(native, [{"text": "Employee ID: HS-EMP-1042"}])
+    with pytest.raises(PayloadError, match="PDF text-layer and OCR disagree"):
+        _verify_pdf_text_layer(native, [{"text": "Review link: https://github.example.test/private"}])

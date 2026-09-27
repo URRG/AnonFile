@@ -19,6 +19,7 @@ from threading import Lock
 from typing import Any
 
 from app.contracts import PayloadError
+from app.demo_contextual import contextual_spans
 from app.processing import detect_text
 
 MAX_MEDIA_PAGES = 2
@@ -36,9 +37,9 @@ _EXPLICIT_HEADER_NAME = re.compile(
 )
 _EXPLICIT_NAME_FIELD = re.compile(r"(?im)^\s*name:\s*(?P<name>[A-Za-z][A-Za-z .'-]{1,79})\s*$")
 _EXPLICIT_ROLE_NAME = re.compile(
-    r"(?im)^(?P<name>[A-Za-z][A-Za-z .'-]{1,79}) is (?:a client of|assistant (?:to|for)) [^.\r\n]{2,100}\.$|"
-    r"^(?P<worker>[A-Za-z][A-Za-z .'-]{1,79}) works on [^.\r\n]{2,100}\.$|"
-    r"^[^.\r\n]{2,100} is assigned to (?P<assignee>[A-Za-z][A-Za-z .'-]{1,79})\.$"
+    r"(?im)^(?P<name>[A-Za-z][A-Za-z .'-]{1,79}) is (?:a client of|assistant (?:to|for)) [^.\r\n]{2,100}\.\r?$|"
+    r"^(?P<worker>[A-Za-z][A-Za-z .'-]{1,79}) works on [^.\r\n]{2,100}\.\r?$|"
+    r"^[^.\r\n]{2,100} is assigned to (?P<assignee>[A-Za-z][A-Za-z .'-]{1,79})\.\r?$"
 )
 
 
@@ -205,9 +206,18 @@ def _verify_pdf_text_layer(native_text: str, lines: list[dict[str, Any]]) -> Non
                 value = match.groupdict().get(group)
                 if value:
                     required[("PERSON_NAME", value.strip().casefold())] += 1
+    for start, end, kind in contextual_spans(native_text):
+        source = native_text[start:end].casefold()
+        if kind == "ADDRESS":
+            source = " ".join(source.split())
+        required[(kind, source)] += 1
     for (kind, source), count in required.items():
-        values = ("".join(char for char in line if char.isdigit()) for line in ocr_values) if kind in {"PHONE", "AADHAAR", "CARD"} else iter(ocr_values)
-        if sum(line.count(source) for line in values) < count:
+        if kind == "ADDRESS":
+            present = " ".join(" ".join(ocr_values).split()).count(source)
+        else:
+            values = ("".join(char for char in line if char.isdigit()) for line in ocr_values) if kind in {"PHONE", "AADHAAR", "CARD"} else iter(ocr_values)
+            present = sum(line.count(source) for line in values)
+        if present < count:
             raise PayloadError("PDF text-layer and OCR disagree on a sensitive value; inspect the source manually.")
 
 

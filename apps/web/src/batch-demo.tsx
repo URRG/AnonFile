@@ -63,7 +63,7 @@ const REGISTER_GROUPS: { id: RegisterGroup; label: string }[] = [
 function registerGroup(kind: string): Exclude<RegisterGroup, 'all'> {
   if (kind === 'PERSON_NAME') return 'people'
   if (kind === 'EMAIL' || kind === 'PHONE') return 'contacts'
-  if (['GOVERNMENT_ID', 'PAN', 'AADHAAR', 'CARD'].includes(kind)) return 'identifiers'
+  if (['GOVERNMENT_ID', 'EMPLOYEE_ID', 'PAN', 'AADHAAR', 'CARD'].includes(kind)) return 'identifiers'
   return 'other'
 }
 const REGISTER_PAGE_SIZE = 8
@@ -71,6 +71,8 @@ const STRATEGY_LABELS: Record<BatchInspection['entities'][number]['strategy'], s
   NAME_LENGTH_MATCH: 'Plausible same-length name', EMAIL_TEST_ADDRESS: 'Reserved .test address',
   PAN_INVALID_TEST: 'PAN-shaped · invalid', US_SSN_INVALID: 'SSN-shaped · invalid',
   NANP_FICTIONAL: 'Fictional US number', OPAQUE_REDACTION: 'Opaque redaction',
+  CONTEXTUAL_REVIEW_REF: 'Review-only reference',
+  INTERNAL_URL_RESERVED_DOMAIN: 'Reserved .invalid link',
 }
 function fileIcon(name: string) { return /\.(png|jpe?g)$/i.test(name) ? <ImageIcon size={21} /> :
   name.toLowerCase().endsWith('.json') || name.toLowerCase().endsWith('.jsonl') ? <FileCode2 size={21} /> : <FileText size={21} /> }
