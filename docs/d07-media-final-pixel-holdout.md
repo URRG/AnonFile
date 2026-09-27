@@ -11,3 +11,11 @@ The two tiny fictional fixtures are valid, decoded PNGs. `pdf-page-1.png` is ren
 It is not wired into release authorization. Every outcome is either blocked, inconclusive, or an observation of synthetic markers; no outcome qualifies a system or authorizes a release.
 
 This remains a scaffold. Passing fictional canaries does not establish OCR completeness, residual-disclosure absence, rendering coverage, qualification, or a release decision. Qualification would require independently curated and access-controlled fixtures, signed lock custody, pinned rendering/OCR environments, adversarial format coverage, OCR calibration/recall analysis, and governed human review.
+
+`app.d07_holdout_manifest.bind_final_artifacts` is a separate preflight for a
+future supplied corpus. It verifies the exact bytes of every supplied final
+artifact against a SHA-256-pinned manifest and produces only aggregate artifact
+counts by format and annotated entity type. Its required manifest digest must
+come from a trusted frozen-holdout custodian; the function cannot prove custody,
+rights clearance, annotation independence/completeness, OCR coverage, or score
+quality. It is not connected to any release path.
