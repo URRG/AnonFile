@@ -43,8 +43,7 @@ permission to release data.
 ## Revisioned identity overlay
 
 `app.revisioned_graph_review` separately provides a trusted-server, in-process
-review primitive for D06 identity overlays. It has no route, API contract,
-storage adapter, durable claim, or release effect. Its merge and split actions
+review primitive for D06 identity overlays. Its merge and split actions
 are optimistic-revision updates with a redacted public view and append-only
 review audit.
 
@@ -65,3 +64,18 @@ multiple-affiliation and multiple-assignment prompts. These remain
 `UNRESOLVED_REVIEW_REQUIRED`: overlays do not resolve conflicts, authorize a
 release, or establish a real-world identity fact. Evidence bindings never
 appear in the public view or overlay audit.
+
+## Narrow durable reviewer route
+
+`app.durable_graph_review` persists the immutable snapshot and accept/reject
+events in an encrypted SQLite control record with a transaction-bound audit
+append. When that store is configured in development mode, authenticated
+reviewers can read a tenant-bound source-safe snapshot and submit one terminal
+decision against an expected revision. Stale revisions return 409; expired or
+cross-tenant snapshots cannot be updated. The original expiry is not renewed.
+
+This is not a graph editor in the synthetic demo: only trusted server code can
+register a snapshot, and the existing UI has no durable snapshot binding or
+action. Merge/split overlays above remain in-process only, not route actions.
+The production route guard still blocks this API; no release authority follows
+from a reviewer decision.
