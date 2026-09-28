@@ -257,6 +257,11 @@ supplier data. `Blocked externally` is not the same as done.
   organizations, indirect identifiers, health and business-sensitive context.
   Exit: frozen, rights-cleared holdout results by type/language/source format;
   do not claim completeness from synthetic examples.
+  The [coverage registry](pii-coverage-registry.md) records researched
+  identifier families and explicit misses. A bounded rules increment now
+  handles UK-shaped IBANs, labelled bank/routing accounts, IPv6, MAC,
+  labelled usernames/passport/licence numbers, VINs and labelled birth dates.
+  Synthetic tests do not complete R01 or measure its recall.
 - [ ] **R02 — Jurisdiction-specific surrogate registry.** Record issuer,
   validation basis, format-preserving status, collision risk and abstention for
   each identifier family. Passport/licence numbers stay opaque until a

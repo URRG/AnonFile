@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections import Counter
 import hashlib
+import ipaddress
 import json
 import math
 import re
@@ -29,7 +30,7 @@ RULES_METHOD_ID = "rules-v1"
 # beyond the declarative inputs below.  The digest is a reproducible identity,
 # not an assertion that these bounded rules are sufficient for release.
 RULES_METHOD_VERSION = "rules-processor-v1"
-RULES_METHOD_ALGORITHM_REVISION = "rules-processing-algorithm-v1"
+RULES_METHOD_ALGORITHM_REVISION = "rules-processing-algorithm-v2"
 RULES_METHOD_BUILD_REVISION = "anonflow-m9"
 _RULES_METHOD_CONFIG_SCHEMA = "rules-processing-config-v1"
 LIMITATIONS = (
@@ -41,10 +42,12 @@ LIMITATIONS = (
     "Container-valued sensitive fields and reserved transformation markers in source strings or keys are unsupported and rejected.",
 )
 SEVERITY = {"medium": 1, "high": 2, "critical": 3}
-PRIORITY = {"CREDENTIAL": 12, "PAYMENT_SECRET": 11, "CARD": 10, "AADHAAR": 9,
+PRIORITY = {"CREDENTIAL": 12, "PAYMENT_SECRET": 11, "FINANCIAL_ACCOUNT": 10,
+            "CARD": 10, "AADHAAR": 9,
             "HEALTH_SENSITIVE": 8, "BUSINESS_CONFIDENTIAL": 8, "QUASI_IDENTIFIER": 7,
             "GOVERNMENT_ID": 6,
-            "SENSITIVE_NUMBER": 5, "PAN": 4, "EMAIL": 3,
+            "SENSITIVE_NUMBER": 5, "DEVICE_ID": 5, "VEHICLE_ID": 5,
+            "USER_ID": 4, "PAN": 4, "EMAIL": 3,
             "PHONE": 2, "IP_ADDRESS": 1, "PERSON_NAME": 1, "ADDRESS": 1, "DATE_OF_BIRTH": 1}
 _RESERVED_MARKER = re.compile(r"\[(?:REDACTED_[A-Z_]+|GENERALIZED_QUASI_IDENTIFIER|[A-Z][A-Z_]*_[0-9]{4,})\]", re.IGNORECASE)
 
@@ -58,7 +61,31 @@ _CREDENTIAL = re.compile(
 _AUTH_TOKEN = re.compile(r"(?i)\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+")
 _EMAIL = re.compile(r"(?<![\w.!#$%&'*+/=?^`{|}~-])[\w.!#$%&'*+/=?^`{|}~-]+@[\w-]+(?:\.[\w-]+)+", re.UNICODE)
 _PAN = re.compile(r"(?<!\w)[A-Z]{5}[0-9]{4}[A-Z](?!\w)", re.IGNORECASE)
+# A deliberately narrow free-text IBAN shape. Other jurisdictions still need
+# registry-backed adapters; a shape match is a sensitive candidate, not proof
+# that an account exists or that the check digits are valid.
+_GB_IBAN = re.compile(r"(?<!\w)GB[0-9]{2}[ ]?[A-Z]{4}(?:[ ]?[0-9]{4}){3}[ ]?[0-9]{2}(?!\w)", re.IGNORECASE)
+_BANK_ACCOUNT = re.compile(
+    r"(?i)\b(?:bank|checking|savings)\s+account(?:\s+(?:number|no\.?))?\s*(?:[:=#-]\s*|\s+)(?P<value>[0-9]{8,17})(?!\w)"
+)
+_BANK_ROUTING = re.compile(
+    r"(?i)\b(?:bank\s+)?routing(?:\s+(?:number|no\.?))?\s*(?:[:=#-]\s*|\s+)(?P<value>[0-9]{9})(?!\w)"
+)
 _IP = re.compile(r"(?<![\w.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![\w.])")
+_IPV6 = re.compile(r"(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![0-9A-Fa-f:])")
+_MAC = re.compile(r"(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}(?![0-9A-Fa-f])")
+_USER_HANDLE = re.compile(
+    r"(?i)\b(?:username|user\s*id|slack\s+handle|account\s+handle)\s*(?:[:=#-]\s*|\s+)(?P<value>@?[A-Za-z0-9](?:[A-Za-z0-9._-]{1,62}[A-Za-z0-9_])?)(?!\w)"
+)
+_IDENTITY_DOCUMENT = re.compile(
+    r"(?i)\b(?:passport|driver'?s?\s+licen[cs]e)(?:\s+(?:number|no\.?))?\s*(?:[:=#-]\s*|\s+)(?P<value>[A-Z0-9]{6,16})(?!\w)"
+)
+_VEHICLE_VIN = re.compile(
+    r"(?i)\b(?:vin|vehicle\s+identification\s+number)\s*(?:[:=#-]\s*|\s+)(?P<value>[A-HJ-NPR-Z0-9]{17})(?!\w)"
+)
+_BIRTH_CONTEXT = re.compile(
+    r"(?i)\b(?:born\s+on|date\s+of\s+birth|dob)\s*(?:[:=#-]\s*|\s+)(?P<value>(?:[0-9]{4}-[0-9]{2}-[0-9]{2}|[0-9]{1,2}\s+[A-Za-z]{3,9}\s+[0-9]{4}))(?!\w)"
+)
 _NUMBER = re.compile(r"(?<!\w)\+?[0-9](?:[0-9 ()-]*[0-9])?(?!\w)")
 # These are intentionally contextual rules, not vocabulary matches.  A bare
 # word such as "allergy" or "confidential" is not enough to redact prose.
@@ -90,8 +117,12 @@ for _names, _kind, _severity in (
     (("password", "passwd", "secret", "apikey", "token", "accesstoken", "refreshtoken", "authorization", "privatekey"), "CREDENTIAL", "critical"),
     (("cvv", "cvc", "pin", "cardsecuritycode"), "PAYMENT_SECRET", "critical"),
     (("cardnumber", "creditcard", "creditcardnumber", "debitcardnumber", "paymentcard"), "CARD", "critical"),
+    (("bankaccount", "bankaccountnumber", "checkingaccount", "savingsaccount", "routingnumber", "iban"), "FINANCIAL_ACCOUNT", "critical"),
     (("aadhaar", "aadhar", "aadhaarnumber", "aadharnumber", "governmentid", "ssn", "socialsecuritynumber"), "GOVERNMENT_ID", "critical"),
-    (("pan", "pannumber", "passport", "passportnumber", "driverslicense"), "GOVERNMENT_ID", "high"),
+    (("pan", "pannumber", "passport", "passportnumber", "driverslicense", "driverlicense", "licencenumber", "licensenumber"), "GOVERNMENT_ID", "high"),
+    (("vin", "vehicleidentificationnumber"), "VEHICLE_ID", "high"),
+    (("macaddress", "deviceid", "deviceserial"), "DEVICE_ID", "high"),
+    (("username", "userid", "accountid", "socialhandle"), "USER_ID", "high"),
     (("name", "firstname", "lastname", "fullname", "customername", "passengername", "patientname"), "PERSON_NAME", "high"),
     (("address", "street", "streetaddress", "homeaddress", "billingaddress", "shippingaddress"), "ADDRESS", "high"),
     (("email", "emailaddress"), "EMAIL", "high"),
@@ -122,7 +153,15 @@ def _rules_method_identity_config(*, algorithm_revision: str, build_revision: st
         ("credential", _CREDENTIAL.pattern, _CREDENTIAL.flags),
         ("authorization", _AUTH_TOKEN.pattern, _AUTH_TOKEN.flags),
         ("email", _EMAIL.pattern, _EMAIL.flags), ("pan", _PAN.pattern, _PAN.flags),
+        ("gb_iban", _GB_IBAN.pattern, _GB_IBAN.flags),
+        ("bank_account", _BANK_ACCOUNT.pattern, _BANK_ACCOUNT.flags),
+        ("bank_routing", _BANK_ROUTING.pattern, _BANK_ROUTING.flags),
         ("ipv4", _IP.pattern, _IP.flags), ("number", _NUMBER.pattern, _NUMBER.flags),
+        ("ipv6", _IPV6.pattern, _IPV6.flags), ("mac", _MAC.pattern, _MAC.flags),
+        ("user_handle", _USER_HANDLE.pattern, _USER_HANDLE.flags),
+        ("identity_document", _IDENTITY_DOCUMENT.pattern, _IDENTITY_DOCUMENT.flags),
+        ("vehicle_vin", _VEHICLE_VIN.pattern, _VEHICLE_VIN.flags),
+        ("birth_context", _BIRTH_CONTEXT.pattern, _BIRTH_CONTEXT.flags),
         ("health_context", _HEALTH_CONTEXT.pattern, _HEALTH_CONTEXT.flags),
         ("business_context", _BUSINESS_CONTEXT.pattern, _BUSINESS_CONTEXT.flags),
         ("quasi_context", _QUASI_CONTEXT.pattern, _QUASI_CONTEXT.flags),
@@ -201,9 +240,37 @@ def detect_text(text: str) -> tuple[Span, ...]:
                                     (_QUASI_CONTEXT, "QUASI_IDENTIFIER", "medium")):
         for match in pattern.finditer(normalized):
             add(match.start(), match.end(), kind, severity)
+    for match in _GB_IBAN.finditer(normalized):
+        add(match.start(), match.end(), "FINANCIAL_ACCOUNT", "critical")
+    for pattern in (_BANK_ACCOUNT, _BANK_ROUTING):
+        for match in pattern.finditer(normalized):
+            start, end = match.span("value")
+            add(start, end, "FINANCIAL_ACCOUNT", "critical")
     for match in _IP.finditer(normalized):
         if all(int(part) <= 255 for part in match.group().split(".")):
             add(match.start(), match.end(), "IP_ADDRESS", "medium")
+    ipv6_ranges: list[tuple[int, int]] = []
+    for match in _IPV6.finditer(normalized):
+        try:
+            ipaddress.IPv6Address(match.group())
+        except ipaddress.AddressValueError:
+            continue
+        ipv6_ranges.append(match.span())
+        add(match.start(), match.end(), "IP_ADDRESS", "medium")
+    for match in _MAC.finditer(normalized):
+        # A long IPv6 address can contain six two-digit colon groups. Do not
+        # relabel that substring as a MAC address solely because it overlaps.
+        if any(start <= match.start() and match.end() <= end and end - start > match.end() - match.start()
+               for start, end in ipv6_ranges):
+            continue
+        add(match.start(), match.end(), "DEVICE_ID", "high")
+    for pattern, kind, severity in ((_USER_HANDLE, "USER_ID", "high"),
+                                    (_IDENTITY_DOCUMENT, "GOVERNMENT_ID", "high"),
+                                    (_VEHICLE_VIN, "VEHICLE_ID", "high"),
+                                    (_BIRTH_CONTEXT, "DATE_OF_BIRTH", "high")):
+        for match in pattern.finditer(normalized):
+            start, end = match.span("value")
+            add(start, end, kind, severity)
     for match in _NUMBER.finditer(normalized):
         value = match.group()
         digits = sum(char.isdecimal() for char in value)

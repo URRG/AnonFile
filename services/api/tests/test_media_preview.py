@@ -495,6 +495,21 @@ def test_pdf_text_layer_check_requires_every_sensitive_occurrence():
     _verify_pdf_text_layer(native, one_phone * 2)
 
 
+@pytest.mark.parametrize("native", [
+    "Bank account 1234567890",
+    "IPv6 2001:db8::1",
+    "MAC 02:42:AC:11:00:02",
+    "Username @riya.dev",
+    "Passport number K1234567",
+    "VIN 1HGCM82633A004352",
+    "DOB: 1990-01-01",
+])
+def test_pdf_text_layer_new_identifiers_must_survive_ocr(native):
+    with pytest.raises(PayloadError, match="PDF text-layer and OCR disagree"):
+        _verify_pdf_text_layer(native, [{"text": "Unrelated page text"}])
+    _verify_pdf_text_layer(native, [{"text": native}])
+
+
 def test_pdf_text_layer_check_rejects_explicit_name_missing_from_ocr():
     native = "Name: Maya Patel\nTitle: Incident Lead\nCompany: Harborline Systems"
     with pytest.raises(PayloadError, match="PDF text-layer and OCR disagree"):

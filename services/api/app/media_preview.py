@@ -451,11 +451,13 @@ def _verify_pdf_text_layer(native_text: str, lines: list[dict[str, Any]]) -> Non
     ocr_values = [line["text"].casefold() for line in lines]
     required: Counter[tuple[str, str]] = Counter()
     for span in detect_text(native_text):
-        if span.entity_type not in {"EMAIL", "PAN", "PHONE", "IP_ADDRESS", "AADHAAR", "CARD"}:
+        if span.entity_type not in {"EMAIL", "PAN", "PHONE", "IP_ADDRESS", "AADHAAR", "CARD",
+                                    "FINANCIAL_ACCOUNT", "DEVICE_ID", "VEHICLE_ID", "USER_ID",
+                                    "GOVERNMENT_ID", "DATE_OF_BIRTH"}:
             continue
         source = native_text[span.start:span.end].casefold()
-        if span.entity_type in {"PHONE", "AADHAAR", "CARD"}:
-            source = "".join(char for char in source if char.isdigit())
+        if span.entity_type in {"PHONE", "AADHAAR", "CARD", "FINANCIAL_ACCOUNT", "DEVICE_ID", "VEHICLE_ID"}:
+            source = "".join(char for char in source if char.isalnum())
         required[(span.entity_type, source)] += 1
     # A native text layer can expose explicit relationship evidence that is not
     # matched by detect_text.  Require OCR to preserve those bounded person
@@ -476,7 +478,8 @@ def _verify_pdf_text_layer(native_text: str, lines: list[dict[str, Any]]) -> Non
         if kind == "ADDRESS":
             present = " ".join(" ".join(ocr_values).split()).count(source)
         else:
-            values = ("".join(char for char in line if char.isdigit()) for line in ocr_values) if kind in {"PHONE", "AADHAAR", "CARD"} else iter(ocr_values)
+            values = ("".join(char for char in line if char.isalnum()) for line in ocr_values) if kind in {
+                "PHONE", "AADHAAR", "CARD", "FINANCIAL_ACCOUNT", "DEVICE_ID", "VEHICLE_ID"} else iter(ocr_values)
             present = sum(line.count(source) for line in values)
         if present < count:
             raise PayloadError("PDF text-layer and OCR disagree on a sensitive value; inspect the source manually.")

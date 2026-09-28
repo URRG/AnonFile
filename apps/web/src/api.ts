@@ -199,7 +199,7 @@ const MANUAL_FINDING_KINDS = new Set(['OTHER_SENSITIVE', 'BUSINESS_CONFIDENTIAL'
 const REFERENCE_TYPES = new Set(['CREDENTIAL', 'EMAIL', 'PHONE', 'AADHAAR', 'PAN', 'CARD', 'IP', 'PERSON', 'ADDRESS',
   'DATE', 'LOCATION', 'ORGANIZATION', 'PASSPORT', 'GOVERNMENT_ID', 'HEALTH', 'PAYMENT', 'BUSINESS_SECRET', 'USER_ID',
   'OTHER_SENSITIVE', 'IP_ADDRESS', 'SENSITIVE_NUMBER', 'PAYMENT_SECRET', 'PERSON_NAME', 'DATE_OF_BIRTH',
-  'HEALTH_SENSITIVE', 'BUSINESS_CONFIDENTIAL', 'QUASI_IDENTIFIER'])
+  'HEALTH_SENSITIVE', 'BUSINESS_CONFIDENTIAL', 'QUASI_IDENTIFIER', 'FINANCIAL_ACCOUNT', 'DEVICE_ID', 'VEHICLE_ID'])
 const safeCount = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0
 const safeText = (value: unknown, max = 120_000): value is string => typeof value === 'string' && value.length <= max
 function pngHeaderMatches(value: string, width: number, height: number): boolean {

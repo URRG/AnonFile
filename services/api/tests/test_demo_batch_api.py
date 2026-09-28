@@ -707,6 +707,39 @@ def test_sensitive_structured_fields_are_transformed_and_reparse(demo_client, fi
     assert document["structure_check"] == "pass"
 
 
+def test_financial_account_is_not_mislabeled_as_card_or_phone(demo_client):
+    request = payload()
+    request["files"][1] = file("record", "finance.txt",
+                               "Pay to GB82 WEST 1234 5698 7654 32. Bank account 1234567890.")
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    document = response.json()["documents"][1]
+    assert [(item["kind"], item["source"]) for item in document["matches"]] == [
+        ("FINANCIAL_ACCOUNT", "GB82 WEST 1234 5698 7654 32"),
+        ("FINANCIAL_ACCOUNT", "1234567890"),
+    ]
+    assert "GB82" not in document["candidate_text"]
+    assert "1234567890" not in document["candidate_text"]
+    assert response.json()["verification"]["status"] == "REVIEW_REQUIRED"
+
+
+def test_new_identifier_types_are_visible_and_transformed_across_text_and_json(demo_client):
+    request = payload()
+    request["files"][0] = file("note", "note.txt",
+                               "Username @riya.dev; IPv6 2001:db8::1; passport number K1234567.")
+    request["files"][1] = file("record", "record.json",
+                               '[{"mac_address":"02:42:AC:11:00:02","vin":"1HGCM82633A004352"}]')
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    kinds = {match["kind"] for document in body["documents"] for match in document["matches"]}
+    assert {"USER_ID", "IP_ADDRESS", "GOVERNMENT_ID", "DEVICE_ID", "VEHICLE_ID"} <= kinds
+    for original in ("@riya.dev", "2001:db8::1", "K1234567", "02:42:AC:11:00:02", "1HGCM82633A004352"):
+        assert all(original not in document["candidate_text"] for document in body["documents"])
+    assert body["documents"][1]["structure_check"] == "pass"
+    assert body["verification"]["status"] == "REVIEW_REQUIRED"
+
+
 @pytest.mark.parametrize("change", [
     lambda item: item.pop("synthetic_only"),
     lambda item: item.update(synthetic_only=False),

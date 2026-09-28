@@ -43,6 +43,58 @@ def test_number_candidates_are_wholly_suppressed(text, kind, critical):
     assert len(detect_text(text)) == 1
 
 
+def test_contextual_accounts_override_phone_and_card_length_guesses():
+    text = "Pay to GB82 WEST 1234 5698 7654 32. Bank account 1234567890; routing 021000021."
+    spans = detect_text(text)
+    assert [(span.entity_type, text[span.start:span.end]) for span in spans] == [
+        ("FINANCIAL_ACCOUNT", "GB82 WEST 1234 5698 7654 32"),
+        ("FINANCIAL_ACCOUNT", "1234567890"),
+        ("FINANCIAL_ACCOUNT", "021000021"),
+    ]
+    candidate = process_payload(content=text).output
+    assert "GB82" not in candidate and "1234567890" not in candidate
+    assert candidate.count("[REDACTED_FINANCIAL_ACCOUNT]") == 3
+
+
+def test_bank_field_is_financial_not_phone_or_card():
+    result = process_payload(records=[{"bank_account": "1234567890", "routing_number": "021000021"}])
+    assert result.output == [{"bank_account": "[REDACTED_FINANCIAL_ACCOUNT]",
+                              "routing_number": "[REDACTED_FINANCIAL_ACCOUNT]"}]
+    assert {finding.entity_type for finding in result.findings} == {"FINANCIAL_ACCOUNT"}
+
+
+@pytest.mark.parametrize(("text", "value", "kind"), [
+    ("IPv6 2001:db8::1.", "2001:db8::1", "IP_ADDRESS"),
+    ("IPv6 2001:db8:aa:bb:cc:dd:ee:ff", "2001:db8:aa:bb:cc:dd:ee:ff", "IP_ADDRESS"),
+    ("MAC 02:42:AC:11:00:02", "02:42:AC:11:00:02", "DEVICE_ID"),
+    ("VIN 1HGCM82633A004352", "1HGCM82633A004352", "VEHICLE_ID"),
+    ("Username @riya.dev", "@riya.dev", "USER_ID"),
+    ("Passport number K1234567", "K1234567", "GOVERNMENT_ID"),
+    ("Driver's license number D87654321", "D87654321", "GOVERNMENT_ID"),
+    ("Born on 1990-01-01", "1990-01-01", "DATE_OF_BIRTH"),
+])
+def test_bounded_personal_identifier_detection(text, value, kind):
+    spans = detect_text(text)
+    assert [(text[span.start:span.end], span.entity_type) for span in spans] == [(value, kind)]
+    result = process_payload(content=text)
+    assert value not in result.output
+    assert len(result.findings) == 1
+
+
+def test_bounded_identifier_rules_do_not_promote_lookalike_prose():
+    text = "Visit https://example.invalid/a:bb:cc; meeting at 12:34:56; account balance is 12345."
+    assert detect_text(text) == ()
+
+
+def test_new_identifier_fields_are_redacted_with_explicit_taxonomy():
+    record = {"mac_address": "02:42:AC:11:00:02", "vehicle_identification_number": "1HGCM82633A004352",
+              "user_id": "riya.dev", "passport_number": "K1234567"}
+    result = process_payload(records=[record])
+    assert {finding.entity_type for finding in result.findings} == {
+        "DEVICE_ID", "VEHICLE_ID", "USER_ID", "GOVERNMENT_ID"}
+    assert all(value not in str(result.output) for value in record.values())
+
+
 def test_overlap_union_keeps_credential_severity_and_no_fragments():
     text = 'password="4111 1111 1111 1111" and user@example.invalid'
     spans = detect_text(text)
