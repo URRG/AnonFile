@@ -163,6 +163,12 @@ supplier data. `Blocked externally` is not the same as done.
     live group as unresolved or resolved, and rejects fabricated, stale, or
     cross-tenant group references. It cannot mutate source/evidence or grant
     release, delivery, export, or real-world identity authority.
+  - [x] A standalone PostgreSQL snapshot/event-journal adapter and migration
+    provide a bounded, source-free, row-locked CAS path for a future multi-host
+    reviewer service. Disposable PostgreSQL CI passed cross-instance replay,
+    simultaneous stale-revision racing, immutability and corruption tests on
+    PR #129. They are not mounted on an HTTP route; deployment permissions,
+    retention and external audit anchoring remain unproven.
   - [ ] External audit anchoring and multi-host persistence remain unavailable;
     therefore D06 stays open. Recorded decisions and conflict dispositions are
     development-only and do not authorize release, delivery, export, or
