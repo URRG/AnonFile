@@ -38,7 +38,7 @@ static source-contract checks, not rendered browser interaction tests. `npm run
 build` type-checks and bundles the UI.
 
 On 2026-09-27, an automated rendered walkthrough in the Codex in-app browser
-used the built-in three-file fictional batch. Enter activated the upload and
+used the then-bundled three-file fictional batch (removed in PR #128). Enter activated the upload and
 review actions, Space toggled the synthetic-data acknowledgement and mail-link
 filter, Right Arrow moved between result tabs and graph nodes, and the text
 evidence control opened the first document with its exact source span focused.
@@ -46,9 +46,11 @@ At 640, 427, and 320 CSS-pixel viewports, the document scroll width equalled
 its client width (625, 412, and 305 pixels respectively); result/document tabs
 and the narrow relationship table scrolled within their own containers. This
 walkthrough exposed a 21-pixel page-level header overflow at 320 pixels; the
-breadcrumb now shrinks before the fixed demo badge, and the measured page
-overflow is zero. Viewport emulation is not a 200–400% browser-zoom test, and
-browser accessibility-tree inspection is not a screen-reader walkthrough.
+breadcrumb shrink fix removed the measured overflow. The badge was later
+removed. This historical walkthrough predates the current upload-first screen;
+it does not replace another rendered result/graph walkthrough on the current
+build. Viewport emulation is not a 200–400% browser-zoom test, and browser
+accessibility-tree inspection is not a screen-reader walkthrough.
 
 ## Human walkthrough status: NOT PERFORMED
 
