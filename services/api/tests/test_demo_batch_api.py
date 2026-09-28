@@ -740,6 +740,24 @@ def test_new_identifier_types_are_visible_and_transformed_across_text_and_json(d
     assert body["verification"]["status"] == "REVIEW_REQUIRED"
 
 
+def test_extended_structured_identifier_fields_across_json_and_csv(demo_client):
+    request = payload()
+    request["files"][0] = file("record-json", "record.json",
+                               '[{"tax_identification_number":"TX-4821","imei":"DEVICE-4821",'
+                               '"patient_id":"PATIENT-4821"}]')
+    request["files"][1] = file("record-csv", "record.csv",
+                               "sort_code,license_plate,screen_name,reference\nSC-4821,PLATE-4821,user-4821,PUBLIC-9\n")
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    documents = response.json()["documents"]
+    assert {match["kind"] for doc in documents for match in doc["matches"]} >= {
+        "GOVERNMENT_ID", "DEVICE_ID", "HEALTH_SENSITIVE", "FINANCIAL_ACCOUNT", "VEHICLE_ID", "USER_ID"}
+    assert all(doc["structure_check"] == "pass" for doc in documents)
+    assert "PUBLIC-9" in documents[1]["candidate_text"]
+    for source in ("TX-4821", "DEVICE-4821", "PATIENT-4821", "SC-4821", "PLATE-4821", "user-4821"):
+        assert all(source not in doc["candidate_text"] for doc in documents)
+
+
 @pytest.mark.parametrize("change", [
     lambda item: item.pop("synthetic_only"),
     lambda item: item.update(synthetic_only=False),

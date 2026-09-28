@@ -17,12 +17,12 @@ shows why a universal regex list is not a defensible completeness strategy.
 | --- | --- | --- |
 | Person names, aliases, email addresses, phone numbers, postal addresses | Email and number rules; explicitly structured/header names; contextual US-style address; batch-local name and email surrogates | Arbitrary names in prose, international addresses and phones, transliteration, nicknames, person disambiguation |
 | Birth dates, ages, sex/gender, demographic attributes | Explicit `DOB`/`born on` dates and named date fields | Unlabelled dates, ages, demographic context and quasi-identifier combinations |
-| Government IDs | PAN shape; labeled passport/licence, SSN and government-ID fields; narrow SSN demo surrogate | Country/issuer-specific validation, voter/tax/health/social IDs, licences/plates, safe format-preserving surrogates |
-| Financial and payment | Payment-card/secret rules; UK-shaped IBAN and labeled bank/routing accounts; named fields | Non-UK IBANs, SWIFT/BIC, crypto wallets, account ownership, transactions and checksum/issuer validation. UK shape is a candidate, not proof of validity |
-| Online and device identifiers | IPv4/IPv6, MAC addresses, labeled usernames/handles, device-ID fields, internal URLs | Cookies, ad IDs, IMEI/IMSI, serials, RFID, public/profile URLs, access-log joins, persistent cross-file links |
-| Vehicle and property identifiers | Labeled VIN and named VIN field | Licence plates, registrations, parcel/property identifiers, country-specific formats |
+| Government IDs | PAN shape; labeled passport/licence, SSN and government-ID fields; explicit tax/voter/national-ID fields; narrow SSN demo surrogate | Country/issuer-specific validation, unlabelled tax/voter IDs, safe format-preserving surrogates |
+| Financial and payment | Payment-card/secret rules; UK-shaped IBAN and labeled bank/routing accounts; explicit sort-code/wallet fields | Non-UK IBANs, SWIFT/BIC, unlabelled crypto wallets, account ownership, transactions and checksum/issuer validation. UK shape is a candidate, not proof of validity |
+| Online and device identifiers | IPv4/IPv6, MAC addresses, labeled usernames/handles, explicit IMEI/IMSI/ad/cookie/RFID fields, internal URLs | Unlabelled device IDs, public/profile URLs, access-log joins, persistent cross-file links |
+| Vehicle and property identifiers | Labeled VIN and explicit plate fields | Unlabelled licence plates, registrations, parcel/property identifiers, country-specific formats |
 | Employment/education and business confidentiality | Labeled employee IDs and narrow contextual business secrets | Job/education histories, customer/contract IDs, proprietary plans, organization-specific dictionaries |
-| Health, genetics, biometrics, beliefs and other sensitive attributes | Narrow health-context phrases and explicit fields | Clinical narratives/codes, family history, biometrics, faces/voices, religion, political views, sexual orientation and contextual inferences |
+| Health, genetics, biometrics, beliefs and other sensitive attributes | Narrow health-context phrases and explicit patient/health-ID fields | Clinical narratives/codes, family history, biometrics, faces/voices, religion, political views, sexual orientation and contextual inferences |
 | Location, relationships and behavior | Bounded explicit person/role edges; narrow location/address signals | GPS trails, meeting patterns, relatives, social graph and unique combinations of seemingly harmless fields |
 | File and media side channels | Bounded TXT/CSV/JSON/JSONL/PDF/image preview, OCR and PDF visual corrections | EXIF/metadata, hidden layers, annotations, attachments, QR/barcodes, handwriting, arbitrary layouts, OCR omissions and unsupported media |
 
@@ -47,7 +47,14 @@ shows why a universal regex list is not a defensible completeness strategy.
    ingestion, export and sale require separate rights, security, privacy,
    residual-risk and utility gates, plus independent reviewer approval.
 
-The concrete additions in this revision are limited to UK-shaped IBANs,
+The first bounded rules increment is limited to UK-shaped IBANs,
 labeled bank/routing values, IPv6, MAC, labeled usernames, passport/licence
 numbers, VINs and labeled birth dates. Tests establish behavior on fictional
 examples, not field accuracy or global coverage.
+
+The next structured-field increment adds exact key matches for further
+government, finance, device, vehicle, online-account, contact and patient-ID
+families. It does **not** infer those categories from arbitrary field names,
+unlabelled prose or embedded media. Numeric/boolean sensitive JSON values and
+quoted multiline CSV cells remain unsupported in the batch preview rather
+than being silently emitted or given a misleading schema-preservation claim.

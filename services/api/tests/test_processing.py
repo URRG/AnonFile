@@ -95,6 +95,31 @@ def test_new_identifier_fields_are_redacted_with_explicit_taxonomy():
     assert all(value not in str(result.output) for value in record.values())
 
 
+@pytest.mark.parametrize(("field", "value", "kind"), [
+    ("tax_identification_number", "TX-4821", "GOVERNMENT_ID"),
+    ("national_insurance_number", "QQ-4821", "GOVERNMENT_ID"),
+    ("sort_code", "SC-4821", "FINANCIAL_ACCOUNT"),
+    ("crypto_wallet_address", "wallet-4821", "FINANCIAL_ACCOUNT"),
+    ("license_plate", "PLATE-4821", "VEHICLE_ID"),
+    ("imei", "DEVICE-4821", "DEVICE_ID"),
+    ("advertising_id", "AD-4821", "DEVICE_ID"),
+    ("screen_name", "user-4821", "USER_ID"),
+    ("patient_id", "PATIENT-4821", "HEALTH_SENSITIVE"),
+    ("fax_number", "FAX-4821", "PHONE"),
+])
+def test_explicit_structured_identifier_field_families(field, value, kind):
+    result = process_payload(records=[{field: value, "reference": "PUBLIC-9"}])
+    assert result.output == [{field: f"[REDACTED_{kind}]", "reference": "PUBLIC-9"}]
+    assert [finding.entity_type for finding in result.findings] == [kind]
+
+
+def test_ambiguous_generic_field_names_are_not_promoted_to_identifiers():
+    record = {"tin": "metal-4821", "registration_number": "PUBLIC-9", "reference": "PUBLIC-8"}
+    result = process_payload(records=[record])
+    assert result.output == [record]
+    assert not result.findings
+
+
 def test_overlap_union_keeps_credential_severity_and_no_fragments():
     text = 'password="4111 1111 1111 1111" and user@example.invalid'
     spans = detect_text(text)
