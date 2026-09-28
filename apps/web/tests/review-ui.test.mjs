@@ -13,6 +13,16 @@ const graphSource = readFileSync(new URL('../src/relationship-graph.tsx', import
 const graphCss = readFileSync(new URL('../src/relationship-graph.css', import.meta.url), 'utf8')
 const batchSource = readFileSync(new URL('../src/batch-demo.tsx', import.meta.url), 'utf8')
 const batchCss = readFileSync(new URL('../src/batch.css', import.meta.url), 'utf8')
+const advancedSource = readFileSync(new URL('../src/main.tsx', import.meta.url), 'utf8')
+
+test('demo opens with an empty upload-first workspace, without bundled sample controls or environment badges', () => {
+  assert.match(batchSource, /const \[files, setFiles\] = useState<BatchUpload\[]>\(\[\]\)/)
+  assert.match(batchSource, /Drop 2–3 documents here/)
+  assert.match(batchSource, /I confirm all files are fictional demo data/)
+  assert.doesNotMatch(batchSource, /SAMPLE_DOCUMENTS|SAMPLE_REFERENCE|loadSample|loadMediaSample|Use sample batch|Use PDF \+ image sample|demo-media\/|environment-badge/)
+  assert.doesNotMatch(advancedSource, /demo-badge|Priya Demo|Synthetic example only: contact/)
+  assert.match(advancedSource, /const \[demoContent, setDemoContent\] = useState\(''\)/)
+})
 
 test('graph node keyboard navigation wraps and supports Home and End', () => {
   assert.equal(moveReviewFocus(0, 3, 'ArrowRight'), 1)
@@ -152,7 +162,7 @@ test('review graph preserves visible focus, touch-sized controls, responsive lay
   }
 })
 
-test('narrow result header lets the breadcrumb shrink before the demo badge overflows', () => {
+test('narrow result header keeps its breadcrumb within the viewport', () => {
   assert.match(batchCss, /@media\(max-width:360px\)\{\.topbar\{[^}]*padding-inline:12px/)
   assert.match(batchCss, /\.breadcrumb\{[^}]*min-width:0;overflow:hidden;white-space:nowrap/)
   assert.match(batchCss, /\.breadcrumb strong\{[^}]*overflow:hidden;text-overflow:ellipsis/)

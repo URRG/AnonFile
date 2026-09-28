@@ -4,7 +4,7 @@ Run `npm ci --ignore-scripts`, `npm test`, `npm run build`, then `npm run dev` f
 
 Supply an explicitly configured processor token in the password field. Tokens stay in React memory only and are sent as bearer credentials to the configured API. The main route offers an opt-in, synthetic-only batch **text preview** for two or three files; the previous metadata-only developer controls remain at `?mode=advanced`. Use localhost exclusively. No customer data, offline processing fallback, clipboard export or successful-release state is supported. The text preview is not a safe output artifact or anonymity certification.
 
-The built-in sample includes fixed synthetic reference labels. For other synthetic batches, Detection review accepts a separate complete-label JSON manifest after an explicit reviewer attestation. The scorecard reports exact-span agreement for that labelled batch only; it is not an independent model benchmark. See [synthetic demo instructions](../../docs/synthetic-demo.md) for the manifest format.
+The upload screen starts empty and has no built-in sample loader. Detection review accepts a separate complete-label JSON manifest after an explicit reviewer attestation. The scorecard reports exact-span agreement for that labelled batch only; it is not an independent model benchmark. See [synthetic demo instructions](../../docs/synthetic-demo.md) for the manifest format.
 
 Detection review can also exclude a confirmed noncritical false-positive signal across the batch. That action is explicit and visible in the scorecard; the source values remain in the preview. Critical and unsupported categories are not suppressible, and exclusion does not authorize an export or release.
 
