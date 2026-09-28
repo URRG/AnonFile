@@ -20,6 +20,8 @@ test('demo opens with an empty upload-first workspace, without bundled sample co
   assert.match(batchSource, /Drop 2–3 documents here/)
   assert.match(batchSource, /I confirm all files are fictional demo data/)
   assert.doesNotMatch(batchSource, /SAMPLE_DOCUMENTS|SAMPLE_REFERENCE|loadSample|loadMediaSample|Use sample batch|Use PDF \+ image sample|demo-media\/|environment-badge/)
+  assert.doesNotMatch(batchSource, /built-in sample includes demo-authored labels/)
+  assert.match(batchSource, /this screen cannot verify that they were created independently/)
   assert.doesNotMatch(advancedSource, /demo-badge|Priya Demo|Synthetic example only: contact/)
   assert.match(advancedSource, /const \[demoContent, setDemoContent\] = useState\(''\)/)
 })
