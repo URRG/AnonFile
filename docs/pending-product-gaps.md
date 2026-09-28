@@ -261,6 +261,10 @@ supplier data. `Blocked externally` is not the same as done.
   identifier families and explicit misses. A bounded rules increment now
   handles UK-shaped IBANs, labelled bank/routing accounts, IPv6, MAC,
   labelled usernames/passport/licence numbers, VINs and labelled birth dates.
+  Exact structured-field coverage now includes additional tax/national/voter,
+  sort-code/wallet, IMEI/IMSI/ad/cookie/RFID, vehicle-plate, account-handle,
+  fax and patient-ID keys; arbitrary field names and unlabelled prose remain
+  unsupported.
   Synthetic tests do not complete R01 or measure its recall.
 - [ ] **R02 — Jurisdiction-specific surrogate registry.** Record issuer,
   validation basis, format-preserving status, collision risk and abstention for
