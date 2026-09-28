@@ -10,6 +10,11 @@ Reference taxonomies: [Google Sensitive Data Protection infoTypes](https://docs.
 [Microsoft Presidio supported entities](https://microsoft.github.io/presidio/supported_entities/),
 [Amazon Comprehend PII entity types](https://docs.aws.amazon.com/comprehend/latest/APIReference/API_PiiEntity.html),
 and [ICO guidance on identifiers and context](https://ico.org.uk/for-organisations/uk-gdpr-guidance-and-resources/personal-information-what-is-it/what-is-personal-data/what-are-identifiers-and-related-factors/).
+The [HHS de-identification guidance](https://www.hhs.gov/hipaa/for-professionals/special-topics/de-identification/index.html)
+adds dates, fax numbers, account/plan numbers, URLs, vehicle/device serials,
+biometrics, full-face images and other unique characteristics in its specific
+health-data context; [NIST SP 800-188](https://csrc.nist.gov/pubs/sp/800/188/final)
+emphasizes risk assessment and governance beyond direct-identifier removal.
 These are comparison inventories, not product validation. Their breadth also
 shows why a universal regex list is not a defensible completeness strategy.
 
