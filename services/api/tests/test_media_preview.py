@@ -497,6 +497,7 @@ def test_pdf_text_layer_check_requires_every_sensitive_occurrence():
 
 @pytest.mark.parametrize("native", [
     "Bank account 1234567890",
+    "IBAN DE89 3704 0044 0532 0130 00",
     "IPv6 2001:db8::1",
     "MAC 02:42:AC:11:00:02",
     "Username @riya.dev",

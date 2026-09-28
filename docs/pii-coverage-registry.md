@@ -23,7 +23,7 @@ shows why a universal regex list is not a defensible completeness strategy.
 | Person names, aliases, email addresses, phone numbers, postal addresses | Email and number rules; explicitly structured/header names; contextual US-style address; batch-local name and email surrogates | Arbitrary names in prose, international addresses and phones, transliteration, nicknames, person disambiguation |
 | Birth dates, ages, sex/gender, demographic attributes | Explicit `DOB`/`born on` dates and named date fields | Unlabelled dates, ages, demographic context and quasi-identifier combinations |
 | Government IDs | PAN shape; labeled passport/licence, SSN and government-ID fields; explicit tax/voter/national-ID fields; narrow SSN demo surrogate | Country/issuer-specific validation, unlabelled tax/voter IDs, safe format-preserving surrogates |
-| Financial and payment | Payment-card/secret rules; UK-shaped IBAN and labeled bank/routing accounts; explicit sort-code/wallet fields | Non-UK IBANs, SWIFT/BIC, unlabelled crypto wallets, account ownership, transactions and checksum/issuer validation. UK shape is a candidate, not proof of validity |
+| Financial and payment | Payment-card/secret rules; GB/DE-shaped IBANs and labeled bank/routing accounts; explicit sort-code/wallet fields | Other-country IBANs, SWIFT/BIC, unlabelled crypto wallets, account ownership, transactions and checksum/issuer validation. Shape is a sensitive candidate, not proof of validity |
 | Online and device identifiers | IPv4/IPv6, MAC addresses, labeled usernames/handles, explicit IMEI/IMSI/ad/cookie/RFID fields, internal URLs | Unlabelled device IDs, public/profile URLs, access-log joins, persistent cross-file links |
 | Vehicle and property identifiers | Labeled VIN and explicit plate fields | Unlabelled licence plates, registrations, parcel/property identifiers, country-specific formats |
 | Employment/education and business confidentiality | Labeled employee IDs and narrow contextual business secrets | Job/education histories, customer/contract IDs, proprietary plans, organization-specific dictionaries |
@@ -52,10 +52,13 @@ shows why a universal regex list is not a defensible completeness strategy.
    ingestion, export and sale require separate rights, security, privacy,
    residual-risk and utility gates, plus independent reviewer approval.
 
-The first bounded rules increment is limited to UK-shaped IBANs,
+The first bounded rules increment includes GB-shaped IBANs,
 labeled bank/routing values, IPv6, MAC, labeled usernames, passport/licence
 numbers, VINs and labeled birth dates. Tests establish behavior on fictional
 examples, not field accuracy or global coverage.
+The DE-shaped extension prevents the tested German example from being
+partially classified as a payment card. Other national formats still need a
+versioned adapter based on the [Swift IBAN registry](https://www.swift.com/standards/data-standards/iban-international-bank-account-number).
 
 The next structured-field increment adds exact key matches for further
 government, finance, device, vehicle, online-account, contact and patient-ID

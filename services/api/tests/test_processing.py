@@ -44,16 +44,18 @@ def test_number_candidates_are_wholly_suppressed(text, kind, critical):
 
 
 def test_contextual_accounts_override_phone_and_card_length_guesses():
-    text = "Pay to GB82 WEST 1234 5698 7654 32. Bank account 1234567890; routing 021000021."
+    text = ("Pay to GB82 WEST 1234 5698 7654 32 or DE89 3704 0044 0532 0130 00. "
+            "Bank account 1234567890; routing 021000021.")
     spans = detect_text(text)
     assert [(span.entity_type, text[span.start:span.end]) for span in spans] == [
         ("FINANCIAL_ACCOUNT", "GB82 WEST 1234 5698 7654 32"),
+        ("FINANCIAL_ACCOUNT", "DE89 3704 0044 0532 0130 00"),
         ("FINANCIAL_ACCOUNT", "1234567890"),
         ("FINANCIAL_ACCOUNT", "021000021"),
     ]
     candidate = process_payload(content=text).output
-    assert "GB82" not in candidate and "1234567890" not in candidate
-    assert candidate.count("[REDACTED_FINANCIAL_ACCOUNT]") == 3
+    assert "GB82" not in candidate and "DE89" not in candidate and "1234567890" not in candidate
+    assert candidate.count("[REDACTED_FINANCIAL_ACCOUNT]") == 4
 
 
 def test_bank_field_is_financial_not_phone_or_card():

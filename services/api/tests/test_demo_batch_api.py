@@ -710,15 +710,17 @@ def test_sensitive_structured_fields_are_transformed_and_reparse(demo_client, fi
 def test_financial_account_is_not_mislabeled_as_card_or_phone(demo_client):
     request = payload()
     request["files"][1] = file("record", "finance.txt",
-                               "Pay to GB82 WEST 1234 5698 7654 32. Bank account 1234567890.")
+                               "Pay to GB82 WEST 1234 5698 7654 32 or DE89 3704 0044 0532 0130 00. "
+                               "Bank account 1234567890.")
     response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
     assert response.status_code == 200, response.text
     document = response.json()["documents"][1]
     assert [(item["kind"], item["source"]) for item in document["matches"]] == [
         ("FINANCIAL_ACCOUNT", "GB82 WEST 1234 5698 7654 32"),
+        ("FINANCIAL_ACCOUNT", "DE89 3704 0044 0532 0130 00"),
         ("FINANCIAL_ACCOUNT", "1234567890"),
     ]
-    assert "GB82" not in document["candidate_text"]
+    assert "GB82" not in document["candidate_text"] and "DE89" not in document["candidate_text"]
     assert "1234567890" not in document["candidate_text"]
     assert response.json()["verification"]["status"] == "REVIEW_REQUIRED"
 
