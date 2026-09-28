@@ -259,7 +259,7 @@ supplier data. `Blocked externally` is not the same as done.
   do not claim completeness from synthetic examples.
   The [coverage registry](pii-coverage-registry.md) records researched
   identifier families and explicit misses. A bounded rules increment now
-  handles UK-shaped IBANs, labelled bank/routing accounts, IPv6, MAC,
+  handles GB/DE-shaped IBANs, labelled bank/routing accounts, IPv6, MAC,
   labelled usernames/passport/licence numbers, VINs and labelled birth dates.
   Exact structured-field coverage now includes additional tax/national/voter,
   sort-code/wallet, IMEI/IMSI/ad/cookie/RFID, vehicle-plate, account-handle,

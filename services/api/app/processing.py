@@ -65,6 +65,7 @@ _PAN = re.compile(r"(?<!\w)[A-Z]{5}[0-9]{4}[A-Z](?!\w)", re.IGNORECASE)
 # registry-backed adapters; a shape match is a sensitive candidate, not proof
 # that an account exists or that the check digits are valid.
 _GB_IBAN = re.compile(r"(?<!\w)GB[0-9]{2}[ ]?[A-Z]{4}(?:[ ]?[0-9]{4}){3}[ ]?[0-9]{2}(?!\w)", re.IGNORECASE)
+_DE_IBAN = re.compile(r"(?<!\w)DE[0-9]{2}(?:[ ]?[0-9]{4}){4}[ ]?[0-9]{2}(?!\w)", re.IGNORECASE)
 _BANK_ACCOUNT = re.compile(
     r"(?i)\b(?:bank|checking|savings)\s+account(?:\s+(?:number|no\.?))?\s*(?:[:=#-]\s*|\s+)(?P<value>[0-9]{8,17})(?!\w)"
 )
@@ -161,6 +162,7 @@ def _rules_method_identity_config(*, algorithm_revision: str, build_revision: st
         ("authorization", _AUTH_TOKEN.pattern, _AUTH_TOKEN.flags),
         ("email", _EMAIL.pattern, _EMAIL.flags), ("pan", _PAN.pattern, _PAN.flags),
         ("gb_iban", _GB_IBAN.pattern, _GB_IBAN.flags),
+        ("de_iban", _DE_IBAN.pattern, _DE_IBAN.flags),
         ("bank_account", _BANK_ACCOUNT.pattern, _BANK_ACCOUNT.flags),
         ("bank_routing", _BANK_ROUTING.pattern, _BANK_ROUTING.flags),
         ("ipv4", _IP.pattern, _IP.flags), ("number", _NUMBER.pattern, _NUMBER.flags),
@@ -247,8 +249,9 @@ def detect_text(text: str) -> tuple[Span, ...]:
                                     (_QUASI_CONTEXT, "QUASI_IDENTIFIER", "medium")):
         for match in pattern.finditer(normalized):
             add(match.start(), match.end(), kind, severity)
-    for match in _GB_IBAN.finditer(normalized):
-        add(match.start(), match.end(), "FINANCIAL_ACCOUNT", "critical")
+    for pattern in (_GB_IBAN, _DE_IBAN):
+        for match in pattern.finditer(normalized):
+            add(match.start(), match.end(), "FINANCIAL_ACCOUNT", "critical")
     for pattern in (_BANK_ACCOUNT, _BANK_ROUTING):
         for match in pattern.finditer(normalized):
             start, end = match.span("value")
