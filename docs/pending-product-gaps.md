@@ -85,6 +85,10 @@ supplier data. `Blocked externally` is not the same as done.
   - [ ] General multi-column/table/form reading-order mapping, real OCR blur and
     coverage qualification, and visual utility thresholds remain open. These
     synthetic controls do not prove completeness or production fidelity.
+  - [x] A private fictional holdout intake contract now pins source-byte
+    digests, requires explicit complete labels, bounds text spans and media
+    boxes, and emits source-safe aggregate counts only. This prepares an
+    annotator handoff; it does not score layout or validate OCR coverage.
   - [x] An opt-in, bounded Tesseract CLI final-artifact checker is isolated from
     RapidOCR. It receives exact returned candidate PNG bytes (or rerasterizes
     exact returned PDF bytes), has fixed source-free unavailable/timeout/failure
@@ -216,6 +220,10 @@ supplier data. `Blocked externally` is not the same as done.
   - [ ] Freeze an independently annotated holdout, validate untouched final
     pixels/text with a different executable checker, and measure reviewed
     graph links and identity adjudication. No production qualification exists.
+    The external fictional PDF/image/text files have been offered but were
+    not annotated as of this update; see
+    [the blind annotation protocol](holdout-annotation-protocol.md). The intake
+    validator does not establish annotation independence or model performance.
 - [ ] **D08 — Accessible, scalable review UI.** Test keyboard, screen-reader,
   zoom, responsive layout and a larger batch; keep a navigable table fallback
   when a graph is too dense. Exit: automated checks plus a human walkthrough.
@@ -233,6 +241,10 @@ supplier data. `Blocked externally` is not the same as done.
   - [ ] A human keyboard, screen-reader, 200–400% zoom and dense synthetic
     batch walkthrough is still required. The prescribed evidence is in the
     D08 review UI notes; no walkthrough is claimed yet.
+  - [x] Reference-label guidance no longer mentions a removed built-in sample
+    and explicitly says uploaded labels are not independently verified. An
+    automated rendered upload-screen inspection found no bundled sample
+    control or badge; this is not the missing assistive-technology walkthrough.
 
 ## Detection and transformation research
 
