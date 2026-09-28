@@ -35,6 +35,8 @@ list of remaining work and records completion evidence.
 The synthetic review UI's typed relationship model and strict evidence rules
 are documented in the [entity graph contract](docs/entity-relationship-graph.md);
 identifier replacement safety tiers are in the [format-aware pseudonym policy](docs/format-aware-pseudonyms.md).
+The [personal-information coverage registry](docs/pii-coverage-registry.md)
+distinguishes bounded demo rules from unimplemented vectors and qualification work.
 
 Without Docker, run the API and Vite as described in the development guide. The API does not automatically load `.env`; explicitly export its variables for non-Compose execution.
 

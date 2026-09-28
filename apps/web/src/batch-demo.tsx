@@ -33,7 +33,7 @@ const REGISTER_GROUPS: { id: RegisterGroup; label: string }[] = [
 function registerGroup(kind: string): Exclude<RegisterGroup, 'all'> {
   if (kind === 'PERSON_NAME') return 'people'
   if (kind === 'EMAIL' || kind === 'PHONE') return 'contacts'
-  if (['GOVERNMENT_ID', 'EMPLOYEE_ID', 'PAN', 'AADHAAR', 'CARD'].includes(kind)) return 'identifiers'
+  if (['GOVERNMENT_ID', 'EMPLOYEE_ID', 'PAN', 'AADHAAR', 'CARD', 'FINANCIAL_ACCOUNT', 'DEVICE_ID', 'VEHICLE_ID', 'USER_ID'].includes(kind)) return 'identifiers'
   return 'other'
 }
 const REGISTER_PAGE_SIZE = 8
