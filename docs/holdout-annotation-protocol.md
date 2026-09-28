@@ -55,6 +55,21 @@ out-of-bounds metadata. From `services/api`, run
 aggregate counts, a manifest digest and `NOT_QUALIFIED`; it does not decode
 media or score predictions. Keep this directory outside the repository.
 
+For an **unannotated** fictional corpus, first place 2–48 supported source
+files in `<absolute-corpus-directory>/files/`, with no nested directories. From
+`services/api`, run
+`python -m app.holdout_scaffold <absolute-corpus-directory>`. This creates `manifest.json` only if it does not
+already exist, hashes exact bytes, and groups files into 2–3-file batches. It
+sets every `labels_complete` to `false` and leaves all labels empty. Its output
+is aggregate-only and explicitly `NOT_QUALIFIED`. It will not parse media,
+identify PII, or prepare scores. Review the batch grouping before annotation:
+related documents that test cross-file identity should be moved into the same
+batch **in the private manifest**, without editing or renaming source files.
+Have the blind annotator populate source labels and set `labels_complete` to
+`true` only after a complete pass, including an explicit zero-label decision.
+Then run the intake validator above. Do not use model findings to fill gaps in
+the holdout's reference labels.
+
 Example *accepted intake manifest* (fictional values; replace the digest with
 the actual SHA-256 of the exact file bytes):
 

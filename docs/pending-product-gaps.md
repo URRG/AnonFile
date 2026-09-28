@@ -224,6 +224,10 @@ supplier data. `Blocked externally` is not the same as done.
     not annotated as of this update; see
     [the blind annotation protocol](holdout-annotation-protocol.md). The intake
     validator does not establish annotation independence or model performance.
+    A source-safe scaffold now creates an explicitly incomplete private
+    manifest from 2–48 fictional files without running the detector. It
+    prevents accidental treatment of empty labels as confirmed negatives;
+    the files still need blind human annotation and independent adjudication.
 - [ ] **D08 — Accessible, scalable review UI.** Test keyboard, screen-reader,
   zoom, responsive layout and a larger batch; keep a navigable table fallback
   when a graph is too dense. Exit: automated checks plus a human walkthrough.
