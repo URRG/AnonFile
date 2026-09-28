@@ -32,8 +32,8 @@ function StateBadge({ state }: Pick<ControlPlaneView, 'state'>) {
 
 function App() {
   const [token, setToken] = useState('')
-  const [content, setContent] = useState('Synthetic example only: contact alex@example.com about booking DEMO-123.')
-  const [recipient, setRecipient] = useState('synthetic-recipient')
+  const [content, setContent] = useState('')
+  const [recipient, setRecipient] = useState('')
   const [purpose, setPurpose] = useState('model-training')
   const [format, setFormat] = useState<SourceFormat>('text')
   const [busy, setBusy] = useState(false)
@@ -41,8 +41,8 @@ function App() {
   const [failure, setFailure] = useState<ControlPlaneFailure | null>(null)
   const activeRequest = useRef<AbortController | null>(null)
   const [demoToken, setDemoToken] = useState('')
-  const [demoContent, setDemoContent] = useState('[{"full_name":"Priya Demo","email":"priya.demo@example.test","phone":"+1 415 555 0134","passport_number":"DEMO123456","date_of_birth":"1990-01-01","booking_reference":"DEMO-BOOKING-001"}]')
-  const [demoFormat, setDemoFormat] = useState<SourceFormat>('json')
+  const [demoContent, setDemoContent] = useState('')
+  const [demoFormat, setDemoFormat] = useState<SourceFormat>('text')
   const [syntheticAcknowledged, setSyntheticAcknowledged] = useState(false)
   const [demoBusy, setDemoBusy] = useState(false)
   const [readingFile, setReadingFile] = useState(false)
@@ -151,7 +151,7 @@ function App() {
     </aside>
 
     <section className="demo-panel" aria-labelledby="demo-heading">
-      <div className="section-heading"><div><p className="eyebrow">Demo inspector</p><h2 id="demo-heading">Upload and inspect synthetic data</h2></div><span className="demo-badge">Synthetic demo only</span></div>
+      <div className="section-heading"><div><p className="eyebrow">Demo inspector</p><h2 id="demo-heading">Upload and inspect synthetic data</h2></div></div>
       <p className="lede compact">This isolated preview shows what the bounded <code>rules-v1</code> detector transforms. It is not a certification that all PII was found, and it never authorizes a release or export.</p>
       <form onSubmit={event => { event.preventDefault(); void inspectDemo() }}>
         <fieldset disabled={demoBusy}>
@@ -172,7 +172,7 @@ function App() {
           </label>
           <label>
             Synthetic demo content
-            <textarea value={demoContent} required rows={8} onChange={event => { invalidateDemoFileSelection(); clearDemoResult(); setDemoContent(event.target.value) }} />
+            <textarea value={demoContent} required rows={8} placeholder="Paste fictional text here, or choose a file above" onChange={event => { invalidateDemoFileSelection(); clearDemoResult(); setDemoContent(event.target.value) }} />
           </label>
           <label className="acknowledgment">
             <input type="checkbox" checked={syntheticAcknowledged} onChange={event => setSyntheticAcknowledged(event.target.checked)} />
@@ -234,7 +234,7 @@ function App() {
         </label>
         <label>
           Synthetic source content
-          <textarea value={content} required rows={10} onChange={event => { clearResult(); setContent(event.target.value) }} />
+          <textarea value={content} required rows={10} placeholder="Enter fictional source content for this development run" onChange={event => { clearResult(); setContent(event.target.value) }} />
         </label>
         <button type="submit">Run control-plane processing</button>
       </fieldset>

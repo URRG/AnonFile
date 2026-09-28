@@ -1,10 +1,9 @@
 # Rich relationship-demo fixtures
 
-The small media sample in `apps/web/public/demo-media` remains the lightweight
-default used by existing demo checks. The separately named `11`–`13` assets are
-a richer, three-file fictional batch for demonstrating the entity relationship
-map. They are public static assets only; do not place real customer, employee,
-or incident data in this directory.
+The UI no longer preloads any sample. The `11`–`13` assets are an optional,
+three-file fictional batch that developers may select manually to demonstrate
+the entity relationship map. They are public static assets only; do not place
+real customer, employee, or incident data in this directory.
 
 ## Rebuild
 

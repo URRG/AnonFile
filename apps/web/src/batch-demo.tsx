@@ -1,9 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { ArrowDown, ArrowLeft, ArrowRight, Check, ChevronRight, CircleAlert, Download, FileCode2, FileText,
   Files, Fingerprint, FlaskConical, ImageIcon, Link2, LockKeyhole, Plus, RefreshCw, Search, ShieldCheck,
-  Sparkles, UploadCloud, X, ZoomIn, ZoomOut } from 'lucide-react'
+  UploadCloud, X, ZoomIn, ZoomOut } from 'lucide-react'
 import { inspectSyntheticBatch, readBatchFile, readBatchReferenceManifest, type BatchDocument, type BatchInspection,
-  type BatchCoordinateCorrection, type BatchManualFinding, type BatchReferenceManifest, type BatchReferenceSpan, type BatchUpload,
+  type BatchCoordinateCorrection, type BatchManualFinding, type BatchReferenceManifest, type BatchUpload,
   type EntityGraphEvidence, BATCH_MAX_TOTAL_BYTES, DemoInspectionFailure } from './api'
 import { downloadDemoCandidate } from './demo-download'
 import { RelationshipGraph } from './relationship-graph'
@@ -23,37 +23,6 @@ type ResultTab = 'documents' | 'relationships' | 'verification'
 type ComparisonMode = 'split' | 'original' | 'candidate'
 type MediaZoom = 'fit' | 50 | 75 | 100 | 125 | 150 | 200
 const MEDIA_ZOOMS = [50, 75, 100, 125, 150, 200] as const
-
-const SAMPLE_DOCUMENTS = [
-  { name: '01-email-thread.txt', type: 'text/plain', text: 'From: Riya <riya@example.test>\nTo: Sita <sita@example.test>\nSubject: Flight change\n\nHi Sita, Riya can review the itinerary. Please call +1 415 555 0134.' },
-  { name: '02-passenger-list.csv', type: 'text/csv', text: 'full_name,email,passport_number,date_of_birth,booking_reference\nRiya,riya@example.test,DEMO123456,1990-01-01,DEMO-4821\nSita,sita@example.test,DEMO654321,1992-02-02,DEMO-4822\n' },
-  { name: '03-support-record.json', type: 'application/json', text: '{"client_name":"Sita","account_owner":"Riya","note":"Riya emailed Sita about DEMO-4822."}' },
-] as const
-const SAMPLES = SAMPLE_DOCUMENTS.map(item => new File([item.text], item.name, { type: item.type }))
-
-function sampleSpans(text: string, values: [string, string][]): BatchReferenceSpan[] {
-  const spans: BatchReferenceSpan[] = []
-  for (const [value, entity_type] of values) {
-    let from = 0
-    while (true) {
-      const start = text.indexOf(value, from)
-      if (start === -1) break
-      spans.push({ start, end: start + value.length, entity_type })
-      from = start + value.length
-    }
-  }
-  return spans.sort((a, b) => a.start - b.start)
-}
-const SAMPLE_REFERENCE: BatchReferenceManifest = { basis: 'CURATED_SYNTHETIC_SAMPLE', documents: [
-  { name: SAMPLE_DOCUMENTS[0].name, annotations: sampleSpans(SAMPLE_DOCUMENTS[0].text, [
-    ['Riya', 'PERSON_NAME'], ['Sita', 'PERSON_NAME'], ['riya@example.test', 'EMAIL'], ['sita@example.test', 'EMAIL'], ['+1 415 555 0134', 'PHONE']]) },
-  { name: SAMPLE_DOCUMENTS[1].name, annotations: sampleSpans(SAMPLE_DOCUMENTS[1].text, [
-    ['Riya', 'PERSON_NAME'], ['Sita', 'PERSON_NAME'], ['riya@example.test', 'EMAIL'], ['sita@example.test', 'EMAIL'],
-    ['DEMO123456', 'GOVERNMENT_ID'], ['DEMO654321', 'GOVERNMENT_ID'], ['1990-01-01', 'DATE_OF_BIRTH'],
-    ['1992-02-02', 'DATE_OF_BIRTH'], ['DEMO-4821', 'OTHER_SENSITIVE'], ['DEMO-4822', 'OTHER_SENSITIVE']]) },
-  { name: SAMPLE_DOCUMENTS[2].name, annotations: sampleSpans(SAMPLE_DOCUMENTS[2].text, [
-    ['Riya', 'PERSON_NAME'], ['Sita', 'PERSON_NAME'], ['DEMO-4822', 'OTHER_SENSITIVE']]) },
-] }
 
 function shortType(kind: string) { return kind === 'PERSON_NAME' ? 'Person' : kind.replaceAll('_', ' ').toLowerCase().replace(/^./, c => c.toUpperCase()) }
 type RegisterGroup = 'all' | 'people' | 'contacts' | 'identifiers' | 'other'
@@ -164,7 +133,6 @@ export default function BatchDemo() {
   const [inspectionEpoch, setInspectionEpoch] = useState(0)
   const [referenceManifest, setReferenceManifest] = useState<BatchReferenceManifest | null>(null)
   const [referenceAttested, setReferenceAttested] = useState(false)
-  const [sampleMode, setSampleMode] = useState<'text' | 'media' | null>(null)
   const [manualNames, setManualNames] = useState<string[]>([])
   const [manualInput, setManualInput] = useState('')
   const [manualFindings, setManualFindings] = useState<BatchManualFinding[]>([])
@@ -209,25 +177,24 @@ export default function BatchDemo() {
     return () => cancelAnimationFrame(frame)
   }, [resultTab, selectedDoc, provenanceTarget])
 
-  function resetReview() { setInspection(null); setReferenceManifest(null); setReferenceAttested(false); setSampleMode(null); setManualNames([]); setManualFindings([]); setCoordinateCorrections([]); setAppliedCoordinates([]); setCoordinateRescanRequired(false); setCoordinateRescanTarget(null); setAliasOverrides({}); setExcludedIds([]); setExclusionAcknowledged(false); setStep('upload'); setError('') }
+  function resetReview() { setInspection(null); setReferenceManifest(null); setReferenceAttested(false); setManualNames([]); setManualFindings([]); setCoordinateCorrections([]); setAppliedCoordinates([]); setCoordinateRescanRequired(false); setCoordinateRescanTarget(null); setAliasOverrides({}); setExcludedIds([]); setExclusionAcknowledged(false); setStep('upload'); setError('') }
 
-  async function addFiles(selected: File[], replace = false) {
+  async function addFiles(selected: File[]) {
     if (!selected.length) return false
     const epoch = ++intakeEpoch.current
     setReading(true)
     setError('')
     try {
-      const existing = replace ? [] : files
+      const existing = files
       if (selected.length > 3 || existing.length + selected.length > 3) throw new DemoInspectionFailure('A demo batch holds two or three files. Remove a file before adding more.')
       const added = await Promise.all(selected.map(file => readBatchFile(file, `file_${++sequence.current}`)))
       if (epoch !== intakeEpoch.current) return false
       if (new Set([...existing, ...added].map(item => item.name.toLowerCase())).size !== existing.length + added.length) throw new DemoInspectionFailure('Each file in the batch needs a distinct filename.')
       if ([...existing, ...added].reduce((sum, item) => sum + item.size, 0) > BATCH_MAX_TOTAL_BYTES) throw new DemoInspectionFailure('The entire synthetic batch must be 1.5 MB or less.')
-      setFiles(current => [...(replace ? [] : current), ...added])
+      setFiles(current => [...current, ...added])
       setInspection(null)
       setReferenceManifest(null)
       setReferenceAttested(false)
-      setSampleMode(null)
       setManualNames([])
       setManualFindings([])
       setCoordinateCorrections([])
@@ -239,34 +206,6 @@ export default function BatchDemo() {
       setExclusionAcknowledged(false)
       return true
     } catch (cause) { if (epoch === intakeEpoch.current) setError(cause instanceof Error ? cause.message : 'Could not read the selected files.'); return false }
-    finally { if (epoch === intakeEpoch.current) setReading(false) }
-  }
-
-  async function loadSample() {
-    ++intakeEpoch.current
-    setFiles([])
-    resetReview()
-    if (await addFiles(SAMPLES, true)) { setReferenceManifest(SAMPLE_REFERENCE); setSampleMode('text') }
-  }
-
-  async function loadMediaSample() {
-    const epoch = ++intakeEpoch.current
-    setReading(true)
-    setError('')
-    try {
-      const specs = [
-        { name: '01-email-thread.pdf', type: 'application/pdf' },
-        { name: '02-service-note.png', type: 'image/png' },
-      ]
-      const media = await Promise.all(specs.map(async spec => {
-        const response = await fetch(`${import.meta.env.BASE_URL}demo-media/${spec.name}`, { cache: 'no-store' })
-        if (!response.ok) throw new Error('The fictional media sample could not be loaded.')
-        return new File([await response.arrayBuffer()], spec.name, { type: spec.type })
-      }))
-      if (epoch !== intakeEpoch.current) return
-      if (await addFiles([...media, new File([SAMPLE_DOCUMENTS[2].text], SAMPLE_DOCUMENTS[2].name,
-        { type: SAMPLE_DOCUMENTS[2].type })], true)) setSampleMode('media')
-    } catch { if (epoch === intakeEpoch.current) setError('The fictional media sample could not be loaded. Try again or choose your own synthetic files.') }
     finally { if (epoch === intakeEpoch.current) setReading(false) }
   }
 
@@ -455,21 +394,20 @@ export default function BatchDemo() {
       </nav>
       <div className="sidebar-divider" />
       <div className="sidebar-section-label">CURRENT SESSION</div>
-      <div className="session-card"><Files size={19} /><div><strong>{files.length ? `${files.length} files staged` : 'No batch yet'}</strong><span>Ephemeral synthetic preview</span></div></div>
-      <div className="sidebar-bottom"><div className="sidebar-note"><LockKeyhole size={17} /><span>Only unverified synthetic review copies can be downloaded. No buyer release is available.</span></div><a href="?mode=advanced">Developer controls <ArrowRight size={14} /></a></div>
+      <div className="session-card"><Files size={19} /><div><strong>{files.length ? `${files.length} files staged` : 'No files staged'}</strong><span>{files.length ? 'Ready for batch review' : 'Upload 2–3 files to begin'}</span></div></div>
+      <div className="sidebar-bottom"><div className="sidebar-note"><LockKeyhole size={17} /><span>Review copies are unverified. No buyer release is available.</span></div></div>
     </aside>
 
     <main className="batch-main">
-      <header className="topbar"><div className="breadcrumb">Workbench <ChevronRight size={14} /> <strong>{step === 'upload' ? 'Upload batch' : step === 'detect' ? 'Detection review' : 'Results & verification'}</strong></div><span className="environment-badge"><span /> SYNTHETIC DEMO</span></header>
+      <header className="topbar"><div className="breadcrumb">Workbench <ChevronRight size={14} /> <strong>{step === 'upload' ? 'Upload batch' : step === 'detect' ? 'Detection review' : 'Results & verification'}</strong></div></header>
       <div className={`batch-content ${step === 'results' ? 'batch-content-results' : ''}`}>
         {step === 'upload' && <>
-          <div className="page-heading"><div><p className="overline">01 / INTAKE</p><h1>Start with your dataset.</h1><p>Bring two or three synthetic documents together. We’ll trace sensitive mentions across files, then give you a reviewable candidate—not an anonymity claim.</p></div><div className="heading-icon"><UploadCloud size={29} /></div></div>
+          <div className="page-heading"><div><p className="overline">01 / INTAKE</p><h1>Upload a document batch</h1><p>Add two or three fictional files. We’ll find sensitive mentions across the batch and prepare a candidate for your review.</p></div><div className="heading-icon"><UploadCloud size={29} /></div></div>
           <div className="flow-strip"><div className="current"><span>1</span><strong>Upload</strong><small>Choose a batch</small></div><div className="flow-line" /><div><span>2</span><strong>Detect</strong><small>Review matches</small></div><div className="flow-line" /><div><span>3</span><strong>Verify</strong><small>Compare & assess</small></div></div>
           <section className="batch-card intake-card" aria-labelledby="intake-heading"><div className="card-header"><div><p className="overline">BATCH INPUT</p><h2 id="intake-heading">Your documents <span className="count-pill">{files.length}/3</span></h2></div><span className="quiet-tag">Up to 1.5 MB total</span></div>
             <div className={`drop-zone ${dragging ? 'dragging' : ''}`} onDragEnter={event => { event.preventDefault(); setDragging(true) }} onDragOver={event => event.preventDefault()} onDragLeave={event => { event.preventDefault(); setDragging(false) }} onDrop={event => { event.preventDefault(); setDragging(false); void addFiles(Array.from(event.dataTransfer.files)) }}>
-              <div className="drop-icon"><UploadCloud size={25} /></div><strong>Drop your synthetic files here</strong><span>or select documents from your computer</span><label className="file-button">Browse files<input type="file" multiple accept=".txt,.csv,.json,.jsonl,.pdf,.png,.jpg,.jpeg" onChange={event => { void addFiles(Array.from(event.target.files || [])); event.target.value = '' }} /></label><small>Text up to 100 KB · PDF/image up to 500 KB · two PDF pages · 3 million media pixels per batch</small>
+              <div className="drop-icon"><UploadCloud size={25} /></div><strong>Drop 2–3 documents here</strong><span>TXT, CSV, JSON, JSONL, PDF, PNG or JPEG</span><label className="file-button">Choose files<input type="file" aria-label="Choose fictional documents" multiple accept=".txt,.csv,.json,.jsonl,.pdf,.png,.jpg,.jpeg" onChange={event => { void addFiles(Array.from(event.target.files || [])); event.target.value = '' }} /></label><small>Fictional data only · Text up to 100 KB · PDF/image up to 500 KB · 1.5 MB per batch</small>
             </div>
-            <div className="sample-bar"><div><Sparkles size={18} /><span>Explore a fictional three-file case, or try PDF and image redaction.</span></div><div className="sample-actions"><button type="button" className="text-button" onClick={() => void loadSample()} disabled={busy || reading}>Use sample batch <ArrowRight size={16} /></button><button type="button" className="text-button" onClick={() => void loadMediaSample()} disabled={busy || reading}>Use PDF + image sample <ArrowRight size={16} /></button></div></div>
             {files.length > 0 && <div className="staged-files" aria-label="Staged documents">{files.map((file, index) => <div className="staged-file" key={file.id}><span className="file-type-icon">{fileIcon(file.name)}</span><div><strong>{file.name}</strong><span>{Math.max(1, Math.ceil(file.size / 1024))} KB · Document {index + 1}</span></div><span className="ready-pill"><Check size={13} /> Ready</span><button type="button" className="icon-button" aria-label={`Remove ${file.name}`} onClick={() => { ++intakeEpoch.current; setFiles(current => current.filter(item => item.id !== file.id)); resetReview() }}><X size={17} /></button></div>)}</div>}
           </section>
           <section className="batch-card access-card" aria-labelledby="access-heading"><div><p className="overline">DEMO ACCESS</p><h2 id="access-heading">Before you continue</h2><p>This local development service receives submitted content in memory for inspection. It cannot verify that a file is synthetic.</p></div><div className="access-form"><label htmlFor="processor-token">Processor access token</label><input id="processor-token" type="password" autoComplete="off" spellCheck={false} value={token} onChange={event => setToken(event.target.value)} placeholder="Paste the token from the demo launcher" /><label className="check-label"><input type="checkbox" checked={acknowledged} onChange={event => setAcknowledged(event.target.checked)} /><span>I confirm all files are fictional demo data. I understand the detector may miss sensitive content.</span></label></div></section>
@@ -478,7 +416,6 @@ export default function BatchDemo() {
 
         {step === 'detect' && inspection && <>
           <div className="page-heading"><div><p className="overline">02 / DETECTION REVIEW</p><h1>Know what was found.</h1><p>Inspect the rule matches and consistent aliases across the batch. Add a missed name before opening the candidate comparison.</p></div><div className="heading-icon"><Search size={29} /></div></div>
-          {sampleMode === 'media' && <div className="media-guidance"><CircleAlert size={18} /><span>Guided media case: the fictional booking code <code>DEMO-4822</code> is deliberately left for review. Add it as <strong>Other sensitive</strong>, rescan, then compare both raster pages. No independent media accuracy score is available.</span></div>}
           <div className="metrics-grid"><div className="metric-card"><span>Documents inspected</span><strong>{inspection.summary.files}</strong><small>One connected batch</small></div><div className="metric-card"><span>Selected mentions</span><strong>{inspection.summary.detectedMentions}</strong><small>Rules + reviewer corrections</small></div><div className="metric-card"><span>Unique signals</span><strong>{visibleEntities.length}</strong><small>Across all documents</small></div><div className="metric-card"><span>Evidenced graph links</span><strong>{inspection.entityGraph.edges.length}</strong><small>Typed roles & mail headers</small></div></div>
           <div className="review-grid"><section className="batch-card entity-review">
             <div className="card-header"><div><p className="overline">ENTITY REGISTER</p><h2>Detected identities & signals</h2></div><span className="quiet-tag">{visibleEntities.length} entities</span></div>

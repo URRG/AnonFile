@@ -15,11 +15,13 @@ npm ci --prefix apps\web --ignore-scripts
 ```
 
 The launcher generates a fresh in-memory processor token, starts the API and
-UI on loopback, and prints the URL and token. Paste the token into the UI,
-choose **Use sample batch**, acknowledge that the data is fictional, and click
-**Analyze batch**. The sample has a fictional email thread, a CSV passenger
-list with names, email addresses, fictional passport numbers and birth dates,
-and a JSON support record. The next screen groups detected values by people,
+UI on loopback, and prints the URL and token. The upload screen starts empty.
+Choose two or three fictional files with **Choose files** (or drop them into
+the upload area), paste the token, acknowledge that the data is fictional, and
+click **Analyze batch**. For a repeatable local test, you may select the three
+repo-owned files described in the [rich relationship batch](rich-relationship-demo-fixtures.md)
+from `apps/web/public/demo-media`; they are no longer loaded by a UI button.
+The next screen groups detected values by people,
 contacts, identifiers and other signals; search and eight-row pagination keep
 larger batches reviewable without hiding the totals. It lists proposed
 replacements. You can add a missed exact person name, add a bounded
@@ -56,25 +58,15 @@ The demo download is blocked for reviewer-excluded or still-detected source
 values, structured-output failure, or a same-engine visual residual finding.
 Credentials, payment secrets, government IDs, birth dates, and other
 unsupported categories cannot be excluded through this demo control.
-The built-in batch also carries a fixed set of demo-authored reference spans.
-Its scorecard shows exact matched, false-positive, and missed spans for this
-fictional example. It separates the automatic baseline from the reviewed
-candidate score, breaks results down by file, and lets you promote a missed
-supported span into an exact manual correction. Try `DEMO-4821` and
-`DEMO-4822`: the reviewed sample recall rises, while the automatic baseline
-remains unchanged. These corrections do not teach the detector to recognize
-unseen values. The backend accepts that label basis only for the exact
-built-in files and labels; changing the sample invalidates it.
-
-To demonstrate actual raster rewriting, choose **Use PDF + image sample** on
-the upload screen instead. This loads a fictional email PDF, an image service
-note, and a JSON record. Analyze the batch, inspect the two explicit
-relationships, and open both media documents in the side-by-side comparison.
-The image intentionally retains fictional booking code `DEMO-4822` until you
-add it as **Other sensitive** in Detection review and rescan. This is a visible
-example of the detector's limitations, not a claim that all PII is found.
-The media scorecard remains **not measured** because OCR transcript matches
-are not an independently annotated pixel-level holdout.
+No reference labels are attached automatically. To measure exact-span
+agreement on a chosen batch, upload a complete annotation manifest in
+Detection review and explicitly attest to its completeness. The scorecard
+then separates the automatic baseline from the reviewed candidate, breaks
+counts down by file, and lets you promote a missed supported span into an
+exact manual correction. These corrections do not teach the detector to
+recognize unseen values. Without complete labels, precision and recall remain
+unmeasured; media OCR transcript matches are not an independently annotated
+pixel-level holdout.
 
 You may instead select two or three synthetic TXT, CSV, JSON, JSONL, PDF,
 PNG, or JPEG files (100 KB per text file, 500 KB per PDF/image, 1.5 MB combined). The demo rasterizes up to
