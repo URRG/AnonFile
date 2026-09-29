@@ -84,6 +84,9 @@ memory. Its bytes and digest are returned for a local, digest-checked demo
 download. Original PDF objects and metadata are not copied into that
 candidate. Image input downloads as candidate PNG; text formats download as
 candidate text files. Unreadable, oversized, or ambiguous media are rejected.
+Media pages with a positively detected QR region are refused before OCR; the
+demo does not decode QR payloads. A clean QR detector result does not establish
+that the page has no QR code or other barcode.
 
 On a PDF/image result, a reviewer can draw or enter a bounded top-left pixel
 rectangle over a sensitive region that was **not** captured in the OCR

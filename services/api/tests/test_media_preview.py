@@ -3,6 +3,8 @@ import base64
 import hashlib
 from io import BytesIO
 
+import cv2
+import numpy as np
 from PIL import Image, PngImagePlugin
 from PIL import ImageDraw, ImageFilter, ImageFont
 from pypdf import PdfReader, PdfWriter
@@ -10,8 +12,43 @@ from pypdf.generic import ArrayObject, NameObject
 import pytest
 
 from app.contracts import PayloadError
-from app.media_preview import (_assert_png_pixel_chunks, _image_pages, _image_pdf, _ocr_lines,
-                               _pdf_pages, _png_bytes, _verify_pdf_text_layer, render_candidate)
+from app.media_preview import (_assert_no_detected_qr, _assert_png_pixel_chunks, _image_pages, _image_pdf,
+                               _ocr_lines, _pdf_pages, _png_bytes, _verify_pdf_text_layer, extract_media,
+                               render_candidate)
+
+
+def _synthetic_qr_page() -> Image.Image:
+    modules = cv2.QRCodeEncoder_create().encode("fictional-identifier")
+    scaled = cv2.resize(modules, (modules.shape[1] * 8, modules.shape[0] * 8),
+                        interpolation=cv2.INTER_NEAREST)
+    pixels = np.full((scaled.shape[0] + 80, scaled.shape[1] + 80), 255, np.uint8)
+    pixels[40:40 + scaled.shape[0], 40:40 + scaled.shape[1]] = scaled
+    return Image.fromarray(pixels).convert("RGB")
+
+
+def test_detected_qr_abstains_on_image_and_pdf_without_decoding_payload(monkeypatch):
+    image = _synthetic_qr_page()
+    source = BytesIO()
+    image.save(source, format="PNG")
+
+    def ocr_must_not_run(*_args, **_kwargs):
+        raise AssertionError("OCR must not run after a detected QR region")
+
+    monkeypatch.setattr("app.media_preview._ocr_lines", ocr_must_not_run)
+    for raw, extension in ((source.getvalue(), ".png"), (_image_pdf([image]), ".pdf")):
+        with pytest.raises(PayloadError, match="QR code was detected") as error:
+            extract_media(raw, extension)
+        assert "fictional-identifier" not in str(error.value)
+
+
+def test_qr_detector_failure_abstains_without_source_detail(monkeypatch):
+    def unavailable():
+        raise RuntimeError("fictional-private-detector-detail")
+
+    monkeypatch.setattr(cv2, "QRCodeDetector", unavailable)
+    with pytest.raises(PayloadError, match="QR inspection is unavailable") as error:
+        _assert_no_detected_qr(Image.new("RGB", (64, 64), "white"))
+    assert "fictional-private-detector-detail" not in str(error.value)
 
 
 def test_exif_orientation_is_applied_before_source_metadata_is_discarded():

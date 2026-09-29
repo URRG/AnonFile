@@ -434,6 +434,30 @@ def _pdf_pages_locked(raw: bytes) -> tuple[list[Any], list[str]]:
         raise PayloadError("The PDF is unsupported for bounded raster review (two pages maximum).") from None
 
 
+def _assert_no_detected_qr(image: Any) -> None:
+    """Abstain on a detected QR region without decoding or returning its data.
+
+    Detection is a partial guard: a miss does not certify the image QR-free,
+    and this does not inspect other barcode symbologies.
+    """
+    try:
+        import cv2
+        import numpy as np
+
+        grayscale = np.asarray(image.convert("L"))
+        detector = cv2.QRCodeDetector()
+        # The single-region detector falsely flags ordinary rasterized text in
+        # our synthetic PDF regression. The multi-region path avoids that
+        # specific false positive, but is still only a partial QR signal.
+        multi_found, _ = detector.detectMulti(grayscale)
+        if multi_found:
+            raise PayloadError("A QR code was detected; bounded media review must abstain.")
+    except PayloadError:
+        raise
+    except Exception:
+        raise PayloadError("QR inspection is unavailable for bounded media review.") from None
+
+
 def extract_media(raw: bytes, extension: str) -> tuple[str, list[dict[str, Any]]]:
     """Return OCR text and private page objects; no output is authorized."""
     if extension in {".png", ".jpg", ".jpeg"}:
@@ -447,6 +471,7 @@ def extract_media(raw: bytes, extension: str) -> tuple[str, list[dict[str, Any]]
     text_parts = []
     offset = 0
     for number, (image, native_text) in enumerate(zip(images, native_texts), 1):
+        _assert_no_detected_qr(image)
         lines = _ocr_lines(image)
         if not lines:
             raise PayloadError("No readable OCR text was found in a media page.")

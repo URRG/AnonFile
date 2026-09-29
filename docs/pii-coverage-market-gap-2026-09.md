@@ -25,7 +25,7 @@ inventory, not a claim to have exhaustively enumerated those catalogs.
 | Device, account and online identity | IP/MAC, handles, structured IMEI/device/cookie/advertising IDs, labelled employee/staff IDs and a bounded set of explicit HTTP(S) query keys (session, patient, customer and similar IDs). Public URL hosts/paths remain untouched | AWS/Azure list URL, username, VIN/MAC. Continue source-safe handling of personal data in URL paths, arbitrary/relative URLs, mobile ad IDs and organization-specific identifiers. Public URLs alone are not always PII. |
 | Travel/customer references | Demo-specific booking references and passenger context; generic core lacks a dedicated travel-record class | Vendor custom recognizer mechanisms can cover domain-specific IDs. Define a separate travel/customer-record taxonomy and supplier-specific dictionaries before deploying beyond the airline demo. |
 | Credentials and cloud tokens | Generic labelled passwords/keys and authorization tokens, plus unlabelled AKIA/ASIA-shaped AWS access-key IDs; many provider-specific tokens and connection strings are not recognized | AWS lists access keys and Azure lists cloud secrets. Add provider-specific secret recognizers with strict tests; treat as security-sensitive even when not personal. |
-| PDF/image/Office/audio and non-text identifiers | Bounded PDF/image OCR and review/redaction preview. The PDF demo rejects selected hidden/interactive containers and cross-checks rules-detected native text. Input image pixels are EXIF-oriented, alpha-flattened and rebuilt without source metadata; encoded PNG chunks are checked. No DOCX/XLSX, audio, face/signature/biometric, QR/barcode or metadata-wide guarantee | Presidio has image/structured examples and Azure document PII supports PDF/DOCX/TXT. These need separate parsers, media provenance, final-byte inspection and abstention; text rules alone cannot close them. |
+| PDF/image/Office/audio and non-text identifiers | Bounded PDF/image OCR and review/redaction preview. The PDF demo rejects selected hidden/interactive containers and cross-checks rules-detected native text. Input image pixels are EXIF-oriented, alpha-flattened and rebuilt without source metadata; encoded PNG chunks are checked. A positively detected QR region causes media abstention, but there is no QR/barcode absence guarantee. No DOCX/XLSX, audio, face/signature/biometric or metadata-wide guarantee | Presidio has image/structured examples and Azure document PII supports PDF/DOCX/TXT. These need separate parsers, media provenance, final-byte inspection and abstention; text rules alone cannot close them. |
 | Quasi-identifiers and linkage | Labelled/field-bound age, birth year, postal code, demographics; no robust k-anonymity/linkage-risk qualification | Vendors expose age/date/location classes. Product requirement goes further: evaluate combinations and buyer auxiliary data, with holdout evidence and human release review. |
 
 ## First implementation tranche
@@ -164,6 +164,20 @@ the qualification gate.
   keys and sensitive containers. Tests reparse the exact candidate. This is
   still a synthetic, review-only candidate and does not establish semantic
   recognition of arbitrary keys, utility, or release safety.
+
+## Ninth implementation tranche: positively detected QR regions
+
+- Before OCR, the bounded PDF/image demo now applies OpenCV's QR multi-region
+  detector to each raster page and refuses the entire media file when it finds
+  a region. It never decodes or returns the QR payload. Detector unavailability
+  also causes abstention. Synthetic QR-in-PNG/PDF and ordinary text-PDF tests
+  guard both the positive and false-positive paths. The single-region detector
+  falsely flagged a plain text PDF in our test, so this bounded gate uses the
+  multi-region path only.
+- [OpenCV's QR detector documentation](https://docs.opencv.org/5.0/main_modules/classcv_1_1QRCodeDetector.html)
+  describes detection separately from decoding. This is **not** a QR-free
+  certification: small, damaged, warped, low-contrast or otherwise missed QR
+  codes, and all other barcode symbologies, can still evade this one detector.
 - [Azure's PII categories](https://learn.microsoft.com/en-us/azure/ai-services/language-service/personally-identifiable-information/concepts/entity-categories)
   describe geolocation as personal when it can pinpoint or track a person;
   [Google's detector guidance](https://docs.cloud.google.com/sensitive-data-protection/docs/concepts-infotypes)
@@ -182,7 +196,7 @@ the qualification gate.
 2. **P0 — Hidden-media surfaces.** Bounded PDF catalog/page abstentions and a
    broader native-text/OCR cross-check are done. PNG output-metadata and alpha
    handling are now bounded and checked. Continue PDF object-graph and source
-   EXIF inventory, QR/barcode detection, and unsupported Office/audio status
+   EXIF inventory, broader QR/barcode qualification, and unsupported Office/audio status
    before any downloadable candidate is called clean.
 3. **P1 — Versioned regional recognizers.** Canadian SIN and UK NHS now have
    bounded labelled/check-digit candidates. Continue one jurisdiction at a
