@@ -194,8 +194,9 @@ the qualification gate.
   canonical UUID shape now creates a `DEVICE_ID` candidate in text. Structured
   keys for those aliases also map to `DEVICE_ID`. The all-zero unavailable or
   opt-out sentinel is not promoted by the labelled text rule, and numeric UUID
-  substrings no longer become incidental card/number findings. Arbitrary bare
-  UUIDs remain untouched. [Apple](https://developer.apple.com/documentation/adsupport/asidentifiermanager/advertisingidentifier)
+  substrings no longer become incidental card/number findings. Bare UUIDs are
+  not promoted by this new rule, though generic numeric rules may still match
+  an all-numeric UUID. [Apple](https://developer.apple.com/documentation/adsupport/asidentifiermanager/advertisingidentifier)
   describes IDFA as a UUID, and [Android](https://developer.android.com/identity/ad-id)
   documents a UUID-format advertising ID; the shape does not prove issuance,
   consent or device/user linkage.
