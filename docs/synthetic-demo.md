@@ -55,7 +55,13 @@ synthetic batch, Detection review can exclude that signal across every file
 after a separate acknowledgment. Excluded values remain visible in the
 candidate, are counted separately, and keep the result review-required.
 The demo download is blocked for reviewer-excluded or still-detected source
-values, structured-output failure, or a same-engine visual residual finding.
+values, structured-output failure, a same-engine visual residual finding, or
+an abstention by the bounded final-text scanner. Aggregate final-text flags
+require a separate acknowledgement before a local review copy can be saved:
+the flags may include deliberately email-shaped `.test` aliases or missed
+sensitive values, and cannot establish which file is responsible. CSV review
+copies with recognized formula-shaped cells are blocked rather than changed
+silently; this conservative guard is not a universal spreadsheet sanitizer.
 Credentials, payment secrets, government IDs, birth dates, and other
 unsupported categories cannot be excluded through this demo control.
 No reference labels are attached automatically. To measure exact-span

@@ -5,7 +5,7 @@ import { ArrowDown, ArrowLeft, ArrowRight, Check, ChevronRight, CircleAlert, Dow
 import { inspectSyntheticBatch, readBatchFile, readBatchReferenceManifest, type BatchDocument, type BatchInspection,
   type BatchCoordinateCorrection, type BatchManualFinding, type BatchReferenceManifest, type BatchUpload,
   type EntityGraphEvidence, BATCH_MAX_TOTAL_BYTES, DemoInspectionFailure } from './api'
-import { downloadDemoCandidate } from './demo-download'
+import { downloadDemoCandidate, reviewCopyBlockReason } from './demo-download'
 import { RelationshipGraph } from './relationship-graph'
 import { moveReviewTabFocus } from './review-navigation'
 import './batch.css'
@@ -43,6 +43,7 @@ const STRATEGY_LABELS: Record<BatchInspection['entities'][number]['strategy'], s
   NANP_FICTIONAL: 'Fictional US number', OPAQUE_REDACTION: 'Opaque redaction',
   CONTEXTUAL_REVIEW_REF: 'Review-only reference',
   INTERNAL_URL_RESERVED_DOMAIN: 'Reserved .invalid link',
+  SCALAR_NULLIFICATION: 'Typed scalar removed',
 }
 function fileIcon(name: string) { return /\.(png|jpe?g)$/i.test(name) ? <ImageIcon size={21} /> :
   name.toLowerCase().endsWith('.json') || name.toLowerCase().endsWith('.jsonl') ? <FileCode2 size={21} /> : <FileText size={21} /> }
@@ -153,6 +154,7 @@ export default function BatchDemo() {
   const [comparisonMode, setComparisonMode] = useState<ComparisonMode>('split')
   const [mediaZoom, setMediaZoom] = useState<MediaZoom>(100)
   const [demoDownloadAcknowledged, setDemoDownloadAcknowledged] = useState(false)
+  const [finalTextFlagsAcknowledged, setFinalTextFlagsAcknowledged] = useState(false)
   const [provenanceTarget, setProvenanceTarget] = useState<EntityGraphEvidence | null>(null)
   const sourcePane = useRef<HTMLDivElement | null>(null)
   const candidatePane = useRef<HTMLDivElement | null>(null)
@@ -177,7 +179,7 @@ export default function BatchDemo() {
     return () => cancelAnimationFrame(frame)
   }, [resultTab, selectedDoc, provenanceTarget])
 
-  function resetReview() { setInspection(null); setReferenceManifest(null); setReferenceAttested(false); setManualNames([]); setManualFindings([]); setCoordinateCorrections([]); setAppliedCoordinates([]); setCoordinateRescanRequired(false); setCoordinateRescanTarget(null); setAliasOverrides({}); setExcludedIds([]); setExclusionAcknowledged(false); setStep('upload'); setError('') }
+  function resetReview() { setInspection(null); setReferenceManifest(null); setReferenceAttested(false); setManualNames([]); setManualFindings([]); setCoordinateCorrections([]); setAppliedCoordinates([]); setCoordinateRescanRequired(false); setCoordinateRescanTarget(null); setAliasOverrides({}); setExcludedIds([]); setExclusionAcknowledged(false); setDemoDownloadAcknowledged(false); setFinalTextFlagsAcknowledged(false); setStep('upload'); setError('') }
 
   async function addFiles(selected: File[]) {
     if (!selected.length) return false
@@ -241,6 +243,7 @@ export default function BatchDemo() {
       setInspection(value)
       setInspectionEpoch(epoch => epoch + 1)
       setDemoDownloadAcknowledged(false)
+      setFinalTextFlagsAcknowledged(false)
       setManualNames(nextNames)
       setManualFindings(nextFindings)
       setAppliedCoordinates(value.documents.flatMap(document => document.mediaPreview?.pages.flatMap(page => page.manualRegions.map(region => ({ documentId: document.id, page: region.page, x0: region.x0, y0: region.y0, x1: region.x1, y1: region.y1, kind: region.kind }))) || []))
@@ -348,11 +351,9 @@ export default function BatchDemo() {
   const byId = new Map(visibleEntities.map(item => [item.id, item]))
   const hasPendingAliases = inspection?.entities.some(entity => aliasOverrides[entity.id] !== undefined && aliasOverrides[entity.id] !== entity.alias) || false
   const hasPendingExclusions = inspection?.entities.some(entity => excludedIds.includes(entity.id) !== entity.excluded) || false
-  const demoDownloadBlockReason = inspection?.summary.suppressedMentions ? 'Download is blocked while reviewer-excluded source values are retained.'
-    : inspection?.verification.sourceValueResiduals ? 'Download is blocked because detected source values remain in the candidate.'
-    : inspection?.verification.structureFailures ? 'Download is blocked because a candidate failed its structure check.'
-    : inspection?.documents.some(document => document.mediaPreview && document.mediaPreview.selfOcrResidualSources > 0)
-      ? 'Download is blocked because the raster recheck found a detected source value.' : ''
+  const finalTextFlagCount = inspection ? Object.values(inspection.verification.finalTextValidation.residualUnitsByCategory)
+    .reduce((sum, count) => sum + count, 0) : 0
+  const demoDownloadBlockReason = inspection && selected ? reviewCopyBlockReason(inspection, selected, finalTextFlagsAcknowledged) : ''
 
   function changeMediaZoom(direction: -1 | 1) {
     const position = MEDIA_ZOOMS.indexOf(mediaZoom === 'fit' ? 100 : mediaZoom)
@@ -502,8 +503,11 @@ export default function BatchDemo() {
               <label className="check-label"><input type="checkbox" checked={demoDownloadAcknowledged}
                 onChange={event => setDemoDownloadAcknowledged(event.target.checked)} />
                 I confirm this batch contains synthetic test data only. The candidate is unverified and must not be shared or used as a release artifact.</label>
+              {finalTextFlagCount > 0 && <label className="check-label"><input type="checkbox" checked={finalTextFlagsAcknowledged}
+                onChange={event => setFinalTextFlagsAcknowledged(event.target.checked)} />
+                I reviewed the {finalTextFlagCount} final text-scan flag{finalTextFlagCount === 1 ? '' : 's'} across this batch. These may include deliberate test aliases or missed sensitive values; this acknowledgement does not qualify the candidate.</label>}
               <button type="button" className="demo-download-button" disabled={!demoDownloadAcknowledged || busy || coordinateCorrections.length > 0 || coordinateRescanRequired || Boolean(demoDownloadBlockReason)}
-                onClick={() => void downloadDemoCandidate(selected).catch(cause => setError(cause instanceof Error ? cause.message : 'Could not save the demo candidate.'))}>
+                onClick={() => void downloadDemoCandidate(selected, inspection, finalTextFlagsAcknowledged).catch(cause => setError(cause instanceof Error ? cause.message : 'Could not save the demo candidate.'))}>
                 <Download size={17} /> Download this demo candidate
               </button>
             </div>

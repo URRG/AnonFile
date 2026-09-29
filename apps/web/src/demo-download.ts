@@ -1,6 +1,61 @@
-import type { BatchDocument } from './api'
+import type { BatchDocument, BatchInspection } from './api'
 
 export type DemoCandidateFile = { name: string; mimeType: string; bytes: Uint8Array }
+
+function formulaStart(cell: string): boolean {
+  const dangerous = (value: string) => {
+    const leading = value.replace(/^[\u0020\u00a0\u2000-\u200b\u202f\u205f\u3000\ufeff]*/u, '')
+    return /^[=+\-@\t\r\n\u0000\uff1d\uff0b\uff0d\uff20]/u.test(leading)
+  }
+  // Some spreadsheet locales or import paths treat semicolons/tabs as field
+  // separators even though the demo's CSV parser uses commas.
+  return dangerous(cell) || cell.split(/[;\t\r\n]/u).slice(1).some(dangerous)
+}
+
+/** Parse CSV cells, including quoted commas/newlines, before permitting a spreadsheet download. */
+export function csvHasFormulaRisk(content: string): boolean {
+  let cell = ''
+  let quoted = false
+  let afterQuote = false
+  for (let index = 0; index < content.length; index++) {
+    const character = content[index]
+    if (quoted) {
+      if (character === '"') {
+        if (content[index + 1] === '"') { cell += '"'; index++ }
+        else { quoted = false; afterQuote = true }
+      } else cell += character
+    } else if (character === ',' || character === '\r' || character === '\n') {
+      if (formulaStart(cell)) return true
+      cell = ''
+      afterQuote = false
+    } else if (character === '"') {
+      if (cell || afterQuote) return true // Malformed candidate: fail closed.
+      quoted = true
+    } else {
+      if (afterQuote) return true
+      cell += character
+    }
+  }
+  return quoted || formulaStart(cell)
+}
+
+export function reviewCopyBlockReason(inspection: BatchInspection, item: BatchDocument, finalTextFlagsAcknowledged = false): string {
+  if (inspection.summary.suppressedMentions) return 'Download is blocked while reviewer-excluded source values are retained.'
+  if (inspection.verification.sourceValueResiduals) return 'Download is blocked because detected source values remain in the candidate.'
+  if (inspection.verification.structureFailures) return 'Download is blocked because a candidate failed its structure check.'
+  const finalText = inspection.verification.finalTextValidation
+  if (finalText.abstainedArtifacts > 0) return 'Download is blocked because the final text scan abstained on a candidate in this batch.'
+  if (inspection.documents.some(document => document.mediaPreview && document.mediaPreview.selfOcrResidualSources > 0)) {
+    return 'Download is blocked because the raster recheck found a detected source value.'
+  }
+  if (item.kind === 'csv' && csvHasFormulaRisk(item.candidateText)) {
+    return 'Download is blocked because a CSV cell could be interpreted as a spreadsheet formula.'
+  }
+  if (!finalTextFlagsAcknowledged && Object.values(finalText.residualUnitsByCategory).some(count => count > 0)) {
+    return 'The final text scan flagged a candidate in this batch. Review the scorecard and acknowledge these flags before downloading.'
+  }
+  return ''
+}
 
 function decodeBase64(value: string): Uint8Array {
   if (!value || value.length > 13_333_336 || value.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) {
@@ -190,12 +245,18 @@ export async function prepareDemoCandidateFile(item: BatchDocument): Promise<Dem
   }
   const type = types[item.kind]
   if (!type || typeof item.candidateText !== 'string') throw new Error('No text candidate is available.')
+  if (item.kind === 'csv' && csvHasFormulaRisk(item.candidateText)) {
+    throw new Error('The CSV candidate contains a possible spreadsheet formula; nothing was downloaded.')
+  }
   return { name: nameFor(item.name, type.extension), mimeType: type.mimeType,
     bytes: new TextEncoder().encode(item.candidateText) }
 }
 
 /** Save only the synthetic review candidate, never a source file or an authorized release. */
-export async function downloadDemoCandidate(item: BatchDocument): Promise<void> {
+export async function downloadDemoCandidate(item: BatchDocument, inspection: BatchInspection,
+  finalTextFlagsAcknowledged = false): Promise<void> {
+  const blockReason = reviewCopyBlockReason(inspection, item, finalTextFlagsAcknowledged)
+  if (blockReason) throw new Error(blockReason)
   const candidate = await prepareDemoCandidateFile(item)
   const link = globalThis.document.createElement('a')
   const blobBuffer = new ArrayBuffer(candidate.bytes.length)
