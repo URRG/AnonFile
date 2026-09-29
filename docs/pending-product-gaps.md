@@ -228,6 +228,10 @@ supplier data. `Blocked externally` is not the same as done.
     manifest from 2–48 fictional files without running the detector. It
     prevents accidental treatment of empty labels as confirmed negatives;
     the files still need blind human annotation and independent adjudication.
+    A private text-gold converter now produces exact-span evaluator input only
+    after complete inventory validation, while rejecting duplicate and
+    unlisted source files. This handoff does not score media or qualify the
+    product.
 - [ ] **D08 — Accessible, scalable review UI.** Test keyboard, screen-reader,
   zoom, responsive layout and a larger batch; keep a navigable table fallback
   when a graph is too dense. Exit: automated checks plus a human walkthrough.

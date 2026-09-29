@@ -29,6 +29,7 @@ def scaffold_fictional_holdout(root: Path) -> dict[str, object]:
         if not 2 <= len(files) <= _MAX_FILES:
             raise HoldoutInventoryError()
         cases: list[dict[str, object]] = []
+        seen_source_hashes: set[str] = set()
         formats: Counter[str] = Counter()
         batch_count = (len(files) + 2) // 3
         base, extra = divmod(len(files), batch_count)
@@ -49,10 +50,14 @@ def scaffold_fictional_holdout(root: Path) -> dict[str, object]:
                 raise HoldoutInventoryError()
             if kind in _TEXT and not data.decode("utf-8").strip():
                 raise HoldoutInventoryError()
+            source_hash = "sha256:" + hashlib.sha256(data).hexdigest()
+            if source_hash in seen_source_hashes:
+                raise HoldoutInventoryError()
+            seen_source_hashes.add(source_hash)
             formats[kind] += 1
             cases.append({"id": f"file-{index:03d}", "batch_id": batch_id,
                           "filename": name, "format": kind,
-                          "source_sha256": "sha256:" + hashlib.sha256(data).hexdigest(),
+                          "source_sha256": source_hash,
                           "labels_complete": False, "text_spans": [],
                           "media_regions": [], "protected_regions": []})
         manifest = {"schema_version": "fictional-holdout-inventory-v1", "cases": cases}

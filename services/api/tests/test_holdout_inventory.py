@@ -83,6 +83,23 @@ def test_duplicate_manifest_key_and_changed_source_fail_closed(tmp_path):
         inspect_fictional_holdout(root)
 
 
+def test_duplicate_source_bytes_under_different_names_fail_closed(tmp_path):
+    root, manifest = corpus(tmp_path)
+    data = (root / "files" / "mail.txt").read_bytes()
+    (root / "files" / "scan.png").write_bytes(data)
+    manifest["cases"][1]["source_sha256"] = digest(data)
+    save(root, manifest)
+    with pytest.raises(HoldoutInventoryError):
+        inspect_fictional_holdout(root)
+
+
+def test_unlisted_source_file_fails_closed(tmp_path):
+    root, _ = corpus(tmp_path)
+    (root / "files" / "unlisted.txt").write_text("fictional extra", encoding="utf-8")
+    with pytest.raises(HoldoutInventoryError):
+        inspect_fictional_holdout(root)
+
+
 def test_symlinked_source_is_rejected_when_platform_supports_it(tmp_path):
     root, manifest = corpus(tmp_path)
     source = root / "files" / "mail.txt"
