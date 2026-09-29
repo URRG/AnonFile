@@ -3,14 +3,61 @@ import base64
 import hashlib
 from io import BytesIO
 
-from PIL import Image
+from PIL import Image, PngImagePlugin
 from PIL import ImageDraw, ImageFilter, ImageFont
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import ArrayObject, NameObject
 import pytest
 
 from app.contracts import PayloadError
-from app.media_preview import _image_pdf, _ocr_lines, _pdf_pages, _verify_pdf_text_layer, render_candidate
+from app.media_preview import (_assert_png_pixel_chunks, _image_pages, _image_pdf, _ocr_lines,
+                               _pdf_pages, _png_bytes, _verify_pdf_text_layer, render_candidate)
+
+
+def test_exif_orientation_is_applied_before_source_metadata_is_discarded():
+    exif = Image.Exif()
+    exif[274] = 6  # A clockwise quarter-turn must be applied to the pixels.
+    exif[270] = "FICTIONAL_PRIVATE_METADATA"
+    stream = BytesIO()
+    Image.new("RGB", (40, 20), "white").save(stream, format="JPEG", exif=exif)
+    page = _image_pages(stream.getvalue(), ".jpg")[0]
+    assert page.size == (20, 40)
+    assert page.info == {} and not page.getexif()
+    candidate = _png_bytes(page)
+    assert b"FICTIONAL_PRIVATE_METADATA" not in candidate
+    assert not Image.open(BytesIO(candidate)).getexif()
+    pdf = _image_pdf([page])
+    assert b"FICTIONAL_PRIVATE_METADATA" not in pdf
+    assert "FICTIONAL_PRIVATE_METADATA" not in str(PdfReader(BytesIO(pdf)).metadata)
+
+
+def test_png_encoder_refuses_ancillary_metadata_and_trailing_bytes():
+    image = Image.new("RGB", (32, 32), "white")
+    metadata = PngImagePlugin.PngInfo()
+    metadata.add_text("Private", "FICTIONAL_PRIVATE_METADATA")
+    source = BytesIO()
+    image.save(source, format="PNG", pnginfo=metadata)
+    with pytest.raises(PayloadError, match="non-pixel content"):
+        _assert_png_pixel_chunks(source.getvalue())
+    clean = _png_bytes(_image_pages(source.getvalue(), ".png")[0])
+    assert b"FICTIONAL_PRIVATE_METADATA" not in clean
+    assert Image.open(BytesIO(clean)).info == {}
+    with pytest.raises(PayloadError, match="non-pixel content"):
+        _assert_png_pixel_chunks(clean + b"FICTIONAL_PRIVATE_METADATA")
+
+
+def test_fully_transparent_source_colors_do_not_become_visible_in_candidate():
+    image = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
+    image.putpixel((16, 16), (0, 0, 0, 255))  # Only this dark pixel is visible.
+    stream = BytesIO()
+    image.save(stream, format="PNG")
+    page = _image_pages(stream.getvalue(), ".png")[0]
+    assert page.info == {}
+    assert page.getpixel((0, 0)) == (255, 255, 255)
+    assert page.getpixel((16, 16)) == (0, 0, 0)
+    encoded = _png_bytes(page)
+    candidate = Image.open(BytesIO(encoded))
+    assert candidate.getpixel((0, 0)) == (255, 255, 255)
 
 
 @pytest.mark.parametrize(("scope", "key"), [
