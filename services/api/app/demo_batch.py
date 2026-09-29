@@ -18,6 +18,7 @@ import re
 from collections import Counter
 from pathlib import PurePath
 from typing import Any
+from urllib.parse import quote, unquote
 
 from app.contracts import PayloadError
 from app.demo_contextual import contextual_spans
@@ -878,27 +879,34 @@ def _email_aliases(keys: list[tuple[str, str]], names_by_key: dict[str, str],
                    exclusions: dict[str, str], id_by_key: dict[tuple[str, str], str]) -> dict[str, str]:
     """Keep email syntax and owner/domain equivalence without using a routable domain."""
     emails = [value for kind, value in keys if kind == "EMAIL"]
-    domains = sorted({value.rsplit("@", 1)[1] for value in emails})
+    decoded = {value: unquote(value) if "@" not in value else value for value in emails}
+    domains = sorted({value.rsplit("@", 1)[1] for value in decoded.values()})
     domain_aliases = {domain: f"org{index}.test"
                       for index, domain in enumerate((domain for domain in domains if domain != "example.test"), 1)}
     if "example.test" in domains:
         domain_aliases["example.test"] = "example.test"
-    reserved = set(emails)
+    reserved = set(emails) | set(decoded.values())
     used: set[str] = set()
     aliases: dict[str, str] = {}
+    canonical_aliases: dict[str, str] = {}
     for index, email in enumerate(emails, 1):
-        owner = owners.get(email)
+        canonical = decoded[email]
+        if canonical in canonical_aliases:
+            aliases[email] = quote(canonical_aliases[canonical], safe="") if canonical != email else canonical_aliases[canonical]
+            continue
+        owner = owners.get(email) or owners.get(canonical)
         if owner not in names_by_key or id_by_key[("PERSON_NAME", owner)] in exclusions:
             owner = None
         local = re.sub(r"[^a-z0-9]", "", name_aliases[owner].casefold()) if owner else f"contact{index}"
         local = local or f"contact{index}"
-        domain = domain_aliases[email.rsplit("@", 1)[1]]
+        domain = domain_aliases[canonical.rsplit("@", 1)[1]]
         candidate = f"{local}@{domain}"
         suffix = 1
         while candidate in used or candidate in reserved:
             suffix += 1
             candidate = f"{local}{suffix}@{domain}"
-        aliases[email] = candidate
+        canonical_aliases[canonical] = candidate
+        aliases[email] = quote(candidate, safe="") if canonical != email else candidate
         used.add(candidate)
     return aliases
 

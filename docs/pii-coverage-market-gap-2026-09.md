@@ -22,7 +22,7 @@ inventory, not a claim to have exhaustively enumerated those catalogs.
 | National IDs and regional tax IDs | PAN and Aadhaar shapes; passport/licence fields and narrow labelled prose. Labelled US SSN/ITIN shapes, UK NINO, Indian voter ID, and now Canadian SIN are `GOVERNMENT_ID` candidates | AWS, Azure, and Presidio list many country-specific types. Next: per-country recognizer registry, test vectors, checksum/context policy and explicit unsupported-country status. Do not imply issuance validity. |
 | Health IDs and clinical content | Named structured fields, labelled UK NHS numbers, and short contextual clauses; no calibrated clinical NER | Presidio offers optional medical NER; AWS/Azure list health identifiers. Need independent PHI annotations, local clinical model review and no diagnosis-only identity assumptions. |
 | Payment and banking | Card-length candidates, PAN shape, labelled US account/routing, GB/DE IBAN; structured CVV/PIN/crypto fields | AWS/Presidio list broader IBAN, SWIFT, crypto and expiry recognizers. Next: checksum-aware, jurisdiction-specific candidates with controlled false positives and non-working surrogates. |
-| Device, account and online identity | IP/MAC, handles and structured IMEI/device/cookie/advertising IDs. This tranche fixes labelled IMEI and employee/staff IDs | AWS/Azure list URL, username, VIN/MAC. Add source-safe handling of personal data in URL paths/query strings, session IDs, mobile ad IDs and organization-specific identifiers. Public URLs alone are not always PII. |
+| Device, account and online identity | IP/MAC, handles, structured IMEI/device/cookie/advertising IDs, labelled employee/staff IDs and a bounded set of explicit HTTP(S) query keys (session, patient, customer and similar IDs). Public URL hosts/paths remain untouched | AWS/Azure list URL, username, VIN/MAC. Continue source-safe handling of personal data in URL paths, arbitrary/relative URLs, mobile ad IDs and organization-specific identifiers. Public URLs alone are not always PII. |
 | Travel/customer references | Demo-specific booking references and passenger context; generic core lacks a dedicated travel-record class | Vendor custom recognizer mechanisms can cover domain-specific IDs. Define a separate travel/customer-record taxonomy and supplier-specific dictionaries before deploying beyond the airline demo. |
 | Credentials and cloud tokens | Generic labelled passwords/keys, authorization tokens; many provider-specific tokens and connection strings are not recognized | AWS lists access keys and Azure lists cloud secrets. Add provider-specific secret recognizers with strict tests; treat as security-sensitive even when not personal. |
 | PDF/image/Office/audio and non-text identifiers | Bounded PDF/image OCR and review/redaction preview. The PDF demo now rejects several known hidden/interactive containers before rasterization and checks every rules-detected native-text candidate against OCR. No DOCX/XLSX, audio, face/signature/biometric, QR/barcode or metadata-wide guarantee | Presidio has image/structured examples and Azure document PII supports PDF/DOCX/TXT. These need separate parsers, media provenance, final-byte inspection and abstention; text rules alone cannot close them. |
@@ -88,6 +88,27 @@ the qualification gate.
   tagged content and metadata-wide checks remain pending. No release claim is
   made from this same-engine cross-check.
 
+## Fourth implementation tranche: explicit URL query identifiers
+
+- HTTP(S) query parameters with explicit keys for session, patient/medical
+  record, user/customer/passenger/employee, email, phone, birth date and SSN
+  are candidate values. Percent-encoded *keys* are decoded for matching, while
+  the raw value offsets are retained for whole-value suppression. Encoded
+  email values require an email shape and receive a URL-safe demo alias that
+  agrees with the same plain email elsewhere in the batch. This new URL rule
+  leaves hosts, paths and unlisted parameters alone, though other existing
+  detectors can independently match their contents. An explicit query-key
+  category takes precedence over a generic number-length guess within its value.
+- This addresses a real distribution channel: [OWASP's session guidance](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html)
+  notes that session IDs can appear in URLs and should not be exposed in logs.
+  [Google's detector guidance](https://docs.cloud.google.com/sensitive-data-protection/docs/concepts-infotypes)
+  emphasizes contextual clues for ambiguous generic IDs. We therefore do not
+  classify every `id`, `code`, `ref`, path component or public URL as PII.
+- Synthetic tests cover encoded keys/values, exact source offsets, repeated
+  parameters, fragments, public lookalikes, structured keys and two-file demo
+  rendering. Relative URLs, unusual query separators, HTML-escaped `&amp;`,
+  provider-specific keys and values hidden in URL paths are not yet qualified.
+
 ## Next implementation order
 
 1. **P0 — Measured recall, not another broad regex claim.** Freeze the offered
@@ -103,8 +124,9 @@ the qualification gate.
    time (for example more IBAN countries) with independent labelled scorecard
    slices, unsupported-country status and safe replacement policies.
 4. **P1 — Domain-specific accounts and URLs.** Introduce a distinct
-   travel/customer-record class, supplier-provided dictionaries, and URL
-   component rules. Avoid masking every public URL or ordinary project code.
+   travel/customer-record class and supplier-provided dictionaries. Explicit
+   HTTP(S) query-key candidates are done; continue URL path/relative-link
+   policies without masking every public URL or ordinary project code.
 5. **P2 — Specialized content.** Clinical narratives, faces/voices, handwriting,
    multilingual names, and linkage risk require separately evaluated models,
    parser provenance and reviewer controls, not a universal pattern list.

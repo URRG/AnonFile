@@ -8,6 +8,7 @@ reserved output markers are rejected, not renamed. Offsets refer to original tex
 """
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections import Counter
 import hashlib
 import ipaddress
@@ -20,6 +21,7 @@ from typing import Any
 from app.candidate import LedgerAction
 from app.contracts import ActualOutputOperation, Finding, PayloadError, ProcessingResult, Span
 from app.regional_identifiers import CA_SIN, UK_NHS, find_regional_identifier_candidates
+from app.url_query_identifiers import EMAIL_VALUE, QUERY_KEY_TYPES, URL_TOKEN, find_url_query_candidates
 
 MAX_BYTES = 2_000_000
 MAX_RECORDS = 10_000
@@ -31,9 +33,9 @@ RULES_METHOD_ID = "rules-v1"
 # beyond the declarative inputs below.  The digest is a reproducible identity,
 # not an assertion that these bounded rules are sufficient for release.
 RULES_METHOD_VERSION = "rules-processor-v1"
-RULES_METHOD_ALGORITHM_REVISION = "rules-processing-algorithm-v4"
+RULES_METHOD_ALGORITHM_REVISION = "rules-processing-algorithm-v5"
 RULES_METHOD_BUILD_REVISION = "anonflow-m9"
-_RULES_METHOD_CONFIG_SCHEMA = "rules-processing-config-v1"
+_RULES_METHOD_CONFIG_SCHEMA = "rules-processing-config-v2"
 LIMITATIONS = (
     "Rules-only coverage is incomplete; no privacy qualification or release approval.",
     "Free-text names, addresses, health context, business confidentiality and indirect identification are not comprehensively detected.",
@@ -41,6 +43,7 @@ LIMITATIONS = (
     "Only text and JSON records are supported; language, semantic, document, media and linkage coverage are unqualified.",
     "Pattern matches are candidates, not validated identity or payment identifiers; false positives and false negatives remain.",
     "Regional-ID check digits are integrity signals, not proof of issuance; labelled mismatches remain sensitive candidates.",
+    "URL query coverage is limited to explicit HTTP(S) parameter names; public links, paths and arbitrary identifiers are not comprehensively classified.",
     "Container-valued sensitive fields and reserved transformation markers in source strings or keys are unsupported and rejected.",
 )
 SEVERITY = {"medium": 1, "high": 2, "critical": 3}
@@ -140,7 +143,8 @@ _QUASI_CONTEXT = re.compile(
 )
 _FIELD_TYPES: dict[str, tuple[str, str]] = {}
 for _names, _kind, _severity in (
-    (("password", "passwd", "secret", "apikey", "token", "accesstoken", "refreshtoken", "authorization", "privatekey"), "CREDENTIAL", "critical"),
+    (("password", "passwd", "secret", "apikey", "token", "accesstoken", "refreshtoken", "authorization", "privatekey",
+      "sessionid", "sessiontoken"), "CREDENTIAL", "critical"),
     (("cvv", "cvc", "pin", "cardsecuritycode"), "PAYMENT_SECRET", "critical"),
     (("cardnumber", "creditcard", "creditcardnumber", "debitcardnumber", "paymentcard"), "CARD", "critical"),
     (("bankaccount", "bankaccountnumber", "checkingaccount", "savingsaccount", "routingnumber",
@@ -154,7 +158,7 @@ for _names, _kind, _severity in (
     (("macaddress", "deviceid", "deviceserial", "imei", "imsi", "advertisingid", "mobileadvertisingid",
       "cookieid", "rfidtag"), "DEVICE_ID", "high"),
     (("username", "userid", "accountid", "socialhandle", "socialmediahandle", "screenname",
-      "profileid", "employeeid", "staffid"), "USER_ID", "high"),
+      "profileid", "employeeid", "staffid", "customerid", "passengerid"), "USER_ID", "high"),
     (("name", "firstname", "lastname", "fullname", "customername", "passengername", "patientname"), "PERSON_NAME", "high"),
     (("address", "street", "streetaddress", "homeaddress", "billingaddress", "shippingaddress"), "ADDRESS", "high"),
     (("email", "emailaddress"), "EMAIL", "high"),
@@ -199,6 +203,8 @@ def _rules_method_identity_config(*, algorithm_revision: str, build_revision: st
         ("in_voter_id", _IN_VOTER_ID.pattern, _IN_VOTER_ID.flags),
         ("ca_sin", CA_SIN.pattern, CA_SIN.flags),
         ("uk_nhs", UK_NHS.pattern, UK_NHS.flags),
+        ("url_query", URL_TOKEN.pattern, URL_TOKEN.flags),
+        ("url_email_value", EMAIL_VALUE.pattern, EMAIL_VALUE.flags),
         ("imei_context", _IMEI_CONTEXT.pattern, _IMEI_CONTEXT.flags),
         ("employee_id", _EMPLOYEE_ID.pattern, _EMPLOYEE_ID.flags),
         ("vehicle_vin", _VEHICLE_VIN.pattern, _VEHICLE_VIN.flags),
@@ -214,6 +220,7 @@ def _rules_method_identity_config(*, algorithm_revision: str, build_revision: st
         "bounds": {"max_bytes": MAX_BYTES, "max_records": MAX_RECORDS,
                    "max_depth": MAX_DEPTH, "max_nodes": MAX_NODES},
         "patterns": patterns, "field_types": sorted((key, *value) for key, value in _FIELD_TYPES.items()),
+        "url_query_keys": sorted((key, *value) for key, value in QUERY_KEY_TYPES.items()),
         "severity": sorted(SEVERITY.items()), "priority": sorted(PRIORITY.items()),
         "output_semantics": {"external": "redact", "restricted": "ordinal_alias",
                              "credential_payment_secret": "redact", "quasi_identifier": "generalize",
@@ -319,6 +326,11 @@ def detect_text(text: str) -> tuple[Span, ...]:
             add(start, end, kind, severity)
     for candidate in find_regional_identifier_candidates(normalized):
         add(candidate.start, candidate.end, candidate.entity_type, candidate.severity, candidate.recognizer)
+    url_query_ranges: list[tuple[int, int]] = []
+    for candidate in find_url_query_candidates(normalized):
+        url_query_ranges.append((candidate.start, candidate.end))
+        add(candidate.start, candidate.end, candidate.entity_type, candidate.severity)
+    url_query_starts = [start for start, _ in url_query_ranges]
     imei_ranges = {match.span("value") for match in _IMEI_CONTEXT.finditer(normalized)}
     for start, end in sorted(imei_ranges):
         add(start, end, "DEVICE_ID", "high")
@@ -326,6 +338,11 @@ def detect_text(text: str) -> tuple[Span, ...]:
         value = match.group()
         # A labelled IMEI is not a payment card merely because it has 15 digits.
         if match.span() in imei_ranges:
+            continue
+        # An explicit sensitive URL parameter is not retyped by an incidental
+        # phone/card/Aadhaar-length substring inside its value.
+        query_index = bisect_right(url_query_starts, match.start()) - 1
+        if query_index >= 0 and match.end() <= url_query_ranges[query_index][1]:
             continue
         digits = sum(char.isdecimal() for char in value)
         if digits < 10:
