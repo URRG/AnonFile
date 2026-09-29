@@ -47,3 +47,7 @@ test('CI action references use immutable full commit SHAs', () => {
   assert.ok(actions.length >= 10)
   for (const action of actions) assert.match(action, /^actions\/(?:checkout|setup-python|setup-node)@[a-f0-9]{40}$/)
 })
+test('CI database service image is digest-pinned', () => {
+  const workflow = read('../../../.github/workflows/ci.yml')
+  assert.match(workflow, /^\s+image: postgres:16-alpine@sha256:[a-f0-9]{64}$/m)
+})
