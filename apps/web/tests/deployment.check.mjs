@@ -41,3 +41,9 @@ test('development image bases are digest-pinned across all stages', () => {
   }
   assert.equal(webBases[0], webBases[3])
 })
+test('CI action references use immutable full commit SHAs', () => {
+  const workflow = read('../../../.github/workflows/ci.yml')
+  const actions = [...workflow.matchAll(/^\s*- uses:\s+(\S+)/gm)].map(match => match[1])
+  assert.ok(actions.length >= 10)
+  for (const action of actions) assert.match(action, /^actions\/(?:checkout|setup-python|setup-node)@[a-f0-9]{40}$/)
+})
