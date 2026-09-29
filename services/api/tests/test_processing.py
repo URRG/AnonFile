@@ -73,6 +73,12 @@ def test_bank_field_is_financial_not_phone_or_card():
     ("Username @riya.dev", "@riya.dev", "USER_ID"),
     ("Passport number K1234567", "K1234567", "GOVERNMENT_ID"),
     ("Driver's license number D87654321", "D87654321", "GOVERNMENT_ID"),
+    ("SSN: 000-12-3456", "000-12-3456", "GOVERNMENT_ID"),
+    ("ITIN: 900-70-1234", "900-70-1234", "GOVERNMENT_ID"),
+    ("National Insurance number: QQ 12 34 56 C", "QQ 12 34 56 C", "GOVERNMENT_ID"),
+    ("Voter ID: ABC1234567", "ABC1234567", "GOVERNMENT_ID"),
+    ("IMEI: 490154203237518", "490154203237518", "DEVICE_ID"),
+    ("Employee ID: ENG-4821", "ENG-4821", "USER_ID"),
     ("Born on 1990-01-01", "1990-01-01", "DATE_OF_BIRTH"),
 ])
 def test_bounded_personal_identifier_detection(text, value, kind):
@@ -86,6 +92,27 @@ def test_bounded_personal_identifier_detection(text, value, kind):
 def test_bounded_identifier_rules_do_not_promote_lookalike_prose():
     text = "Visit https://example.invalid/a:bb:cc; meeting at 12:34:56; account balance is 12345."
     assert detect_text(text) == ()
+
+
+@pytest.mark.parametrize("text", [
+    "Release 000-12-3456 is a version marker.",
+    "Call QQ 12 34 56 C a fictional code without an ID label.",
+    "Build ABC1234567 completed.",
+    "Employee ID: ENG-4821-EXTRA-TAIL",
+])
+def test_contextual_identifiers_do_not_redact_unlabelled_or_partial_values(text):
+    assert detect_text(text) == ()
+
+
+def test_overlong_labelled_imei_is_not_misrepresented_as_device_id():
+    assert all(span.entity_type != "DEVICE_ID" for span in detect_text("IMEI: 4901542032375189"))
+
+
+def test_contextual_identifier_offsets_survive_unicode_prefix():
+    text = "🙂 NINO: QQ 12 34 56 C"
+    spans = detect_text(text)
+    assert len(spans) == 1
+    assert text[spans[0].start:spans[0].end] == "QQ 12 34 56 C"
 
 
 def test_new_identifier_fields_are_redacted_with_explicit_taxonomy():
@@ -106,6 +133,8 @@ def test_new_identifier_fields_are_redacted_with_explicit_taxonomy():
     ("imei", "DEVICE-4821", "DEVICE_ID"),
     ("advertising_id", "AD-4821", "DEVICE_ID"),
     ("screen_name", "user-4821", "USER_ID"),
+    ("employee_id", "ENG-4821", "USER_ID"),
+    ("staff_id", "OPS-4822", "USER_ID"),
     ("patient_id", "PATIENT-4821", "HEALTH_SENSITIVE"),
     ("fax_number", "FAX-4821", "PHONE"),
 ])
