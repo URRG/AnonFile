@@ -53,6 +53,22 @@ def test_batch_links_consistent_surrogates_and_explicit_relationship(demo_client
     assert demo_client.app.state.store.releases == {}
 
 
+def test_batch_review_suppresses_labelled_regional_ids_in_two_files(demo_client):
+    request = {"synthetic_only": True, "files": [
+        file("canada", "payroll.txt", "SIN: 000 000 001"),
+        file("health", "referral.txt", "NHS number: 999 123 4578"),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    candidates = [document["candidate_text"] for document in body["documents"]]
+    assert all("000 000 001" not in candidate and "999 123 4578" not in candidate
+               for candidate in candidates)
+    assert {entity["kind"] for entity in body["entities"]} >= {"GOVERNMENT_ID", "HEALTH_SENSITIVE"}
+    assert body["verification"]["status"] == "REVIEW_REQUIRED"
+    assert body["export_available"] is False
+
+
 def test_entity_graph_uses_typed_explicit_evidence_and_never_source_labels(demo_client):
     request = {"synthetic_only": True, "files": [
         file("mail", "thread.txt", "From: Maya Patel <maya.patel@private.example>\n"
