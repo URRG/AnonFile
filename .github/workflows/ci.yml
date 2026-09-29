@@ -94,3 +94,36 @@ jobs:
         working-directory: apps/web
       - run: npm run test:integration
         working-directory: apps/web
+  dependency-audit:
+    # Advisory scans cover the dependency versions resolved in this CI run.
+    # They do not replace a lockfile, SBOM review, or native-library audit.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r services/api/requirements-dev.txt
+      - run: python -m pip install pip-audit==2.10.1
+      - name: Audit installed Python packages
+        run: python -m pip_audit --strict --progress-spinner off
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - run: npm ci --ignore-scripts
+        working-directory: apps/web
+      - name: Audit runtime web dependencies
+        run: npm audit --omit=dev --audit-level=high
+        working-directory: apps/web
+  container-build:
+    # This tests the synthetic development images only. No production release
+    # or media-parser isolation follows from a successful image build.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate development Compose configuration
+        run: docker compose config --quiet
+      - name: Build API and web development images
+        run: docker compose build api web

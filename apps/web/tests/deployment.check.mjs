@@ -19,3 +19,12 @@ test('Docker source contexts exclude local dependency trees and credentials', ()
     assert.ok(api.includes(value)); assert.ok(web.includes(value))
   }
 })
+test('CI audits resolved dependencies and builds both development images', () => {
+  const workflow = read('../../../.github/workflows/ci.yml')
+  assert.match(workflow, /dependency-audit:/)
+  assert.match(workflow, /python -m pip_audit --strict --progress-spinner off/)
+  assert.match(workflow, /npm audit --omit=dev --audit-level=high/)
+  assert.match(workflow, /container-build:/)
+  assert.match(workflow, /docker compose build api web/)
+  assert.doesNotMatch(workflow, /continue-on-error:\s*true/)
+})
