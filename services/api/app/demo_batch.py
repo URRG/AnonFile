@@ -44,7 +44,46 @@ HEADER = re.compile(r"(?im)^(From|To|Cc):\s*([^<>\r\n]{2,80}?)\s*<([^<>\s]+@[^<>
 # evidence for person/address linking; proximity in a conversation is not.
 ROSTER_ROW = re.compile(r"(?im)^\s*([A-Z][A-Za-z'-]+(?: [A-Z][A-Za-z'-]+){1,2})\s*\|\s*([^|<>\s]+@[^|<>\s]+)\s*(?:\||$)")
 JSON_NAME = re.compile(r'"(?:name|full_name|first_name|last_name|customer_name|passenger_name|client_name|account_owner)"\s*:\s*"([^"\\]{2,80})"', re.I)
-JSON_FIELD = re.compile(r'"(?P<key>(?:[^"\\]|\\.){1,80})"\s*:\s*(?P<value>"(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?|true|false|null)', re.I)
+JSON_FIELD = re.compile(
+    r'"(?P<key>(?:[^"\\]|\\.){1,80})"\s*:\s*'
+    r'(?P<value>"(?:[^"\\]|\\.)*"|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null)'
+    r'(?=\s*[,}])', re.I,
+)
+
+
+class _JSONPairs(list):
+    """Keep JSON object pairs distinct from arrays for field-accounting checks."""
+
+
+def _assert_json_sensitive_fields_accounted(text: str, kind: str, observed: int) -> None:
+    """Refuse sensitive containers, duplicates, or keys missed by the span scanner."""
+    try:
+        roots = ([json.loads(text, object_pairs_hook=_JSONPairs)] if kind == "json" else
+                 [json.loads(line, object_pairs_hook=_JSONPairs) for line in text.splitlines() if line.strip()])
+    except (ValueError, UnicodeError, RecursionError):
+        raise PayloadError("Sensitive JSON fields could not be accounted for in batch preview.") from None
+    expected = 0
+    stack = list(roots)
+    while stack:
+        current = stack.pop()
+        if isinstance(current, _JSONPairs):
+            seen: set[str] = set()
+            for key, value in current:
+                if key in seen:
+                    raise PayloadError("Duplicate JSON keys are unsupported in batch preview.")
+                seen.add(key)
+                normalized = "".join(char for char in key.casefold() if char.isalnum())
+                field = CONTEXTUAL_FIELD_KINDS.get(normalized) or _field_type(key)
+                if field is not None and value is not None:
+                    if isinstance(value, (_JSONPairs, list)):
+                        raise PayloadError("Container-valued sensitive JSON fields are unsupported in batch preview.")
+                    expected += 1
+                if isinstance(value, (_JSONPairs, list)):
+                    stack.append(value)
+        elif isinstance(current, list):
+            stack.extend(current)
+    if expected != observed:
+        raise PayloadError("Sensitive JSON fields could not be accounted for in batch preview.")
 TEXT_NAME = re.compile(r"(?im)^\s*(?:name|client|customer|passenger)\s*:\s*([A-Z][A-Za-z .'-]{1,78})\s*$")
 SAFE_NAME = re.compile(r"^[A-Za-z][A-Za-z .'-]{1,79}$")
 SAFE_ALIAS = re.compile(r"^[A-Za-z][A-Za-z '-]{1,79}$")
@@ -336,6 +375,7 @@ def _structured_fields(document: dict[str, Any]) -> list[tuple[int, int, str]]:
     text, kind = document["text"], document["kind"]
     result: list[tuple[int, int, str]] = []
     ssn_values: set[str] = set()
+    scalar_null_fields: set[tuple[int, int]] = set()
     if kind in {"json", "jsonl"}:
         for match in JSON_FIELD.finditer(text):
             try:
@@ -350,11 +390,15 @@ def _structured_fields(document: dict[str, Any]) -> list[tuple[int, int, str]]:
             if not field or match.group("value") == "null":
                 continue
             value = match.group("value")
-            if not value.startswith('"'):
-                raise PayloadError("Numeric or boolean sensitive JSON fields are unsupported in batch preview.")
-            start, end = match.start("value") + 1, match.end("value") - 1
+            quoted = value.startswith('"')
+            start, end = ((match.start("value") + 1, match.end("value") - 1) if quoted
+                          else match.span("value"))
             if end - start > 120:
                 raise PayloadError("A sensitive structured field exceeds the review value limit.")
+            if not quoted:
+                # The candidate uses the JSON literal null, not a quoted marker.
+                # Only a complete scalar token is admitted by JSON_FIELD.
+                scalar_null_fields.add((start, end))
             field_kind = demo_field_kind(field_name, text[start:end], field[0])
             if "".join(char for char in field_name.casefold() if char.isalnum()) in {"ssn", "socialsecuritynumber"} and SSN_SHAPE.fullmatch(text[start:end]):
                 ssn_values.add(text[start:end].casefold())
@@ -391,7 +435,10 @@ def _structured_fields(document: dict[str, Any]) -> list[tuple[int, int, str]]:
                             ssn_values.add(value.casefold())
                         result.append((start, end, field_kind))
             offset += len(raw_line)
+    if kind in {"json", "jsonl"}:
+        _assert_json_sensitive_fields_accounted(text, kind, len(result))
     document["_ssn_values"] = ssn_values
+    document["_scalar_null_fields"] = scalar_null_fields
     return result
 
 
@@ -1132,6 +1179,9 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
                     for entity_id in (id_by_key[("PERSON_NAME", normalized)],)}
     email_aliases = _email_aliases(keys, names_by_key, name_aliases, email_owners, exclusions, id_by_key)
     source_values = {source.casefold() for source in names_by_key.values()} | {source.casefold() for source in source_by_key.values()}
+    scalar_null_keys = {(kind, doc["text"][start:end].casefold()) for doc in documents
+                        for start, end, kind in doc["_fields"]
+                        if (start, end) in doc["_scalar_null_fields"]}
     used_typed_aliases: set[str] = set()
     typed_ordinals = {"PAN": 0, "GOVERNMENT_ID": 0, "PHONE": 0}
     contextual_ordinals = {"EMPLOYEE_ID": 0, "INTERNAL_URL": 0, "ADDRESS": 0}
@@ -1148,6 +1198,10 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
         if kind == "PERSON_NAME":
             alias = name_aliases[normalized]
             strategy = "NAME_LENGTH_MATCH"
+        elif (kind, normalized) in scalar_null_keys:
+            if entity_id in overrides:
+                raise PayloadError("Only person-name aliases can be changed in this demo.")
+            alias, strategy = "null", "SCALAR_NULLIFICATION"
         elif kind == "EMAIL":
             if entity_id in overrides:
                 raise PayloadError("Only person-name aliases can be changed in this demo.")
@@ -1249,6 +1303,7 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
                 {page: regions for (document_id, page), regions in coordinate_regions.items()
                  if document_id == doc["id"]})
         doc.pop("_fields")
+        doc.pop("_scalar_null_fields")
         doc.pop("_ssn_values")
         doc.pop("_labelled_ssns")
 
