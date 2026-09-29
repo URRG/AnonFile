@@ -45,6 +45,14 @@ def test_independent_residual_scanner_finds_unlabelled_aws_key_without_returning
     assert fictional_key not in repr(result)
 
 
+def test_independent_residual_scanner_flags_labelled_precise_location_as_pii():
+    source = "GPS: 37.7749, -122.4194"
+    result = scan_residual_candidate(source)
+    assert dict(result.residual_counts) == {"CREDENTIAL": 0, "PAYMENT": 0, "PII": 1}
+    assert source not in repr(result)
+    assert dict(scan_residual_candidate("GPS: 91.0000, 12.0000").residual_counts)["PII"] == 0
+
+
 def test_independent_scanner_explicitly_leaves_nonqualified_taxonomy_unassessed():
     result = scan_residual_candidate("diagnosis: synthetic-condition; internal roadmap: synthetic-roadmap; age: 47")
     assert dict(result.residual_counts) == {"CREDENTIAL": 0, "PAYMENT": 0, "PII": 0}

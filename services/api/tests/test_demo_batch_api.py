@@ -100,6 +100,44 @@ def test_batch_review_suppresses_unlabelled_aws_key_in_two_files(demo_client):
     assert body["verification"]["status"] == "REVIEW_REQUIRED"
 
 
+def test_batch_review_generalizes_labelled_precise_location(demo_client):
+    source = "37.7749, -122.4194"
+    request = {"synthetic_only": True, "files": [
+        file("trip", "trip.txt", "Client visit GPS: " + source),
+        file("note", "note.txt", "Follow-up tomorrow."),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert source not in body["documents"][0]["candidate_text"]
+    assert any(entity["kind"] == "QUASI_IDENTIFIER" for entity in body["entities"])
+    assert body["verification"]["status"] == "REVIEW_REQUIRED"
+
+
+def test_batch_review_refuses_numeric_structured_coordinates_without_echoing_source(demo_client):
+    request = {"synthetic_only": True, "files": [
+        file("location", "location.json", '[{"latitude":37.7749,"longitude":-122.4194}]'),
+        file("note", "note.txt", "Follow-up tomorrow."),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 422
+    assert "37.7749" not in response.text and "122.4194" not in response.text
+
+
+def test_batch_review_keeps_string_structured_coordinates_parseable(demo_client):
+    request = {"synthetic_only": True, "files": [
+        file("location", "location.json", '[{"latitude":"37.7749","longitude":"-122.4194"}]'),
+        file("note", "note.txt", "Follow-up tomorrow."),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    candidate = body["documents"][0]["candidate_text"]
+    assert "37.7749" not in candidate and "122.4194" not in candidate
+    assert body["documents"][0]["structure_check"] == "pass"
+    assert json.loads(candidate)[0]["latitude"] != "37.7749"
+
+
 def test_encoded_query_email_reuses_plain_email_alias_without_breaking_url(demo_client):
     request = {"synthetic_only": True, "files": [
         file("plain", "plain.txt", "Contact riya@example.org"),

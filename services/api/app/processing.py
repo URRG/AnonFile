@@ -33,7 +33,7 @@ RULES_METHOD_ID = "rules-v1"
 # beyond the declarative inputs below.  The digest is a reproducible identity,
 # not an assertion that these bounded rules are sufficient for release.
 RULES_METHOD_VERSION = "rules-processor-v1"
-RULES_METHOD_ALGORITHM_REVISION = "rules-processing-algorithm-v6"
+RULES_METHOD_ALGORITHM_REVISION = "rules-processing-algorithm-v7"
 RULES_METHOD_BUILD_REVISION = "anonflow-m9"
 _RULES_METHOD_CONFIG_SCHEMA = "rules-processing-config-v2"
 LIMITATIONS = (
@@ -44,6 +44,7 @@ LIMITATIONS = (
     "Pattern matches are candidates, not validated identity or payment identifiers; false positives and false negatives remain.",
     "Regional-ID check digits are integrity signals, not proof of issuance; labelled mismatches remain sensitive candidates.",
     "URL query coverage is limited to explicit HTTP(S) parameter names; public links, paths and arbitrary identifiers are not comprehensively classified.",
+    "Precise location coordinates are candidates only with bounded explicit labels or structured field names; linkage risk is not assessed.",
     "Container-valued sensitive fields and reserved transformation markers in source strings or keys are unsupported and rejected.",
 )
 SEVERITY = {"medium": 1, "high": 2, "critical": 3}
@@ -118,6 +119,14 @@ _VEHICLE_VIN = re.compile(
 _BIRTH_CONTEXT = re.compile(
     r"(?i)\b(?:born\s+on|date\s+of\s+birth|dob)\s*(?:[:=#-]\s*|\s+)(?P<value>(?:[0-9]{4}-[0-9]{2}-[0-9]{2}|[0-9]{1,2}\s+[A-Za-z]{3,9}\s+[0-9]{4}))(?!\w)"
 )
+# A precise coordinate pair can become identifying in a person-linked record.
+# Requiring an explicit label avoids treating arbitrary decimal pairs as PII.
+# The bounded fractional precision prevents partial matches on long values.
+_GPS_CONTEXT = re.compile(
+    r"(?i)\b(?:gps(?:[ \t]+coordinates?)?|geo[ \t]*coordinates?|location[ \t]+coordinates?)"
+    r"[ \t]*[:=][ \t]*(?P<value>[+-]?[0-9]{1,2}\.[0-9]{3,12}[ \t]*,[ \t]*"
+    r"[+-]?[0-9]{1,3}\.[0-9]{3,12})(?![\w.])"
+)
 _NUMBER = re.compile(r"(?<!\w)\+?[0-9](?:[0-9 ()-]*[0-9])?(?!\w)")
 # These are intentionally contextual rules, not vocabulary matches.  A bare
 # word such as "allergy" or "confidential" is not enough to redact prose.
@@ -174,7 +183,8 @@ for _names, _kind, _severity in (
     (("tradesecret", "businesssecret", "confidentialbusiness", "confidentialinternal",
       "internalproject", "internalroadmap", "internalforecast", "pricingstrategy", "pricingmodel",
       "sourcecode"), "BUSINESS_CONFIDENTIAL", "high"),
-    (("age", "birthyear", "postalcode", "zipcode", "zip", "postcode", "gender", "sex", "race",
+    (("gpscoordinates", "geocoordinates", "locationcoordinates", "latitude", "longitude",
+      "age", "birthyear", "postalcode", "zipcode", "zip", "postcode", "gender", "sex", "race",
       "ethnicity", "nationality", "occupation", "maritalstatus", "householdsize"), "QUASI_IDENTIFIER", "medium"),
 ):
     for _name in _names:
@@ -213,6 +223,7 @@ def _rules_method_identity_config(*, algorithm_revision: str, build_revision: st
         ("employee_id", _EMPLOYEE_ID.pattern, _EMPLOYEE_ID.flags),
         ("vehicle_vin", _VEHICLE_VIN.pattern, _VEHICLE_VIN.flags),
         ("birth_context", _BIRTH_CONTEXT.pattern, _BIRTH_CONTEXT.flags),
+        ("gps_context", _GPS_CONTEXT.pattern, _GPS_CONTEXT.flags),
         ("health_context", _HEALTH_CONTEXT.pattern, _HEALTH_CONTEXT.flags),
         ("business_context", _BUSINESS_CONTEXT.pattern, _BUSINESS_CONTEXT.flags),
         ("quasi_context", _QUASI_CONTEXT.pattern, _QUASI_CONTEXT.flags),
@@ -329,6 +340,11 @@ def detect_text(text: str) -> tuple[Span, ...]:
         for match in pattern.finditer(normalized):
             start, end = match.span("value")
             add(start, end, kind, severity)
+    for match in _GPS_CONTEXT.finditer(normalized):
+        latitude, longitude = (float(part.strip()) for part in match.group("value").split(","))
+        if -90 <= latitude <= 90 and -180 <= longitude <= 180:
+            start, end = match.span("value")
+            add(start, end, "QUASI_IDENTIFIER", "medium")
     for candidate in find_regional_identifier_candidates(normalized):
         add(candidate.start, candidate.end, candidate.entity_type, candidate.severity, candidate.recognizer)
     url_query_ranges: list[tuple[int, int]] = []
