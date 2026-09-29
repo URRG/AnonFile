@@ -18,7 +18,7 @@ inventory, not a claim to have exhaustively enumerated those catalogs.
 | Family / vector | Current AnonFlow implementation | Market comparison and next gate |
 | --- | --- | --- |
 | Free-text person names, aliases, roles, and indirect cross-file identity | Demo-specific name inference and exact aliases; core rules lack general multilingual NER | AWS, Azure, and Presidio offer person-name detection. Add a pluggable local NER candidate source, then blind span and cross-file identity evaluation; never auto-merge ambiguous people. |
-| Full postal addresses, places, geocoordinates, movement traces | Structured `address` and bounded synthetic US-style address; quasi fields and labelled context only | AWS/Azure/Presidio cover addresses and/or locations; Azure lists GPS coordinates. Need regional address parsing and linked-location risk scoring, not a blanket city-name redaction. |
+| Full postal addresses, places, geocoordinates, movement traces | Structured `address` and bounded synthetic US-style address; precise decimal GPS pairs with explicit labels and structured latitude/longitude fields; other quasi fields and labelled context | AWS/Azure/Presidio cover addresses and/or locations; Azure lists GPS coordinates. Need regional address parsing and linked-location risk scoring, not a blanket city-name redaction. |
 | National IDs and regional tax IDs | PAN and Aadhaar shapes; passport/licence fields and narrow labelled prose. Labelled US SSN/ITIN shapes, UK NINO, Indian voter ID, and now Canadian SIN are `GOVERNMENT_ID` candidates | AWS, Azure, and Presidio list many country-specific types. Next: per-country recognizer registry, test vectors, checksum/context policy and explicit unsupported-country status. Do not imply issuance validity. |
 | Health IDs and clinical content | Named structured fields, labelled UK NHS numbers, and short contextual clauses; no calibrated clinical NER | Presidio offers optional medical NER; AWS/Azure list health identifiers. Need independent PHI annotations, local clinical model review and no diagnosis-only identity assumptions. |
 | Payment and banking | Card-length candidates, PAN shape, labelled US account/routing, GB/DE IBAN; structured CVV/PIN/crypto fields | AWS/Presidio list broader IBAN, SWIFT, crypto and expiry recognizers. Next: checksum-aware, jurisdiction-specific candidates with controlled false positives and non-working surrogates. |
@@ -140,6 +140,26 @@ the qualification gate.
   session tokens, other cloud providers, encoded keys and credentials split
   across lines remain unqualified. Both detectors use similar shapes, so the
   residual check is not independent evidence of coverage for this vector.
+
+## Seventh implementation tranche: labelled precise location
+
+- Explicit `GPS`, `geo coordinates` or `location coordinates` labels followed
+  by a decimal latitude/longitude pair (3–12 fractional digits) now create a
+  bounded quasi-identifier candidate, subject to geographic range checks.
+  Structured `latitude`, `longitude` and coordinate field names are also
+  treated as quasi-identifiers; sensitive numeric fields become `null` in core
+  output. The synthetic batch demo generalizes labelled pairs and string-valued
+  JSON coordinate fields, but deliberately refuses numeric sensitive JSON
+  fields rather than emitting invalid JSON. The aggregate residual scanner
+  flags labelled pairs as a possible PII signal.
+- [Azure's PII categories](https://learn.microsoft.com/en-us/azure/ai-services/language-service/personally-identifiable-information/concepts/entity-categories)
+  describe geolocation as personal when it can pinpoint or track a person;
+  [Google's detector guidance](https://docs.cloud.google.com/sensitive-data-protection/docs/concepts-infotypes)
+  distinguishes precise street addresses from broad place names. These rules
+  do not identify person linkage, movement traces, unlabelled coordinates,
+  degrees-minutes-seconds, regional address formats, or geographic risk. A
+  coordinate shape alone is not proof of personal information. The source and
+  residual recognizers are correlated rules, not independent recall evidence.
 
 ## Next implementation order
 

@@ -458,6 +458,34 @@ def test_contextual_health_business_and_quasi_rules_remove_values_without_claimi
     assert "not qualified category coverage" in " ".join(result.limitations)
 
 
+def test_labelled_precise_coordinates_are_whole_quasi_candidates():
+    text = "Visit GPS coordinates: 37.7749, -122.4194 tomorrow."
+    spans = detect_text(text)
+    assert [(span.entity_type, text[span.start:span.end]) for span in spans] == [
+        ("QUASI_IDENTIFIER", "37.7749, -122.4194")]
+    result = process_payload(content=text)
+    assert result.output == "Visit GPS coordinates: [GENERALIZED_QUASI_IDENTIFIER] tomorrow."
+    assert "37.7749" not in result.output and "122.4194" not in result.output
+
+
+@pytest.mark.parametrize("text", [
+    "GPS: 91.0000, 12.0000", "GPS: 37.7749, 181.0000",
+    "GPS: 37.7, -122.4", "map point: 37.7749, -122.4194",
+    "GPS: 37.7749000000000, -122.4194",
+])
+def test_invalid_coarse_or_unlabelled_coordinates_are_not_promoted_to_pii(text):
+    assert not any(span.entity_type == "QUASI_IDENTIFIER" for span in detect_text(text))
+
+
+def test_structured_latitude_and_longitude_are_sensitive_even_as_numbers():
+    records = [{"latitude": 37.7749, "longitude": -122.4194, "meeting_duration": 30}]
+    result = process_payload(records=records)
+    assert result.output == [{"latitude": None, "longitude": None, "meeting_duration": 30}]
+    assert records[0]["latitude"] == 37.7749
+    assert {(finding.entity_type, finding.count) for finding in result.findings} == {
+        ("QUASI_IDENTIFIER", 2)}
+
+
 def test_sensitive_structured_fields_apply_bounded_actions_and_preserve_input():
     records = [{"diagnosis": "synthetic-condition", "trade_secret": "synthetic-plan", "postal_code": "12345"}]
     before = copy.deepcopy(records)

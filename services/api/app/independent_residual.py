@@ -26,7 +26,7 @@ DETECTOR_ID = "m8-independent-residual"
 # Evidence-relevant, immutable release inputs.  Algorithm revision covers
 # matching, classification and traversal semantics; build revision identifies
 # the packaged control-plane build.  Bump either when its behavior changes.
-ALGORITHM_REVISION = "independent-residual-algorithm-v2"
+ALGORITHM_REVISION = "independent-residual-algorithm-v3"
 BUILD_REVISION = "anonflow-m8.1"
 _CONFIG_SCHEMA = "residual-detector-config-v1"
 MAX_DIRECT_SCAN_NODES = 100_000
@@ -46,6 +46,11 @@ _CREDENTIAL_ASSIGNMENT = re.compile(
 )
 _AUTHORIZATION = re.compile(r"(?i)\b(?:bearer|basic)\s+[a-z0-9._~+/=-]{8,}")
 _AWS_ACCESS_KEY_ID = re.compile(r"(?<!\w)(?:AKIA|ASIA)[A-Z0-9]{16}(?!\w)")
+_PRECISE_LOCATION = re.compile(
+    r"(?i)\b(?:gps(?:[ \t]+coordinates?)?|geo[ \t]*coordinates?|location[ \t]+coordinates?)"
+    r"[ \t]*[:=][ \t]*(?P<lat>[+-]?[0-9]{1,2}\.[0-9]{3,12})[ \t]*,[ \t]*"
+    r"(?P<lon>[+-]?[0-9]{1,3}\.[0-9]{3,12})(?![\w.])"
+)
 _PAYMENT_SECRET = re.compile(r"(?ix)\b(?:cvv|cvc|card[ _-]?security[ _-]?code)\b\s*(?::|=)\s*[0-9]{3,4}\b")
 
 _RULE_CONFIGURATION = (
@@ -56,6 +61,7 @@ _RULE_CONFIGURATION = (
     ("credential_assignment", _CREDENTIAL_ASSIGNMENT.pattern, _CREDENTIAL_ASSIGNMENT.flags),
     ("authorization", _AUTHORIZATION.pattern, _AUTHORIZATION.flags),
     ("aws_access_key_id", _AWS_ACCESS_KEY_ID.pattern, _AWS_ACCESS_KEY_ID.flags),
+    ("precise_location", _PRECISE_LOCATION.pattern, _PRECISE_LOCATION.flags),
     ("payment_secret", _PAYMENT_SECRET.pattern, _PAYMENT_SECRET.flags),
 )
 
@@ -111,6 +117,13 @@ def _has_valid_ipv4(text: str) -> bool:
     return False
 
 
+def _has_precise_location(text: str) -> bool:
+    for match in _PRECISE_LOCATION.finditer(text):
+        if -90 <= float(match.group("lat")) <= 90 and -180 <= float(match.group("lon")) <= 180:
+            return True
+    return False
+
+
 def _families_in_text(text: str) -> set[str]:
     """Return family labels only; raw matches never leave this function."""
     families: set[str] = set()
@@ -118,7 +131,7 @@ def _families_in_text(text: str) -> set[str]:
         families.add("CREDENTIAL")
     if _PAYMENT_SECRET.search(text):
         families.add("PAYMENT")
-    if _EMAIL.search(text) or _PAN.search(text) or _has_valid_ipv4(text):
+    if _EMAIL.search(text) or _PAN.search(text) or _has_valid_ipv4(text) or _has_precise_location(text):
         families.add("PII")
     for match in _NUMBERISH.finditer(text):
         digits = "".join(char for char in match.group() if "0" <= char <= "9")
