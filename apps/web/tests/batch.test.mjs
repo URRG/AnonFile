@@ -73,6 +73,59 @@ test('batch client accepts non-deliverable email surrogates and refuses old mark
   }
 })
 
+test('batch client accepts a canonical percent-encoded email alias only for an encoded source', async t => {
+  const text = 'https://example.org/contact?email=riya%40example.org&theme=dark'
+  const source = 'riya%40example.org'
+  const alias = 'gita%40org1.test'
+  const encodedFiles = [{ id: 'f1', name: 'a.txt', size: Buffer.byteLength(text), contentBase64: Buffer.from(text).toString('base64') }, files[1]]
+  const response = valid()
+  response.documents[0].text = text
+  response.documents[0].candidate_text = text.replace(source, alias)
+  response.documents[0].size_bytes = Buffer.byteLength(text)
+  response.documents[0].matches[0] = { start: text.indexOf(source), end: text.indexOf(source) + source.length,
+    source, entity_id: 'E1', kind: 'EMAIL', replacement: alias, applied: true, origin: 'AUTOMATIC' }
+  response.entities[0] = { id: 'E1', kind: 'EMAIL', source, alias, strategy: 'EMAIL_TEST_ADDRESS', mentions: 1, excluded: false }
+  const encodedRequest = { ...request, files: encodedFiles }
+  t.mock.method(globalThis, 'fetch', async () => Response.json(response))
+  assert.equal((await inspectSyntheticBatch(encodedRequest)).entities[0].alias, alias)
+  t.mock.restoreAll()
+  for (const badAlias of ['gita@org1.test', 'gita%2540org1.test', 'gita%40company.com', source]) {
+    const tampered = structuredClone(response)
+    tampered.entities[0].alias = badAlias
+    tampered.documents[0].matches[0].replacement = badAlias
+    tampered.documents[0].candidate_text = text.replace(source, badAlias)
+    t.mock.method(globalThis, 'fetch', async () => Response.json(tampered))
+    await assert.rejects(inspectSyntheticBatch(encodedRequest), /invalid review result/)
+    t.mock.restoreAll()
+  }
+})
+
+test('batch client accepts typed scalar nullification but rejects a mismatched alias', async t => {
+  const text = '{"latitude":37.7749}'
+  const source = '37.7749'
+  const scalarFiles = [{ id: 'f1', name: 'a.json', size: Buffer.byteLength(text), contentBase64: Buffer.from(text).toString('base64') }, files[1]]
+  const response = valid()
+  response.documents[0].name = 'a.json'
+  response.documents[0].kind = 'json'
+  response.documents[0].text = text
+  response.documents[0].candidate_text = '{"latitude":null}'
+  response.documents[0].size_bytes = Buffer.byteLength(text)
+  response.documents[0].structure_check = 'pass'
+  response.documents[0].matches[0] = { start: text.indexOf(source), end: text.indexOf(source) + source.length,
+    source, entity_id: 'E1', kind: 'QUASI_IDENTIFIER', replacement: 'null', applied: true, origin: 'AUTOMATIC' }
+  response.entities[0] = { id: 'E1', kind: 'QUASI_IDENTIFIER', source, alias: 'null', strategy: 'SCALAR_NULLIFICATION', mentions: 1, excluded: false }
+  const scalarRequest = { ...request, files: scalarFiles }
+  t.mock.method(globalThis, 'fetch', async () => Response.json(response))
+  assert.equal((await inspectSyntheticBatch(scalarRequest)).entities[0].strategy, 'SCALAR_NULLIFICATION')
+  t.mock.restoreAll()
+  const tampered = structuredClone(response)
+  tampered.entities[0].alias = 'nil'
+  tampered.documents[0].matches[0].replacement = 'nil'
+  tampered.documents[0].candidate_text = '{"latitude":nil}'
+  t.mock.method(globalThis, 'fetch', async () => Response.json(tampered))
+  await assert.rejects(inspectSyntheticBatch(scalarRequest), /invalid review result/)
+})
+
 test('batch client binds declared PAN strategy to a deliberately invalid alias', async t => {
   const panFiles = [{ id: 'f1', name: 'a.txt', size: 10, contentBase64: Buffer.from('ABCPD1234F').toString('base64') }, files[1]]
   const response = valid()

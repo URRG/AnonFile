@@ -124,7 +124,7 @@ export type BatchDocument = { id: string; name: string; kind: 'text' | 'csv' | '
   structureCheck: 'pass' | 'fail' | 'not_applicable'; matches: BatchMatch[]; mediaPreview: BatchMediaPreview | null; sourceSha256?: string }
 export type BatchAliasStrategy = 'NAME_LENGTH_MATCH' | 'EMAIL_TEST_ADDRESS' | 'PAN_INVALID_TEST' |
   'US_SSN_INVALID' | 'NANP_FICTIONAL' | 'OPAQUE_REDACTION' |
-  'CONTEXTUAL_REVIEW_REF' | 'INTERNAL_URL_RESERVED_DOMAIN'
+  'CONTEXTUAL_REVIEW_REF' | 'INTERNAL_URL_RESERVED_DOMAIN' | 'SCALAR_NULLIFICATION'
 export type BatchEntity = { id: string; kind: string; source: string; alias: string; strategy: BatchAliasStrategy;
   mentions: number; excluded: boolean }
 export type BatchRelationship = { sourceId: string; targetId: string; type: 'EMAILED' | 'ACCOUNT_OWNER_OF'; documentId: string; basis: string }
@@ -450,7 +450,7 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
       !Array.isArray(value.relationships) || !object(value.summary) || !object(value.verification) || !Array.isArray(value.limitations)) batchInvalid()
   const entities: BatchEntity[] = value.entities.map(raw => {
     if (!object(raw) || typeof raw.id !== 'string' || !/^E\d{1,4}$/.test(raw.id) || !safeText(raw.kind, 64) || !safeText(raw.source, 120) || !safeText(raw.alias, 120) || !safeCount(raw.mentions) || typeof raw.excluded !== 'boolean') batchInvalid()
-    if (!['NAME_LENGTH_MATCH', 'EMAIL_TEST_ADDRESS', 'PAN_INVALID_TEST', 'US_SSN_INVALID', 'NANP_FICTIONAL', 'OPAQUE_REDACTION', 'CONTEXTUAL_REVIEW_REF', 'INTERNAL_URL_RESERVED_DOMAIN'].includes(String(raw.strategy))) batchInvalid()
+    if (!['NAME_LENGTH_MATCH', 'EMAIL_TEST_ADDRESS', 'PAN_INVALID_TEST', 'US_SSN_INVALID', 'NANP_FICTIONAL', 'OPAQUE_REDACTION', 'CONTEXTUAL_REVIEW_REF', 'INTERNAL_URL_RESERVED_DOMAIN', 'SCALAR_NULLIFICATION'].includes(String(raw.strategy))) batchInvalid()
     if (raw.strategy === 'NAME_LENGTH_MATCH' && (raw.kind !== 'PERSON_NAME' || (raw.alias as string).length !== (raw.source as string).length)) batchInvalid()
     if (raw.strategy === 'EMAIL_TEST_ADDRESS' && raw.kind !== 'EMAIL') batchInvalid()
     if (raw.strategy === 'PAN_INVALID_TEST' && (raw.kind !== 'PAN' || !/^[A-Z]{3}Z[A-Z][0-9]{4}[A-Z]$/.test(raw.alias as string))) batchInvalid()
@@ -462,8 +462,25 @@ function batchInspection(value: unknown, expectedUploads: BatchUpload[], referen
       (raw.kind === 'ADDRESS' && /^Postal address \[review [0-9]{4,6}\]$/.test(raw.alias as string)))) batchInvalid()
     if (raw.strategy === 'INTERNAL_URL_RESERVED_DOMAIN' && (raw.kind !== 'INTERNAL_URL' ||
         !/^https:\/\/review-[0-9]{4,6}\.invalid\/resource$/.test(raw.alias as string))) batchInvalid()
-    if (raw.kind === 'EMAIL' && (!/^[a-z0-9][a-z0-9._+-]*@[a-z0-9-]+(?:\.[a-z0-9-]+)*\.test$/.test(raw.alias as string) ||
-        (raw.alias as string).toLowerCase() === (raw.source as string).toLowerCase())) batchInvalid()
+    if (raw.strategy === 'SCALAR_NULLIFICATION' && (raw.alias !== 'null' || raw.kind === 'PERSON_NAME' || raw.kind === 'EMAIL')) batchInvalid()
+    if (raw.kind === 'EMAIL') {
+      const source = raw.source as string
+      const alias = raw.alias as string
+      const encodedSource = !source.includes('@') && /%40/i.test(source)
+      let decodedAlias = alias
+      let decodedSource = source
+      if (encodedSource) {
+        try {
+          decodedAlias = decodeURIComponent(alias)
+          decodedSource = decodeURIComponent(source)
+        } catch { batchInvalid() }
+        // The API percent-encodes only URL-embedded email aliases. Reject
+        // alternate encodings rather than weakening the reserved-domain check.
+        if (encodeURIComponent(decodedAlias) !== alias) batchInvalid()
+      }
+      if (!/^[a-z0-9][a-z0-9._+-]*@[a-z0-9-]+(?:\.[a-z0-9-]+)*\.test$/.test(decodedAlias) ||
+          decodedAlias.toLowerCase() === decodedSource.toLowerCase()) batchInvalid()
+    }
     return { id: raw.id, kind: raw.kind, source: raw.source, alias: raw.alias,
       strategy: raw.strategy as BatchAliasStrategy, mentions: raw.mentions as number, excluded: raw.excluded }
   })

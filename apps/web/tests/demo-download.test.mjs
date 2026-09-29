@@ -7,7 +7,12 @@ import ts from 'typescript'
 if (!globalThis.crypto?.subtle) Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: true })
 const source = readFileSync(new URL('../src/demo-download.ts', import.meta.url), 'utf8')
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText
-const { prepareDemoCandidateFile, downloadDemoCandidate } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
+const { prepareDemoCandidateFile, downloadDemoCandidate, csvHasFormulaRisk, reviewCopyBlockReason } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`)
+const review = () => ({ documents: [], summary: { suppressedMentions: 0 }, verification: {
+  sourceValueResiduals: 0, structureFailures: 0, finalTextValidation: {
+    residualUnitsByCategory: { CREDENTIAL: 0, PAYMENT: 0, PII: 0 }, abstainedArtifacts: 0,
+  },
+} })
 
 test('synthetic text candidate download uses candidate bytes, not source bytes', async () => {
   const candidate = await prepareDemoCandidateFile({ kind: 'text', name: 'calendar events.txt',
@@ -15,6 +20,38 @@ test('synthetic text candidate download uses candidate bytes, not source bytes',
   assert.equal(candidate.name, 'calendar_events.candidate.txt')
   assert.equal(candidate.mimeType, 'text/plain;charset=utf-8')
   assert.equal(new TextDecoder().decode(candidate.bytes), 'John Singh')
+})
+
+test('CSV review copy rejects formula-shaped cells, including quoted and spaced values', async () => {
+  for (const candidateText of ['name,note\nGita,=1+1', 'name,note\nGita,"=1,2"',
+    'name,note\nGita,"  @SUM(1)"', 'name,note\nGita,+1', 'name,note\nGita,\t=1',
+    'name,note\nGita,"\n=1"', 'name,note\nGita,＝1', '\ufeff=1,note\nGita,review',
+    'name,note\nGita,"safe;=1"']) {
+    assert.equal(csvHasFormulaRisk(candidateText), true)
+    await assert.rejects(prepareDemoCandidateFile({ kind: 'csv', name: 'people.csv', candidateText }), /spreadsheet formula/)
+  }
+  const safe = 'name,note\nGita,"review, then resolve"'
+  assert.equal(csvHasFormulaRisk(safe), false)
+  const candidate = await prepareDemoCandidateFile({ kind: 'csv', name: 'people.csv', candidateText: safe })
+  assert.equal(new TextDecoder().decode(candidate.bytes), safe)
+})
+
+test('review-copy gate requires explicit flag acknowledgement and blocks scanner abstentions', async () => {
+  const item = { kind: 'text', name: 'note.txt', candidateText: 'Synthetic note', mediaPreview: null }
+  const flagged = review()
+  flagged.verification.finalTextValidation.residualUnitsByCategory.PII = 1
+  assert.match(reviewCopyBlockReason(flagged, item), /final text scan flagged/)
+  await assert.rejects(downloadDemoCandidate(item, flagged), /final text scan flagged/)
+  assert.equal(reviewCopyBlockReason(flagged, item, true), '')
+  const abstained = review()
+  abstained.verification.finalTextValidation.abstainedArtifacts = 1
+  assert.match(reviewCopyBlockReason(abstained, item), /final text scan abstained/)
+  await assert.rejects(downloadDemoCandidate(item, abstained), /final text scan abstained/)
+  assert.match(reviewCopyBlockReason(abstained, item, true), /final text scan abstained/)
+  assert.equal(reviewCopyBlockReason(review(), item), '')
+  const mediaResidual = review()
+  mediaResidual.documents.push({ mediaPreview: { selfOcrResidualSources: 1 } })
+  assert.match(reviewCopyBlockReason(mediaResidual, item, true), /raster recheck/)
 })
 
 test('image candidate is a PNG even when the source was JPEG', async () => {
@@ -91,7 +128,9 @@ test('browser download clicks candidate filename and revokes the temporary URL',
     createElement: () => link, body: { append: () => events.push('append') },
   } })
   t.after(() => { delete globalThis.document })
-  await downloadDemoCandidate({ kind: 'text', name: 'input.txt', text: 'source', candidateText: 'candidate', mediaPreview: null })
+  const flagged = review()
+  flagged.verification.finalTextValidation.residualUnitsByCategory.PII = 1
+  await downloadDemoCandidate({ kind: 'text', name: 'input.txt', text: 'source', candidateText: 'candidate', mediaPreview: null }, flagged, true)
   assert.equal(link.download, 'input.candidate.txt')
   assert.deepEqual(events, ['append', 'click', 'remove', 'revoke'])
 })

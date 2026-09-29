@@ -70,6 +70,15 @@ test('real HTTP intake, withholding, independent review and isolation', { timeou
     assert.equal(batch.verification.annotationScore.exact.truePositives, 2)
     assert.equal(batch.verification.aggregateScorecard.qualification, 'NOT_QUALIFIED')
     assert.equal(batch.verification.aggregateScorecard.finalArtifactValidation.status, 'ABSTAINED')
+    const scalarText = '[{"latitude":37.7749,"meeting_duration":30}]'
+    const encodedText = 'https://example.org/contact?email=riya%40example.org&theme=dark'
+    const contractBatch = await inspectSyntheticBatch({ apiBase: base, token: processor, files: [
+      { id: 'scalar', name: 'scalar.json', size: Buffer.byteLength(scalarText), contentBase64: Buffer.from(scalarText).toString('base64') },
+      { id: 'url', name: 'url.txt', size: Buffer.byteLength(encodedText), contentBase64: Buffer.from(encodedText).toString('base64') },
+    ], manualNames: [], aliasOverrides: {} })
+    assert.ok(contractBatch.entities.some(entity => entity.strategy === 'SCALAR_NULLIFICATION' && entity.alias === 'null'))
+    assert.ok(contractBatch.entities.some(entity => entity.strategy === 'EMAIL_TEST_ADDRESS' && entity.alias.includes('%40')))
+    assert.equal(JSON.parse(contractBatch.documents[0].candidateText)[0].latitude, null)
     const excluded = await inspectSyntheticBatch({ apiBase: base, token: processor, files: [
       { id: 'mail', name: 'mail.txt', size: Buffer.byteLength(mailText), contentBase64: Buffer.from(mailText).toString('base64') },
       { id: 'record', name: 'record.json', size: Buffer.byteLength(recordText), contentBase64: Buffer.from(recordText).toString('base64') },
