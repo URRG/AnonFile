@@ -28,3 +28,16 @@ test('CI audits resolved dependencies and builds both development images', () =>
   assert.match(workflow, /docker compose build api web/)
   assert.doesNotMatch(workflow, /continue-on-error:\s*true/)
 })
+test('development image bases are digest-pinned across all stages', () => {
+  const api = read('../../../services/api/Dockerfile')
+  const web = read('../Dockerfile')
+  const apiBases = [...api.matchAll(/^FROM\s+(\S+)/gm)].map(match => match[1])
+  const webBases = [...web.matchAll(/^FROM\s+(\S+)/gm)].map(match => match[1])
+  assert.equal(apiBases.length, 1)
+  assert.deepEqual(webBases.slice(1, 3), ['source', 'source'])
+  assert.equal(webBases.length, 4)
+  for (const base of [...apiBases, webBases[0], webBases[3]]) {
+    assert.match(base, /^\S+@sha256:[a-f0-9]{64}$/)
+  }
+  assert.equal(webBases[0], webBases[3])
+})
