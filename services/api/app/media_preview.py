@@ -372,7 +372,10 @@ def _pdf_pages_locked(raw: bytes) -> tuple[list[Any], list[str]]:
         reader = PdfReader(BytesIO(raw), strict=True)
         root = reader.trailer["/Root"]
         if (reader.is_encrypted or not 1 <= len(reader.pages) <= MAX_MEDIA_PAGES or
-                root.get("/AcroForm") or root.get("/Names") or root.get("/OpenAction")):
+                any(key in root for key in ("/AcroForm", "/Names", "/OpenAction", "/AA",
+                                            "/AF", "/OCProperties", "/Collection")) or
+                any(key in page for page in reader.pages
+                    for key in ("/Annots", "/AA", "/AF", "/PresSteps"))):
             raise ValueError
         pdf = pdfium.PdfDocument(raw)
         try:
@@ -441,6 +444,28 @@ def extract_media(raw: bytes, extension: str) -> tuple[str, list[dict[str, Any]]
     return text, pages
 
 
+def _count_format_insensitive_whole_values(source: str, line: str) -> int:
+    """Ignore separators inside an ID, but not longer tokens around it."""
+    if not source:
+        return 0
+    offsets = [index for index, char in enumerate(line) if char.isalnum()]
+    compact = "".join(line[index] for index in offsets)
+
+    def adjacent_digit(index: int, step: int) -> bool:
+        while 0 <= index < len(line) and line[index] in " \t()+-.":
+            index += step
+        return 0 <= index < len(line) and line[index].isdecimal()
+
+    count = 0
+    for match in re.finditer(re.escape(source), compact):
+        start, end = offsets[match.start()], offsets[match.end() - 1] + 1
+        if ((start == 0 or not line[start - 1].isalnum()) and
+                (end == len(line) or not line[end].isalnum()) and
+                not adjacent_digit(start - 1, -1) and not adjacent_digit(end, 1)):
+            count += 1
+    return count
+
+
 def _verify_pdf_text_layer(native_text: str, lines: list[dict[str, Any]]) -> None:
     """Reject an OCR transcript that omits a recognized born-digital signal.
 
@@ -451,10 +476,10 @@ def _verify_pdf_text_layer(native_text: str, lines: list[dict[str, Any]]) -> Non
     ocr_values = [line["text"].casefold() for line in lines]
     required: Counter[tuple[str, str]] = Counter()
     for span in detect_text(native_text):
-        if span.entity_type not in {"EMAIL", "PAN", "PHONE", "IP_ADDRESS", "AADHAAR", "CARD",
-                                    "FINANCIAL_ACCOUNT", "DEVICE_ID", "VEHICLE_ID", "USER_ID",
-                                    "GOVERNMENT_ID", "DATE_OF_BIRTH"}:
-            continue
+        # Every rules candidate in the native layer must be visible to OCR,
+        # including credentials, health, business and quasi-identifier spans.
+        # This can abstain on layout differences; it never certifies that OCR
+        # found all raster-only content.
         source = native_text[span.start:span.end].casefold()
         if span.entity_type in {"PHONE", "AADHAAR", "CARD", "FINANCIAL_ACCOUNT", "DEVICE_ID", "VEHICLE_ID"}:
             source = "".join(char for char in source if char.isalnum())
@@ -475,12 +500,13 @@ def _verify_pdf_text_layer(native_text: str, lines: list[dict[str, Any]]) -> Non
             source = " ".join(source.split())
         required[(kind, source)] += 1
     for (kind, source), count in required.items():
+        whole = re.compile(rf"(?<!\w){re.escape(source)}(?!\w)")
         if kind == "ADDRESS":
-            present = " ".join(" ".join(ocr_values).split()).count(source)
+            present = sum(1 for _ in whole.finditer(" ".join(" ".join(ocr_values).split())))
+        elif kind in {"PHONE", "AADHAAR", "CARD", "FINANCIAL_ACCOUNT", "DEVICE_ID", "VEHICLE_ID"}:
+            present = sum(_count_format_insensitive_whole_values(source, line) for line in ocr_values)
         else:
-            values = ("".join(char for char in line if char.isalnum()) for line in ocr_values) if kind in {
-                "PHONE", "AADHAAR", "CARD", "FINANCIAL_ACCOUNT", "DEVICE_ID", "VEHICLE_ID"} else iter(ocr_values)
-            present = sum(line.count(source) for line in values)
+            present = sum(1 for line in ocr_values for _ in whole.finditer(line))
         if present < count:
             raise PayloadError("PDF text-layer and OCR disagree on a sensitive value; inspect the source manually.")
 

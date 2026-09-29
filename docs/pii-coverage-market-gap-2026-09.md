@@ -25,7 +25,7 @@ inventory, not a claim to have exhaustively enumerated those catalogs.
 | Device, account and online identity | IP/MAC, handles and structured IMEI/device/cookie/advertising IDs. This tranche fixes labelled IMEI and employee/staff IDs | AWS/Azure list URL, username, VIN/MAC. Add source-safe handling of personal data in URL paths/query strings, session IDs, mobile ad IDs and organization-specific identifiers. Public URLs alone are not always PII. |
 | Travel/customer references | Demo-specific booking references and passenger context; generic core lacks a dedicated travel-record class | Vendor custom recognizer mechanisms can cover domain-specific IDs. Define a separate travel/customer-record taxonomy and supplier-specific dictionaries before deploying beyond the airline demo. |
 | Credentials and cloud tokens | Generic labelled passwords/keys, authorization tokens; many provider-specific tokens and connection strings are not recognized | AWS lists access keys and Azure lists cloud secrets. Add provider-specific secret recognizers with strict tests; treat as security-sensitive even when not personal. |
-| PDF/image/Office/audio and non-text identifiers | Bounded PDF/image OCR and review/redaction preview; no DOCX/XLSX, audio, face/signature/biometric, QR/barcode or metadata-wide guarantee | Presidio has image/structured examples and Azure document PII supports PDF/DOCX/TXT. These need separate parsers, media provenance, final-byte inspection and abstention; text rules alone cannot close them. |
+| PDF/image/Office/audio and non-text identifiers | Bounded PDF/image OCR and review/redaction preview. The PDF demo now rejects several known hidden/interactive containers before rasterization and checks every rules-detected native-text candidate against OCR. No DOCX/XLSX, audio, face/signature/biometric, QR/barcode or metadata-wide guarantee | Presidio has image/structured examples and Azure document PII supports PDF/DOCX/TXT. These need separate parsers, media provenance, final-byte inspection and abstention; text rules alone cannot close them. |
 | Quasi-identifiers and linkage | Labelled/field-bound age, birth year, postal code, demographics; no robust k-anonymity/linkage-risk qualification | Vendors expose age/date/location classes. Product requirement goes further: evaluate combinations and buyer auxiliary data, with holdout evidence and human release review. |
 
 ## First implementation tranche
@@ -67,15 +67,37 @@ the qualification gate.
   offsets, whole-value suppression, and structured field names. No blind
   sensitivity/precision claim is available without the annotated holdout.
 
+## Third implementation tranche: PDF hidden-container abstention
+
+- The bounded raster demo rejects catalog actions, associated files,
+  optional-content layers and collections, and page annotations/actions or
+  associated files before rendering. [PDF Association](https://pdfa.org/files-inside-pdf/)
+  documents that attachments can reside outside the ordinary embedded-file
+  name tree; [Adobe's PDF reference](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.5_v6.pdf)
+  describes optional-content groups. This is a narrow preflight, not a full
+  PDF object-graph inventory.
+- All rules-detected candidates in the native PDF text layer, including
+  credentials, health, business-confidential and quasi-identifier spans, must
+  now appear as whole values in the OCR transcript or the demo abstains.
+  Prefixes of longer OCR tokens no longer satisfy this check. Earlier the
+  cross-check covered only a subset of categories. Tests use synthetic
+  omissions and overlong lookalikes.
+- The raster candidate still discards original PDF objects and image metadata,
+  but **OCR cannot establish complete visual or hidden-content coverage**.
+  Nested associated files, scanned-image misses, QR/barcodes, signatures,
+  tagged content and metadata-wide checks remain pending. No release claim is
+  made from this same-engine cross-check.
+
 ## Next implementation order
 
 1. **P0 — Measured recall, not another broad regex claim.** Freeze the offered
    fictional text/PDF/image holdout, blind-label it, and measure names,
    addresses, identifier spans, OCR misses and final-byte residuals by format.
    Then add a local NER candidate adapter behind a fail-closed review boundary.
-2. **P0 — Hidden-media surfaces.** Inventory and either parse or abstain on
-   PDF attachments/annotations/hidden layers, EXIF, QR/barcodes and unsupported
-   Office or audio content before any downloadable candidate is called clean.
+2. **P0 — Hidden-media surfaces.** Bounded PDF catalog/page abstentions and a
+   broader native-text/OCR cross-check are done. Continue object-graph and
+   EXIF inventory, QR/barcode detection, and unsupported Office/audio status
+   before any downloadable candidate is called clean.
 3. **P1 — Versioned regional recognizers.** Canadian SIN and UK NHS now have
    bounded labelled/check-digit candidates. Continue one jurisdiction at a
    time (for example more IBAN countries) with independent labelled scorecard

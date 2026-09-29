@@ -5,11 +5,29 @@ from io import BytesIO
 
 from PIL import Image
 from PIL import ImageDraw, ImageFilter, ImageFont
-from pypdf import PdfReader
+from pypdf import PdfReader, PdfWriter
+from pypdf.generic import ArrayObject, NameObject
 import pytest
 
 from app.contracts import PayloadError
-from app.media_preview import _image_pdf, _ocr_lines, _verify_pdf_text_layer, render_candidate
+from app.media_preview import _image_pdf, _ocr_lines, _pdf_pages, _verify_pdf_text_layer, render_candidate
+
+
+@pytest.mark.parametrize(("scope", "key"), [
+    ("root", "/AA"), ("root", "/AF"), ("root", "/OCProperties"),
+    ("root", "/Collection"), ("page", "/Annots"), ("page", "/AA"),
+    ("page", "/AF"), ("page", "/PresSteps"),
+])
+def test_pdf_hidden_or_interactive_containers_abstain_before_raster(scope, key):
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    target = writer._root_object if scope == "root" else writer.pages[0]
+    target[NameObject(key)] = ArrayObject()
+    stream = BytesIO()
+    writer.write(stream)
+    with pytest.raises(PayloadError, match="unsupported for bounded raster review") as error:
+        _pdf_pages(stream.getvalue())
+    assert key not in str(error.value)
 
 
 def test_raster_pdf_has_only_new_image_content_and_no_extracted_text():
@@ -495,6 +513,19 @@ def test_pdf_text_layer_check_requires_every_sensitive_occurrence():
     _verify_pdf_text_layer(native, one_phone * 2)
 
 
+@pytest.mark.parametrize(("native", "overlong_ocr"), [
+    ("NHS number: 999 123 4578", "NHS number: 999 123 45789"),
+    ("SIN: 000 000 001", "SIN: 000 000 0012"),
+    ("password=fictional-secret", "password=fictional-secretary"),
+    ("Call +1 415 555 0148", "Call +1 415 555 01489"),
+    ("Call +1 415 555 0148", "Call +1 415 555 0148 9"),
+    ("Bank account 1234567890", "Bank account 9 1234567890"),
+])
+def test_pdf_text_layer_does_not_accept_sensitive_prefix_as_ocr_agreement(native, overlong_ocr):
+    with pytest.raises(PayloadError, match="PDF text-layer and OCR disagree"):
+        _verify_pdf_text_layer(native, [{"text": overlong_ocr}])
+
+
 @pytest.mark.parametrize("native", [
     "Bank account 1234567890",
     "IBAN DE89 3704 0044 0532 0130 00",
@@ -504,6 +535,12 @@ def test_pdf_text_layer_check_requires_every_sensitive_occurrence():
     "Passport number K1234567",
     "VIN 1HGCM82633A004352",
     "DOB: 1990-01-01",
+    "SIN: 000 000 001",
+    "NHS number: 999 123 4578",
+    "password=fictional-secret",
+    "diagnosis: fictional condition",
+    "confidential: fictional roadmap",
+    "age: 42",
 ])
 def test_pdf_text_layer_new_identifiers_must_survive_ocr(native):
     with pytest.raises(PayloadError, match="PDF text-layer and OCR disagree"):
