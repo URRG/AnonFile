@@ -66,3 +66,10 @@ families. It does **not** infer those categories from arbitrary field names,
 unlabelled prose or embedded media. Numeric/boolean sensitive JSON values and
 quoted multiline CSV cells remain unsupported in the batch preview rather
 than being silently emitted or given a misleading schema-preservation claim.
+
+The [September 2026 market-gap ledger](pii-coverage-market-gap-2026-09.md)
+compares these bounded paths with current AWS, Azure, Google and Presidio
+catalogues. Its first contextual tranche adds explicitly labelled US SSN/ITIN
+shapes, UK NINO, Indian voter ID, IMEI and employee/staff IDs to the core
+processor. Those are candidates on fictional tests, not validated coverage
+for any issuing authority or unlabelled document.

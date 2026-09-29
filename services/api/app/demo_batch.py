@@ -339,11 +339,13 @@ def _structured_fields(document: dict[str, Any]) -> list[tuple[int, int, str]]:
         for match in JSON_FIELD.finditer(text):
             try:
                 field_name = json.loads('"' + match.group("key") + '"')
-                field = _field_type(field_name)
             except (ValueError, UnicodeError):
                 continue
-            field = field or ((CONTEXTUAL_FIELD_KINDS.get("".join(char for char in field_name.casefold() if char.isalnum())), "high")
-                              if "".join(char for char in field_name.casefold() if char.isalnum()) in CONTEXTUAL_FIELD_KINDS else None)
+            normalized_field = "".join(char for char in field_name.casefold() if char.isalnum())
+            # Demo-specific, format-aware IDs retain their subtype when a
+            # general processor field alias is added for the same key.
+            field = ((CONTEXTUAL_FIELD_KINDS[normalized_field], "high")
+                     if normalized_field in CONTEXTUAL_FIELD_KINDS else _field_type(field_name))
             if not field or match.group("value") == "null":
                 continue
             value = match.group("value")
@@ -377,8 +379,8 @@ def _structured_fields(document: dict[str, Any]) -> list[tuple[int, int, str]]:
             else:
                 for field_name, (start, end) in zip(header, spans):
                     normalized_field = "".join(char for char in field_name.casefold() if char.isalnum())
-                    field = _field_type(field_name) or ((CONTEXTUAL_FIELD_KINDS[normalized_field], "high")
-                                                  if normalized_field in CONTEXTUAL_FIELD_KINDS else None)
+                    field = ((CONTEXTUAL_FIELD_KINDS[normalized_field], "high")
+                             if normalized_field in CONTEXTUAL_FIELD_KINDS else _field_type(field_name))
                     if field and end > start:
                         if end - start > 120:
                             raise PayloadError("A sensitive structured field exceeds the review value limit.")
@@ -1070,9 +1072,13 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
         source_by_key.setdefault(key, source)
 
     for doc in documents:
+        contextual = contextual_spans(doc["text"])
+        employee_ranges = {(start, end) for start, end, kind in contextual if kind == "EMPLOYEE_ID"}
         for span in detect_text(doc["text"]):
+            if span.entity_type == "USER_ID" and (span.start, span.end) in employee_ranges:
+                continue
             remember(span.entity_type, doc["text"][span.start:span.end])
-        for start, end, kind in contextual_spans(doc["text"]):
+        for start, end, kind in contextual:
             remember(kind, doc["text"][start:end])
         for start, end, kind in doc["_fields"]:
             remember(kind, doc["text"][start:end])
@@ -1174,6 +1180,8 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
     for doc in documents:
         text = doc["text"]
         spans: list[tuple[int, int, str, int, str]] = []
+        contextual = contextual_spans(text)
+        employee_ranges = {(start, end) for start, end, kind in contextual if kind == "EMPLOYEE_ID"}
         for start, end, kind in doc["_fields"]:
             entity_id = id_by_key[(kind, text[start:end].casefold())]
             spans.append((start, end, entity_id, 3, "AUTOMATIC"))
@@ -1181,9 +1189,11 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
             entity_id = id_by_key[("GOVERNMENT_ID", text[start:end].casefold())]
             spans.append((start, end, entity_id, 3, "AUTOMATIC"))
         for span in detect_text(text):
+            if span.entity_type == "USER_ID" and (span.start, span.end) in employee_ranges:
+                continue
             entity_id = id_by_key[(span.entity_type, text[span.start:span.end].casefold())]
             spans.append((span.start, span.end, entity_id, 2, "AUTOMATIC"))
-        for start, end, kind in contextual_spans(text):
+        for start, end, kind in contextual:
             entity_id = id_by_key[(kind, text[start:end].casefold())]
             spans.append((start, end, entity_id, 2, "AUTOMATIC"))
         for normalized in names_by_key:

@@ -30,7 +30,7 @@ RULES_METHOD_ID = "rules-v1"
 # beyond the declarative inputs below.  The digest is a reproducible identity,
 # not an assertion that these bounded rules are sufficient for release.
 RULES_METHOD_VERSION = "rules-processor-v1"
-RULES_METHOD_ALGORITHM_REVISION = "rules-processing-algorithm-v2"
+RULES_METHOD_ALGORITHM_REVISION = "rules-processing-algorithm-v3"
 RULES_METHOD_BUILD_REVISION = "anonflow-m9"
 _RULES_METHOD_CONFIG_SCHEMA = "rules-processing-config-v1"
 LIMITATIONS = (
@@ -81,6 +81,29 @@ _USER_HANDLE = re.compile(
 _IDENTITY_DOCUMENT = re.compile(
     r"(?i)\b(?:passport|driver'?s?\s+licen[cs]e)(?:\s+(?:number|no\.?))?\s*(?:[:=#-]\s*|\s+)(?P<value>[A-Z0-9]{6,16})(?!\w)"
 )
+# These free-text identifiers require an immediately preceding explicit label.
+# Shape alone is not evidence of an issued ID; fictional invalid examples are
+# still candidates, so no registry/validity claim is made.
+_US_TAX_ID = re.compile(
+    r"(?i)\b(?:ssn|social[ \t]+security(?:[ \t]+number)?|itin|individual[ \t]+taxpayer[ \t]+identification(?:[ \t]+number)?)"
+    r"[ \t]*(?:[:=#-][ \t]*|[ \t]+)(?P<value>[0-9]{3}[- ]?[0-9]{2}[- ]?[0-9]{4})(?![\w-])"
+)
+_UK_NINO = re.compile(
+    r"(?i)\b(?:nino|national[ \t]+insurance(?:[ \t]+number)?)[ \t]*(?:[:=#-][ \t]*|[ \t]+)"
+    r"(?P<value>[A-Z]{2}(?:[ \t]?[0-9]{2}){3}[ \t]?[A-D])(?![\w-])"
+)
+_IN_VOTER_ID = re.compile(
+    r"(?i)\b(?:voter[ \t]*(?:id|number)|epic(?:[ \t]*(?:id|number))?)[ \t]*(?:[:=#-][ \t]*|[ \t]+)"
+    r"(?P<value>[A-Z]{3}[0-9]{7})(?![\w-])"
+)
+_IMEI_CONTEXT = re.compile(
+    r"(?i)\bimei(?:[ \t]*(?:number|no\.?))?[ \t]*(?:[:=#-][ \t]*|[ \t]+)"
+    r"(?P<value>[0-9]{15})(?![\w-])"
+)
+_EMPLOYEE_ID = re.compile(
+    r"(?i)\b(?:employee|staff)[ \t]*id[ \t]*[:=#][ \t]*"
+    r"(?P<value>[A-Z0-9]{2,12}(?:-[A-Z0-9]{2,12}){0,2})(?![\w-])"
+)
 _VEHICLE_VIN = re.compile(
     r"(?i)\b(?:vin|vehicle\s+identification\s+number)\s*(?:[:=#-]\s*|\s+)(?P<value>[A-HJ-NPR-Z0-9]{17})(?!\w)"
 )
@@ -129,7 +152,7 @@ for _names, _kind, _severity in (
     (("macaddress", "deviceid", "deviceserial", "imei", "imsi", "advertisingid", "mobileadvertisingid",
       "cookieid", "rfidtag"), "DEVICE_ID", "high"),
     (("username", "userid", "accountid", "socialhandle", "socialmediahandle", "screenname",
-      "profileid"), "USER_ID", "high"),
+      "profileid", "employeeid", "staffid"), "USER_ID", "high"),
     (("name", "firstname", "lastname", "fullname", "customername", "passengername", "patientname"), "PERSON_NAME", "high"),
     (("address", "street", "streetaddress", "homeaddress", "billingaddress", "shippingaddress"), "ADDRESS", "high"),
     (("email", "emailaddress"), "EMAIL", "high"),
@@ -169,6 +192,11 @@ def _rules_method_identity_config(*, algorithm_revision: str, build_revision: st
         ("ipv6", _IPV6.pattern, _IPV6.flags), ("mac", _MAC.pattern, _MAC.flags),
         ("user_handle", _USER_HANDLE.pattern, _USER_HANDLE.flags),
         ("identity_document", _IDENTITY_DOCUMENT.pattern, _IDENTITY_DOCUMENT.flags),
+        ("us_tax_id", _US_TAX_ID.pattern, _US_TAX_ID.flags),
+        ("uk_nino", _UK_NINO.pattern, _UK_NINO.flags),
+        ("in_voter_id", _IN_VOTER_ID.pattern, _IN_VOTER_ID.flags),
+        ("imei_context", _IMEI_CONTEXT.pattern, _IMEI_CONTEXT.flags),
+        ("employee_id", _EMPLOYEE_ID.pattern, _EMPLOYEE_ID.flags),
         ("vehicle_vin", _VEHICLE_VIN.pattern, _VEHICLE_VIN.flags),
         ("birth_context", _BIRTH_CONTEXT.pattern, _BIRTH_CONTEXT.flags),
         ("health_context", _HEALTH_CONTEXT.pattern, _HEALTH_CONTEXT.flags),
@@ -276,13 +304,23 @@ def detect_text(text: str) -> tuple[Span, ...]:
         add(match.start(), match.end(), "DEVICE_ID", "high")
     for pattern, kind, severity in ((_USER_HANDLE, "USER_ID", "high"),
                                     (_IDENTITY_DOCUMENT, "GOVERNMENT_ID", "high"),
+                                    (_US_TAX_ID, "GOVERNMENT_ID", "critical"),
+                                    (_UK_NINO, "GOVERNMENT_ID", "critical"),
+                                    (_IN_VOTER_ID, "GOVERNMENT_ID", "critical"),
+                                    (_EMPLOYEE_ID, "USER_ID", "high"),
                                     (_VEHICLE_VIN, "VEHICLE_ID", "high"),
                                     (_BIRTH_CONTEXT, "DATE_OF_BIRTH", "high")):
         for match in pattern.finditer(normalized):
             start, end = match.span("value")
             add(start, end, kind, severity)
+    imei_ranges = {match.span("value") for match in _IMEI_CONTEXT.finditer(normalized)}
+    for start, end in sorted(imei_ranges):
+        add(start, end, "DEVICE_ID", "high")
     for match in _NUMBER.finditer(normalized):
         value = match.group()
+        # A labelled IMEI is not a payment card merely because it has 15 digits.
+        if match.span() in imei_ranges:
+            continue
         digits = sum(char.isdecimal() for char in value)
         if digits < 10:
             continue

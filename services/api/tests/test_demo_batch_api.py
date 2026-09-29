@@ -896,6 +896,22 @@ def test_contextual_structured_fields_link_across_json_and_csv(demo_client):
     assert all(document["structure_check"] == "pass" for document in body["documents"])
 
 
+def test_employee_id_prose_keeps_demo_specific_subtype(demo_client):
+    request = {"synthetic_only": True, "files": [
+        file("mail", "handoff.txt", "Employee ID: ENG-4821 completed the handoff."),
+        file("note", "notes.txt", "Employee ID: ENG-4821 reviewed the notes."),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    employee = next(item for item in body["entities"] if item["kind"] == "EMPLOYEE_ID"
+                    and item["source"] == "ENG-4821")
+    assert employee["mentions"] == 2
+    assert not any(item["kind"] == "USER_ID" and item["source"] == "ENG-4821"
+                   for item in body["entities"])
+    assert all("ENG-4821" not in document["candidate_text"] for document in body["documents"])
+
+
 def test_explicit_structured_international_address_is_reviewed_without_classifying_public_link(demo_client):
     address = "Flat 4, 12 Sample Road, Pune"
     public_link = "https://public.example.com/pr/4"
