@@ -85,6 +85,21 @@ def test_batch_review_suppresses_sensitive_url_query_values_without_masking_publ
     assert body["verification"]["status"] == "REVIEW_REQUIRED"
 
 
+def test_batch_review_suppresses_unlabelled_aws_key_in_two_files(demo_client):
+    fictional_key = "AKIA" + "Z" * 16
+    request = {"synthetic_only": True, "files": [
+        file("log", "log.txt", "Connection used " + fictional_key),
+        file("config", "config.txt", "Access id " + fictional_key),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert all(fictional_key not in document["candidate_text"] for document in body["documents"])
+    assert all(fictional_key not in str(entity) for entity in body["entities"])
+    assert any(entity["kind"] == "CREDENTIAL" for entity in body["entities"])
+    assert body["verification"]["status"] == "REVIEW_REQUIRED"
+
+
 def test_encoded_query_email_reuses_plain_email_alias_without_breaking_url(demo_client):
     request = {"synthetic_only": True, "files": [
         file("plain", "plain.txt", "Contact riya@example.org"),

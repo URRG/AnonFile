@@ -33,7 +33,7 @@ RULES_METHOD_ID = "rules-v1"
 # beyond the declarative inputs below.  The digest is a reproducible identity,
 # not an assertion that these bounded rules are sufficient for release.
 RULES_METHOD_VERSION = "rules-processor-v1"
-RULES_METHOD_ALGORITHM_REVISION = "rules-processing-algorithm-v5"
+RULES_METHOD_ALGORITHM_REVISION = "rules-processing-algorithm-v6"
 RULES_METHOD_BUILD_REVISION = "anonflow-m9"
 _RULES_METHOD_CONFIG_SCHEMA = "rules-processing-config-v2"
 LIMITATIONS = (
@@ -64,6 +64,9 @@ _CREDENTIAL = re.compile(
     re.MULTILINE,
 )
 _AUTH_TOKEN = re.compile(r"(?i)\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+")
+# AWS documents AKIA and ASIA as access-key ID prefixes. This is a
+# source-shaped credential candidate, not a live-key or account lookup.
+_AWS_ACCESS_KEY_ID = re.compile(r"(?<!\w)(?:AKIA|ASIA)[A-Z0-9]{16}(?!\w)")
 _EMAIL = re.compile(r"(?<![\w.!#$%&'*+/=?^`{|}~-])[\w.!#$%&'*+/=?^`{|}~-]+@[\w-]+(?:\.[\w-]+)+", re.UNICODE)
 _PAN = re.compile(r"(?<!\w)[A-Z]{5}[0-9]{4}[A-Z](?!\w)", re.IGNORECASE)
 # A deliberately narrow free-text IBAN shape. Other jurisdictions still need
@@ -189,6 +192,7 @@ def _rules_method_identity_config(*, algorithm_revision: str, build_revision: st
         ("reserved_marker", _RESERVED_MARKER.pattern, _RESERVED_MARKER.flags),
         ("credential", _CREDENTIAL.pattern, _CREDENTIAL.flags),
         ("authorization", _AUTH_TOKEN.pattern, _AUTH_TOKEN.flags),
+        ("aws_access_key_id", _AWS_ACCESS_KEY_ID.pattern, _AWS_ACCESS_KEY_ID.flags),
         ("email", _EMAIL.pattern, _EMAIL.flags), ("pan", _PAN.pattern, _PAN.flags),
         ("gb_iban", _GB_IBAN.pattern, _GB_IBAN.flags),
         ("de_iban", _DE_IBAN.pattern, _DE_IBAN.flags),
@@ -282,6 +286,7 @@ def detect_text(text: str) -> tuple[Span, ...]:
 
     for pattern, kind, severity in ((_CREDENTIAL, "CREDENTIAL", "critical"),
                                     (_AUTH_TOKEN, "CREDENTIAL", "critical"),
+                                    (_AWS_ACCESS_KEY_ID, "CREDENTIAL", "critical"),
                                     (_EMAIL, "EMAIL", "high"), (_PAN, "PAN", "high"),
                                     (_HEALTH_CONTEXT, "HEALTH_SENSITIVE", "high"),
                                     (_BUSINESS_CONTEXT, "BUSINESS_CONFIDENTIAL", "high"),
