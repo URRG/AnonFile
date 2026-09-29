@@ -31,6 +31,8 @@ MAX_OCR_CHARS = 30_000
 MAX_PNG_BYTES = 2_500_000
 MAX_CANDIDATE_PDF_BYTES = 10_000_000
 PDF_SCALE = 1.7
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_PNG_PIXEL_CHUNKS = frozenset({b"IHDR", b"IDAT", b"IEND"})
 # A claimed OCR line with no pixel transition at all is not defensible source
 # geometry. This deliberately detects only catastrophic blur/flat raster data;
 # it is not a readability, language, or OCR-coverage threshold.
@@ -341,6 +343,25 @@ def _ocr_lines(image: Any, *, require_confidence: bool = True, validate_layout: 
     return lines
 
 
+def _pixels_only_rgb(image: Any) -> Any:
+    """Flatten visible pixels, then copy them without source metadata.
+
+    A direct RGBA-to-RGB conversion exposes RGB values under zero alpha. Those
+    hidden pixels must not become visible in OCR or the returned candidate.
+    """
+    from PIL import Image
+
+    if "A" in image.getbands() or "transparency" in image.info:
+        background = Image.new("RGBA", image.size, (255, 255, 255, 255))
+        background.alpha_composite(image.convert("RGBA"))
+        rgb = background.convert("RGB")
+    else:
+        rgb = image.convert("RGB")
+    clean = Image.new("RGB", rgb.size)
+    clean.paste(rgb)
+    return clean
+
+
 def _image_pages(raw: bytes, extension: str) -> list[Any]:
     from PIL import Image, ImageOps, UnidentifiedImageError
 
@@ -354,7 +375,7 @@ def _image_pages(raw: bytes, extension: str) -> list[Any]:
             raise ValueError
         image = ImageOps.exif_transpose(source)
         image.load()
-        return [image.convert("RGB")]
+        return [_pixels_only_rgb(image)]
     except (ValueError, OSError, UnidentifiedImageError):
         raise PayloadError("The image is unsupported or exceeds the synthetic demo pixel limit.") from None
 
@@ -401,7 +422,7 @@ def _pdf_pages_locked(raw: bytes) -> tuple[list[Any], list[str]]:
                         textpage.close()
                     bitmap = page.render(scale=PDF_SCALE, draw_annots=True, rev_byteorder=True)
                     try:
-                        pages.append(bitmap.to_pil().convert("RGB").copy())
+                        pages.append(_pixels_only_rgb(bitmap.to_pil()))
                     finally:
                         bitmap.close()
                 finally:
@@ -511,12 +532,45 @@ def _verify_pdf_text_layer(native_text: str, lines: list[dict[str, Any]]) -> Non
             raise PayloadError("PDF text-layer and OCR disagree on a sensitive value; inspect the source manually.")
 
 
+def _assert_png_pixel_chunks(data: bytes) -> None:
+    """Reject metadata or trailing bytes in the actual encoded PNG."""
+    # A source-free raster is not enough if an encoder adds or retains an
+    # ancillary EXIF/XMP/text/ICC chunk. Accept only mandatory pixel chunks
+    # in the exact bytes that the demo returns or embeds in a rebuilt PDF.
+    if not data.startswith(_PNG_SIGNATURE):
+        raise PayloadError("The media preview PNG has unsupported non-pixel content.")
+    offset = len(_PNG_SIGNATURE)
+    saw_header = saw_pixels = saw_end = False
+    while offset + 12 <= len(data):
+        length = int.from_bytes(data[offset:offset + 4], "big")
+        kind = data[offset + 4:offset + 8]
+        end = offset + 12 + length
+        if kind not in _PNG_PIXEL_CHUNKS or end > len(data):
+            raise PayloadError("The media preview PNG has unsupported non-pixel content.")
+        if kind == b"IHDR":
+            if saw_header or saw_pixels or saw_end or length != 13:
+                raise PayloadError("The media preview PNG has unsupported non-pixel content.")
+            saw_header = True
+        elif kind == b"IDAT":
+            if not saw_header or saw_end:
+                raise PayloadError("The media preview PNG has unsupported non-pixel content.")
+            saw_pixels = True
+        else:
+            if not saw_pixels or saw_end or length != 0 or end != len(data):
+                raise PayloadError("The media preview PNG has unsupported non-pixel content.")
+            saw_end = True
+        offset = end
+    if not saw_end or offset != len(data):
+        raise PayloadError("The media preview PNG has unsupported non-pixel content.")
+
+
 def _png_bytes(image: Any) -> bytes:
     stream = BytesIO()
-    image.save(stream, format="PNG", optimize=True)
+    _pixels_only_rgb(image).save(stream, format="PNG", optimize=True)
     data = stream.getvalue()
     if len(data) > MAX_PNG_BYTES:
         raise PayloadError("A media preview page exceeds the synthetic demo response limit.")
+    _assert_png_pixel_chunks(data)
     return data
 
 

@@ -25,7 +25,7 @@ inventory, not a claim to have exhaustively enumerated those catalogs.
 | Device, account and online identity | IP/MAC, handles, structured IMEI/device/cookie/advertising IDs, labelled employee/staff IDs and a bounded set of explicit HTTP(S) query keys (session, patient, customer and similar IDs). Public URL hosts/paths remain untouched | AWS/Azure list URL, username, VIN/MAC. Continue source-safe handling of personal data in URL paths, arbitrary/relative URLs, mobile ad IDs and organization-specific identifiers. Public URLs alone are not always PII. |
 | Travel/customer references | Demo-specific booking references and passenger context; generic core lacks a dedicated travel-record class | Vendor custom recognizer mechanisms can cover domain-specific IDs. Define a separate travel/customer-record taxonomy and supplier-specific dictionaries before deploying beyond the airline demo. |
 | Credentials and cloud tokens | Generic labelled passwords/keys, authorization tokens; many provider-specific tokens and connection strings are not recognized | AWS lists access keys and Azure lists cloud secrets. Add provider-specific secret recognizers with strict tests; treat as security-sensitive even when not personal. |
-| PDF/image/Office/audio and non-text identifiers | Bounded PDF/image OCR and review/redaction preview. The PDF demo now rejects several known hidden/interactive containers before rasterization and checks every rules-detected native-text candidate against OCR. No DOCX/XLSX, audio, face/signature/biometric, QR/barcode or metadata-wide guarantee | Presidio has image/structured examples and Azure document PII supports PDF/DOCX/TXT. These need separate parsers, media provenance, final-byte inspection and abstention; text rules alone cannot close them. |
+| PDF/image/Office/audio and non-text identifiers | Bounded PDF/image OCR and review/redaction preview. The PDF demo rejects selected hidden/interactive containers and cross-checks rules-detected native text. Input image pixels are EXIF-oriented, alpha-flattened and rebuilt without source metadata; encoded PNG chunks are checked. No DOCX/XLSX, audio, face/signature/biometric, QR/barcode or metadata-wide guarantee | Presidio has image/structured examples and Azure document PII supports PDF/DOCX/TXT. These need separate parsers, media provenance, final-byte inspection and abstention; text rules alone cannot close them. |
 | Quasi-identifiers and linkage | Labelled/field-bound age, birth year, postal code, demographics; no robust k-anonymity/linkage-risk qualification | Vendors expose age/date/location classes. Product requirement goes further: evaluate combinations and buyer auxiliary data, with holdout evidence and human release review. |
 
 ## First implementation tranche
@@ -109,6 +109,21 @@ the qualification gate.
   rendering. Relative URLs, unusual query separators, HTML-escaped `&amp;`,
   provider-specific keys and values hidden in URL paths are not yet qualified.
 
+## Fifth implementation tranche: source image metadata and alpha
+
+- JPEG/PNG orientation is applied before copying only visible RGB pixels into
+  a fresh image without the source `info` dictionary. Transparent source
+  colors are composited onto white, not exposed by dropping alpha. The exact
+  candidate PNG bytes are checked for pixel-only `IHDR`/`IDAT`/`IEND` chunks;
+  EXIF, XMP, text, ICC and trailing data cause abstention if an encoder emits
+  them. [Pillow's security guidance](https://pillow.readthedocs.io/en/stable/handbook/security.html)
+  recommends treating image metadata as untrusted and stripping it when not
+  needed. Synthetic tests cover EXIF orientation, private metadata, ancillary
+  chunks and fully transparent dark pixels.
+- This establishes a narrow **output-metadata** property for generated PNGs,
+  not a source-metadata inventory or assurance that all visible text, QR codes,
+  faces or other personal signals were found by OCR.
+
 ## Next implementation order
 
 1. **P0 — Measured recall, not another broad regex claim.** Freeze the offered
@@ -116,7 +131,8 @@ the qualification gate.
    addresses, identifier spans, OCR misses and final-byte residuals by format.
    Then add a local NER candidate adapter behind a fail-closed review boundary.
 2. **P0 — Hidden-media surfaces.** Bounded PDF catalog/page abstentions and a
-   broader native-text/OCR cross-check are done. Continue object-graph and
+   broader native-text/OCR cross-check are done. PNG output-metadata and alpha
+   handling are now bounded and checked. Continue PDF object-graph and source
    EXIF inventory, QR/barcode detection, and unsupported Office/audio status
    before any downloadable candidate is called clean.
 3. **P1 — Versioned regional recognizers.** Canadian SIN and UK NHS now have
