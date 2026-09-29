@@ -38,6 +38,13 @@ def test_residual_scanner_is_not_coupled_to_transformation_detector(monkeypatch)
     assert dict(result.residual_counts) == {"CREDENTIAL": 1, "PAYMENT": 0, "PII": 0}
 
 
+def test_independent_residual_scanner_finds_unlabelled_aws_key_without_returning_it():
+    fictional_key = "ASIA" + "Z" * 16
+    result = scan_residual_candidate([{"note": fictional_key}])
+    assert dict(result.residual_counts) == {"CREDENTIAL": 1, "PAYMENT": 0, "PII": 0}
+    assert fictional_key not in repr(result)
+
+
 def test_independent_scanner_explicitly_leaves_nonqualified_taxonomy_unassessed():
     result = scan_residual_candidate("diagnosis: synthetic-condition; internal roadmap: synthetic-roadmap; age: 47")
     assert dict(result.residual_counts) == {"CREDENTIAL": 0, "PAYMENT": 0, "PII": 0}

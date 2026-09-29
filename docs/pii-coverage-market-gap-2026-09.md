@@ -24,7 +24,7 @@ inventory, not a claim to have exhaustively enumerated those catalogs.
 | Payment and banking | Card-length candidates, PAN shape, labelled US account/routing, GB/DE IBAN; structured CVV/PIN/crypto fields | AWS/Presidio list broader IBAN, SWIFT, crypto and expiry recognizers. Next: checksum-aware, jurisdiction-specific candidates with controlled false positives and non-working surrogates. |
 | Device, account and online identity | IP/MAC, handles, structured IMEI/device/cookie/advertising IDs, labelled employee/staff IDs and a bounded set of explicit HTTP(S) query keys (session, patient, customer and similar IDs). Public URL hosts/paths remain untouched | AWS/Azure list URL, username, VIN/MAC. Continue source-safe handling of personal data in URL paths, arbitrary/relative URLs, mobile ad IDs and organization-specific identifiers. Public URLs alone are not always PII. |
 | Travel/customer references | Demo-specific booking references and passenger context; generic core lacks a dedicated travel-record class | Vendor custom recognizer mechanisms can cover domain-specific IDs. Define a separate travel/customer-record taxonomy and supplier-specific dictionaries before deploying beyond the airline demo. |
-| Credentials and cloud tokens | Generic labelled passwords/keys, authorization tokens; many provider-specific tokens and connection strings are not recognized | AWS lists access keys and Azure lists cloud secrets. Add provider-specific secret recognizers with strict tests; treat as security-sensitive even when not personal. |
+| Credentials and cloud tokens | Generic labelled passwords/keys and authorization tokens, plus unlabelled AKIA/ASIA-shaped AWS access-key IDs; many provider-specific tokens and connection strings are not recognized | AWS lists access keys and Azure lists cloud secrets. Add provider-specific secret recognizers with strict tests; treat as security-sensitive even when not personal. |
 | PDF/image/Office/audio and non-text identifiers | Bounded PDF/image OCR and review/redaction preview. The PDF demo rejects selected hidden/interactive containers and cross-checks rules-detected native text. Input image pixels are EXIF-oriented, alpha-flattened and rebuilt without source metadata; encoded PNG chunks are checked. No DOCX/XLSX, audio, face/signature/biometric, QR/barcode or metadata-wide guarantee | Presidio has image/structured examples and Azure document PII supports PDF/DOCX/TXT. These need separate parsers, media provenance, final-byte inspection and abstention; text rules alone cannot close them. |
 | Quasi-identifiers and linkage | Labelled/field-bound age, birth year, postal code, demographics; no robust k-anonymity/linkage-risk qualification | Vendors expose age/date/location classes. Product requirement goes further: evaluate combinations and buyer auxiliary data, with holdout evidence and human release review. |
 
@@ -123,6 +123,23 @@ the qualification gate.
 - This establishes a narrow **output-metadata** property for generated PNGs,
   not a source-metadata inventory or assurance that all visible text, QR codes,
   faces or other personal signals were found by OCR.
+
+## Sixth implementation tranche: AWS access-key ID candidates
+
+- Unlabelled, uppercase `AKIA`/`ASIA` plus 16 alphanumeric characters are now
+  critical credential candidates in the core rules and synthetic batch demo.
+  The separate aggregate residual scanner also flags this narrow shape in a
+  candidate artifact. [AWS IAM's credential guidance](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html)
+  describes access-key IDs and paired secret keys, and
+  [AWS's git-secrets recognizer](https://github.com/awslabs/git-secrets) lists
+  these prefixes among its patterns. Synthetic tests check exact boundaries,
+  whole-value suppression, cross-file demo rendering and aggregate-only
+  residual reporting. The detector identities are versioned for this change.
+- A shape hit cannot establish a live credential or an associated person. It
+  can match fictional values. Secret access keys without an explicit label,
+  session tokens, other cloud providers, encoded keys and credentials split
+  across lines remain unqualified. Both detectors use similar shapes, so the
+  residual check is not independent evidence of coverage for this vector.
 
 ## Next implementation order
 

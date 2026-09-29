@@ -20,6 +20,25 @@ def test_credentials_are_critical_and_suppressed(secret):
     assert result.actual_operations[0].action.value == "REDACT"
 
 
+@pytest.mark.parametrize("prefix", ["AKIA", "ASIA"])
+def test_unlabelled_aws_access_key_id_is_a_whole_critical_credential_candidate(prefix):
+    fictional_key = prefix + "Z" * 16
+    text = f"before {fictional_key} after"
+    spans = detect_text(text)
+    assert [(span.entity_type, span.severity, text[span.start:span.end]) for span in spans] == [
+        ("CREDENTIAL", "critical", fictional_key)]
+    result = process_payload(content=text)
+    assert result.output == "before [REDACTED_CREDENTIAL] after"
+    assert fictional_key not in result.output
+
+
+def test_aws_key_shape_requires_exact_uppercase_token_boundaries():
+    fictional_key = "AKIA" + "Z" * 16
+    for lookalike in ("X" + fictional_key, fictional_key + "7", fictional_key + "_extra",
+                      "ø" + fictional_key, fictional_key.lower(), "AKIA" + "Z" * 15):
+        assert not any(span.entity_type == "CREDENTIAL" for span in detect_text(lookalike))
+
+
 def test_original_unicode_offsets_and_no_values_in_findings():
     text = "🙂東京 before pass\u200bword=synthetic after"
     spans = detect_text(text)
