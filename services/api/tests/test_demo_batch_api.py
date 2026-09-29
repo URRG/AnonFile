@@ -69,6 +69,39 @@ def test_batch_review_suppresses_labelled_regional_ids_in_two_files(demo_client)
     assert body["export_available"] is False
 
 
+def test_batch_review_suppresses_sensitive_url_query_values_without_masking_public_links(demo_client):
+    request = {"synthetic_only": True, "files": [
+        file("session", "session.txt", "https://example.org/view?session_id=fictional-abc&theme=dark"),
+        file("patient", "patient.txt", "https://example.org/chart?patient_id=PAT-7"),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    candidates = [document["candidate_text"] for document in body["documents"]]
+    assert "fictional-abc" not in candidates[0] and "PAT-7" not in candidates[1]
+    assert "https://example.org/view?session_id=" in candidates[0]
+    assert "theme=dark" in candidates[0]
+    assert {entity["kind"] for entity in body["entities"]} >= {"CREDENTIAL", "HEALTH_SENSITIVE"}
+    assert body["verification"]["status"] == "REVIEW_REQUIRED"
+
+
+def test_encoded_query_email_reuses_plain_email_alias_without_breaking_url(demo_client):
+    request = {"synthetic_only": True, "files": [
+        file("plain", "plain.txt", "Contact riya@example.org"),
+        file("url", "url.txt", "https://example.org/contact?email=riya%40example.org&theme=dark"),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    plain = next(entity for entity in body["entities"] if entity["source"] == "riya@example.org")
+    encoded = next(entity for entity in body["entities"] if entity["source"] == "riya%40example.org")
+    assert encoded["alias"] == plain["alias"].replace("@", "%40")
+    assert plain["alias"] in body["documents"][0]["candidate_text"]
+    assert encoded["alias"] in body["documents"][1]["candidate_text"]
+    assert "theme=dark" in body["documents"][1]["candidate_text"]
+    assert body["verification"]["source_value_residuals"] == 0
+
+
 def test_entity_graph_uses_typed_explicit_evidence_and_never_source_labels(demo_client):
     request = {"synthetic_only": True, "files": [
         file("mail", "thread.txt", "From: Maya Patel <maya.patel@private.example>\n"

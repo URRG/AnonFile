@@ -143,6 +143,59 @@ def test_regional_identifier_structured_fields(field, kind):
     assert result.output == [{field: f"[REDACTED_{kind}]"}]
 
 
+def test_explicit_url_query_keys_suppress_raw_and_percent_encoded_values_only():
+    text = ("https://example.org/view?session%5Fid=abc-123&theme=dark "
+            "https://example.org/patient?patient_id=PAT-7&customer_id=CUST-9 "
+            "https://example.org/contact?email=riya%40example.org#section")
+    spans = detect_text(text)
+    assert [(text[span.start:span.end], span.entity_type) for span in spans] == [
+        ("abc-123", "CREDENTIAL"), ("PAT-7", "HEALTH_SENSITIVE"),
+        ("CUST-9", "USER_ID"), ("riya%40example.org", "EMAIL"),
+    ]
+    output = process_payload(content=text).output
+    for value in ("abc-123", "PAT-7", "CUST-9", "riya%40example.org"):
+        assert value not in output
+    assert "theme=dark" in output and "#section" in output
+    assert "https://example.org/view?session%5Fid=" in output
+
+
+@pytest.mark.parametrize("text", [
+    "https://example.org/docs?theme=dark&release=2026",
+    "https://example.org/item?id=PUBLIC-7&ref=ISSUE-8",
+    "https://example.org/path/customer_id/CUST-9",
+    "ftp://example.org/view?session_id=fictional",
+    "https://example.org/search?email=not-an-email&theme=dark",
+])
+def test_public_or_ambiguous_url_parts_are_not_blanket_masked(text):
+    assert detect_text(text) == ()
+
+
+def test_url_query_value_stops_at_fragment_and_repeated_parameters_are_distinct():
+    text = "https://example.org/?session_id=first&session_id=second#session_id=third"
+    assert [text[span.start:span.end] for span in detect_text(text)] == ["first", "second"]
+
+
+@pytest.mark.parametrize(("key", "kind"), [
+    ("patient_id", "HEALTH_SENSITIVE"),
+    ("phone", "PHONE"),
+    ("session_id", "CREDENTIAL"),
+])
+def test_explicit_url_query_key_overrides_generic_numeric_length_guess(key, kind):
+    value = "123456789012"
+    text = f"https://example.org/view?{key}={value}"
+    spans = detect_text(text)
+    assert [(text[span.start:span.end], span.entity_type) for span in spans] == [(value, kind)]
+    assert value not in process_payload(content=text).output
+
+
+@pytest.mark.parametrize(("field", "kind"), [
+    ("session_id", "CREDENTIAL"), ("customer_id", "USER_ID"), ("passenger_id", "USER_ID"),
+])
+def test_explicit_structured_session_and_customer_ids(field, kind):
+    result = process_payload(records=[{field: "FICTIONAL-001"}])
+    assert result.output == [{field: f"[REDACTED_{kind}]"}]
+
+
 def test_overlong_labelled_imei_is_not_misrepresented_as_device_id():
     assert all(span.entity_type != "DEVICE_ID" for span in detect_text("IMEI: 4901542032375189"))
 
