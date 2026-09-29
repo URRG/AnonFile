@@ -6,6 +6,7 @@ import pytest
 
 from app.contracts import PayloadError
 from app.processing import MAX_BYTES, MAX_RECORDS, detect_text, process_payload
+from app.regional_identifiers import ca_sin_mod10_passes, uk_nhs_mod11_passes
 
 
 @pytest.mark.parametrize("secret", ["password=fictional-secret", '"password": "fictional secret with spaces"',
@@ -77,6 +78,10 @@ def test_bank_field_is_financial_not_phone_or_card():
     ("ITIN: 900-70-1234", "900-70-1234", "GOVERNMENT_ID"),
     ("National Insurance number: QQ 12 34 56 C", "QQ 12 34 56 C", "GOVERNMENT_ID"),
     ("Voter ID: ABC1234567", "ABC1234567", "GOVERNMENT_ID"),
+    ("SIN: 000 000 000", "000 000 000", "GOVERNMENT_ID"),
+    ("Social insurance number: 000-000-001", "000-000-001", "GOVERNMENT_ID"),
+    ("NHS number: 999 123 4578", "999 123 4578", "HEALTH_SENSITIVE"),
+    ("NHS no. 999-123-4567", "999-123-4567", "HEALTH_SENSITIVE"),
     ("IMEI: 490154203237518", "490154203237518", "DEVICE_ID"),
     ("Employee ID: ENG-4821", "ENG-4821", "USER_ID"),
     ("Born on 1990-01-01", "1990-01-01", "DATE_OF_BIRTH"),
@@ -99,9 +104,43 @@ def test_bounded_identifier_rules_do_not_promote_lookalike_prose():
     "Call QQ 12 34 56 C a fictional code without an ID label.",
     "Build ABC1234567 completed.",
     "Employee ID: ENG-4821-EXTRA-TAIL",
+    "sin: 000 000 000 is a mathematics example.",
+    "Batch 000 000 000 is a fictional number without a SIN label.",
 ])
 def test_contextual_identifiers_do_not_redact_unlabelled_or_partial_values(text):
     assert detect_text(text) == ()
+
+
+def test_overlong_nhs_lookalike_is_not_given_nhs_validation_status():
+    assert all(span.entity_type != "HEALTH_SENSITIVE" for span in detect_text("NHS number: 999 123 45789"))
+
+
+def test_regional_check_digits_are_recorded_without_leaving_labelled_mismatches_exposed():
+    assert ca_sin_mod10_passes("000 000 000")
+    assert not ca_sin_mod10_passes("000 000 001")
+    assert not ca_sin_mod10_passes("00 0000 000")
+    assert uk_nhs_mod11_passes("999 123 4578")
+    assert not uk_nhs_mod11_passes("999 123 4567")
+    assert not uk_nhs_mod11_passes("999 123 45678")
+    assert not uk_nhs_mod11_passes("99 9123 4578")
+    text = "🙂 SIN: 000-000-001; NHS number: 999 123 4567"
+    spans = detect_text(text)
+    assert [(text[span.start:span.end], span.entity_type, span.recognizer) for span in spans] == [
+        ("000-000-001", "GOVERNMENT_ID", "ca-sin-mod10-mismatch-v1"),
+        ("999 123 4567", "HEALTH_SENSITIVE", "uk-nhs-mod11-mismatch-v1"),
+    ]
+    result = process_payload(content=text)
+    assert "000-000-001" not in result.output and "999 123 4567" not in result.output
+
+
+@pytest.mark.parametrize(("field", "kind"), [
+    ("social_insurance_number", "GOVERNMENT_ID"),
+    ("canadian_sin", "GOVERNMENT_ID"),
+    ("nhs_number", "HEALTH_SENSITIVE"),
+])
+def test_regional_identifier_structured_fields(field, kind):
+    result = process_payload(records=[{field: "FICTIONAL-001"}])
+    assert result.output == [{field: f"[REDACTED_{kind}]"}]
 
 
 def test_overlong_labelled_imei_is_not_misrepresented_as_device_id():

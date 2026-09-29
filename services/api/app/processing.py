@@ -19,6 +19,7 @@ from typing import Any
 
 from app.candidate import LedgerAction
 from app.contracts import ActualOutputOperation, Finding, PayloadError, ProcessingResult, Span
+from app.regional_identifiers import CA_SIN, UK_NHS, find_regional_identifier_candidates
 
 MAX_BYTES = 2_000_000
 MAX_RECORDS = 10_000
@@ -30,7 +31,7 @@ RULES_METHOD_ID = "rules-v1"
 # beyond the declarative inputs below.  The digest is a reproducible identity,
 # not an assertion that these bounded rules are sufficient for release.
 RULES_METHOD_VERSION = "rules-processor-v1"
-RULES_METHOD_ALGORITHM_REVISION = "rules-processing-algorithm-v3"
+RULES_METHOD_ALGORITHM_REVISION = "rules-processing-algorithm-v4"
 RULES_METHOD_BUILD_REVISION = "anonflow-m9"
 _RULES_METHOD_CONFIG_SCHEMA = "rules-processing-config-v1"
 LIMITATIONS = (
@@ -39,6 +40,7 @@ LIMITATIONS = (
     "Health, business-confidential and quasi-identifier recognizers are bounded contextual/field-name rules only; they are detection capabilities, not qualified category coverage.",
     "Only text and JSON records are supported; language, semantic, document, media and linkage coverage are unqualified.",
     "Pattern matches are candidates, not validated identity or payment identifiers; false positives and false negatives remain.",
+    "Regional-ID check digits are integrity signals, not proof of issuance; labelled mismatches remain sensitive candidates.",
     "Container-valued sensitive fields and reserved transformation markers in source strings or keys are unsupported and rejected.",
 )
 SEVERITY = {"medium": 1, "high": 2, "critical": 3}
@@ -145,7 +147,7 @@ for _names, _kind, _severity in (
       "bankroutingnumber", "sortcode", "iban", "cryptowalletaddress", "walletaddress"), "FINANCIAL_ACCOUNT", "critical"),
     (("aadhaar", "aadhar", "aadhaarnumber", "aadharnumber", "governmentid", "ssn", "socialsecuritynumber",
       "nationalid", "nationalidnumber", "taxid", "taxpayerid", "taxidentificationnumber", "voterid",
-      "nationalinsurancenumber"), "GOVERNMENT_ID", "critical"),
+      "nationalinsurancenumber", "socialinsurancenumber", "canadiansin"), "GOVERNMENT_ID", "critical"),
     (("pan", "pannumber", "passport", "passportnumber", "passportid", "driverslicense",
       "driverlicense", "drivinglicence", "drivinglicense", "licencenumber", "licensenumber"), "GOVERNMENT_ID", "high"),
     (("vin", "vehicleidentificationnumber", "licenseplate", "licenceplate", "vehicleplate"), "VEHICLE_ID", "high"),
@@ -195,6 +197,8 @@ def _rules_method_identity_config(*, algorithm_revision: str, build_revision: st
         ("us_tax_id", _US_TAX_ID.pattern, _US_TAX_ID.flags),
         ("uk_nino", _UK_NINO.pattern, _UK_NINO.flags),
         ("in_voter_id", _IN_VOTER_ID.pattern, _IN_VOTER_ID.flags),
+        ("ca_sin", CA_SIN.pattern, CA_SIN.flags),
+        ("uk_nhs", UK_NHS.pattern, UK_NHS.flags),
         ("imei_context", _IMEI_CONTEXT.pattern, _IMEI_CONTEXT.flags),
         ("employee_id", _EMPLOYEE_ID.pattern, _EMPLOYEE_ID.flags),
         ("vehicle_vin", _VEHICLE_VIN.pattern, _VEHICLE_VIN.flags),
@@ -266,8 +270,8 @@ def detect_text(text: str) -> tuple[Span, ...]:
     normalized, offsets = _normalized(text)
     candidates: list[Span] = []
 
-    def add(start: int, end: int, kind: str, severity: str) -> None:
-        candidates.append(Span(offsets[start], offsets[end - 1] + 1, kind, severity))
+    def add(start: int, end: int, kind: str, severity: str, recognizer: str = RULES_METHOD_ID) -> None:
+        candidates.append(Span(offsets[start], offsets[end - 1] + 1, kind, severity, recognizer))
 
     for pattern, kind, severity in ((_CREDENTIAL, "CREDENTIAL", "critical"),
                                     (_AUTH_TOKEN, "CREDENTIAL", "critical"),
@@ -313,6 +317,8 @@ def detect_text(text: str) -> tuple[Span, ...]:
         for match in pattern.finditer(normalized):
             start, end = match.span("value")
             add(start, end, kind, severity)
+    for candidate in find_regional_identifier_candidates(normalized):
+        add(candidate.start, candidate.end, candidate.entity_type, candidate.severity, candidate.recognizer)
     imei_ranges = {match.span("value") for match in _IMEI_CONTEXT.finditer(normalized)}
     for start, end in sorted(imei_ranges):
         add(start, end, "DEVICE_ID", "high")
@@ -341,7 +347,8 @@ def detect_text(text: str) -> tuple[Span, ...]:
         if merged and candidate.start < merged[-1].end:
             prior = merged.pop()
             strongest = max((prior, candidate), key=lambda span: _rank(span.entity_type, span.severity))
-            merged.append(Span(prior.start, max(prior.end, candidate.end), strongest.entity_type, strongest.severity))
+            merged.append(Span(prior.start, max(prior.end, candidate.end), strongest.entity_type,
+                               strongest.severity, strongest.recognizer))
         else:
             merged.append(candidate)
     return tuple(merged)
