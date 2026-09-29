@@ -53,6 +53,18 @@ def test_independent_residual_scanner_flags_labelled_precise_location_as_pii():
     assert dict(scan_residual_candidate("GPS: 91.0000, 12.0000").residual_counts)["PII"] == 0
 
 
+def test_residual_scanner_flags_labelled_advertising_id_but_not_bare_uuid_or_zero_sentinel():
+    fictional_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    assert dict(scan_residual_candidate("GAID: " + fictional_id).residual_counts)["PII"] == 1
+    assert dict(scan_residual_candidate(fictional_id).residual_counts)["PII"] == 0
+    zeros = "00000000-0000-0000-0000-000000000000"
+    assert dict(scan_residual_candidate("IDFA: " + zeros).residual_counts) == {
+        "CREDENTIAL": 0, "PAYMENT": 0, "PII": 0}
+    numeric_id = "11111111-2222-4333-8444-555555555555"
+    assert dict(scan_residual_candidate("GAID: " + numeric_id).residual_counts) == {
+        "CREDENTIAL": 0, "PAYMENT": 0, "PII": 1}
+
+
 def test_independent_scanner_explicitly_leaves_nonqualified_taxonomy_unassessed():
     result = scan_residual_candidate("diagnosis: synthetic-condition; internal roadmap: synthetic-roadmap; age: 47")
     assert dict(result.residual_counts) == {"CREDENTIAL": 0, "PAYMENT": 0, "PII": 0}

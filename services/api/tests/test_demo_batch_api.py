@@ -85,6 +85,21 @@ def test_batch_review_suppresses_sensitive_url_query_values_without_masking_publ
     assert body["verification"]["status"] == "REVIEW_REQUIRED"
 
 
+def test_batch_review_suppresses_relative_url_query_values(demo_client):
+    request = {"synthetic_only": True, "files": [
+        file("session", "session.txt", "/view?session_id=fictional-abc&theme=dark"),
+        file("patient", "patient.txt", "../chart?patient_id=PAT-7"),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    candidates = [document["candidate_text"] for document in body["documents"]]
+    assert "fictional-abc" not in candidates[0] and "PAT-7" not in candidates[1]
+    assert "/view?session_id=" in candidates[0] and "theme=dark" in candidates[0]
+    assert "../chart?patient_id=" in candidates[1]
+    assert body["verification"]["source_value_residuals"] == 0
+
+
 def test_batch_review_suppresses_unlabelled_aws_key_in_two_files(demo_client):
     fictional_key = "AKIA" + "Z" * 16
     request = {"synthetic_only": True, "files": [
@@ -98,6 +113,22 @@ def test_batch_review_suppresses_unlabelled_aws_key_in_two_files(demo_client):
     assert all(fictional_key not in str(entity) for entity in body["entities"])
     assert any(entity["kind"] == "CREDENTIAL" for entity in body["entities"])
     assert body["verification"]["status"] == "REVIEW_REQUIRED"
+
+
+def test_batch_review_suppresses_labelled_advertising_id_across_files(demo_client):
+    fictional_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    request = {"synthetic_only": True, "files": [
+        file("log", "events.txt", "IDFA: " + fictional_id),
+        file("record", "devices.json", json.dumps([{"gaid": fictional_id, "event_uuid": "public-event"}])),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert all(fictional_id not in document["candidate_text"] for document in body["documents"])
+    assert any(entity["kind"] == "DEVICE_ID" for entity in body["entities"])
+    assert body["documents"][1]["structure_check"] == "pass"
+    assert "public-event" in body["documents"][1]["candidate_text"]
+    assert body["verification"]["source_value_residuals"] == 0
 
 
 def test_batch_review_generalizes_labelled_precise_location(demo_client):

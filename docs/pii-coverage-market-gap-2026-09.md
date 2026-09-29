@@ -22,7 +22,7 @@ inventory, not a claim to have exhaustively enumerated those catalogs.
 | National IDs and regional tax IDs | PAN and Aadhaar shapes; passport/licence fields and narrow labelled prose. Labelled US SSN/ITIN shapes, UK NINO, Indian voter ID, and now Canadian SIN are `GOVERNMENT_ID` candidates | AWS, Azure, and Presidio list many country-specific types. Next: per-country recognizer registry, test vectors, checksum/context policy and explicit unsupported-country status. Do not imply issuance validity. |
 | Health IDs and clinical content | Named structured fields, labelled UK NHS numbers, and short contextual clauses; no calibrated clinical NER | Presidio offers optional medical NER; AWS/Azure list health identifiers. Need independent PHI annotations, local clinical model review and no diagnosis-only identity assumptions. |
 | Payment and banking | Card-length candidates, PAN shape, labelled US account/routing, GB/DE IBAN; structured CVV/PIN/crypto fields | AWS/Presidio list broader IBAN, SWIFT, crypto and expiry recognizers. Next: checksum-aware, jurisdiction-specific candidates with controlled false positives and non-working surrogates. |
-| Device, account and online identity | IP/MAC, handles, structured IMEI/device/cookie/advertising IDs, labelled employee/staff IDs and a bounded set of explicit HTTP(S) query keys (session, patient, customer and similar IDs). Public URL hosts/paths remain untouched | AWS/Azure list URL, username, VIN/MAC. Continue source-safe handling of personal data in URL paths, arbitrary/relative URLs, mobile ad IDs and organization-specific identifiers. Public URLs alone are not always PII. |
+| Device, account and online identity | IP/MAC, handles, structured IMEI/device/cookie/advertising IDs, labelled UUID-shaped IDFA/GAID/AAID, employee/staff IDs and explicit HTTP(S) or rooted/dot-relative query keys (session, patient, customer and similar IDs). Public URL hosts/paths remain untouched | AWS/Azure list URL, username, VIN/MAC. Continue source-safe handling of personal data in URL paths, bare/other relative URLs, unlabelled mobile ad IDs and organization-specific identifiers. Public URLs alone are not always PII. |
 | Travel/customer references | Demo-specific booking references and passenger context; generic core lacks a dedicated travel-record class | Vendor custom recognizer mechanisms can cover domain-specific IDs. Define a separate travel/customer-record taxonomy and supplier-specific dictionaries before deploying beyond the airline demo. |
 | Credentials and cloud tokens | Generic labelled passwords/keys and authorization tokens, plus unlabelled AKIA/ASIA-shaped AWS access-key IDs; many provider-specific tokens and connection strings are not recognized | AWS lists access keys and Azure lists cloud secrets. Add provider-specific secret recognizers with strict tests; treat as security-sensitive even when not personal. |
 | PDF/image/Office/audio and non-text identifiers | Bounded PDF/image OCR and review/redaction preview. The PDF demo rejects selected hidden/interactive containers and cross-checks rules-detected native text. Input image pixels are EXIF-oriented, alpha-flattened and rebuilt without source metadata; encoded PNG chunks are checked. A positively detected QR region causes media abstention, but there is no QR/barcode absence guarantee. No DOCX/XLSX, audio, face/signature/biometric or metadata-wide guarantee | Presidio has image/structured examples and Azure document PII supports PDF/DOCX/TXT. These need separate parsers, media provenance, final-byte inspection and abstention; text rules alone cannot close them. |
@@ -106,7 +106,8 @@ the qualification gate.
   classify every `id`, `code`, `ref`, path component or public URL as PII.
 - Synthetic tests cover encoded keys/values, exact source offsets, repeated
   parameters, fragments, public lookalikes, structured keys and two-file demo
-  rendering. Relative URLs, unusual query separators, HTML-escaped `&amp;`,
+  rendering. Rooted and dot-relative links now use the same explicit-key rule.
+  Bare relative links, unusual query separators, HTML-escaped `&amp;`,
   provider-specific keys and values hidden in URL paths are not yet qualified.
 
 ## Fifth implementation tranche: source image metadata and alpha
@@ -187,6 +188,30 @@ the qualification gate.
   coordinate shape alone is not proof of personal information. The source and
   residual recognizers are correlated rules, not independent recall evidence.
 
+## Tenth implementation tranche: labelled mobile advertising IDs and relative query links
+
+- An explicit `IDFA`, `GAID`, `AAID` or advertising-ID label adjacent to a
+  canonical UUID shape now creates a `DEVICE_ID` candidate in text. Structured
+  keys for those aliases also map to `DEVICE_ID`. The all-zero unavailable or
+  opt-out sentinel is not promoted by the labelled text rule, and numeric UUID
+  substrings no longer become incidental card/number findings. Bare UUIDs are
+  not promoted by this new rule, though generic numeric rules may still match
+  an all-numeric UUID. [Apple](https://developer.apple.com/documentation/adsupport/asidentifiermanager/advertisingidentifier)
+  describes IDFA as a UUID, and [Android](https://developer.android.com/identity/ad-id)
+  documents a UUID-format advertising ID; the shape does not prove issuance,
+  consent or device/user linkage.
+- The separate aggregate residual scanner flags a nonzero labelled advertising
+  ID as a possible PII family signal. This is an independent implementation of
+  a similar shape rule, **not** independent recall evidence. Synthetic tests
+  exercise Unicode source offsets, boundaries, all-zero and bare UUID negatives,
+  structured redaction, and two-file demo consistency.
+- Rooted (`/view?...`) and dot-relative (`./view?...`, `../view?...`) links now
+  pass through the same explicit query-key policy as HTTP(S) links. Bare
+  `view?...` tokens and protocol-relative URLs are excluded to limit accidental
+  promotion. Synthetic tests cover public parameters, fragments, preserved
+  path context, and two-file review. The proposal remains a review-only
+  candidate; opaque replacements may not preserve executable URL semantics.
+
 ## Next implementation order
 
 1. **P0 — Measured recall, not another broad regex claim.** Freeze the offered
@@ -204,8 +229,9 @@ the qualification gate.
    slices, unsupported-country status and safe replacement policies.
 4. **P1 — Domain-specific accounts and URLs.** Introduce a distinct
    travel/customer-record class and supplier-provided dictionaries. Explicit
-   HTTP(S) query-key candidates are done; continue URL path/relative-link
-   policies without masking every public URL or ordinary project code.
+   HTTP(S) and rooted/dot-relative query-key candidates are done; continue URL
+   path/bare-link policies without masking every public URL or ordinary project
+   code. Qualify URL-safe replacements before claiming usable transformed links.
 5. **P2 — Specialized content.** Clinical narratives, faces/voices, handwriting,
    multilingual names, and linkage risk require separately evaluated models,
    parser provenance and reviewer controls, not a universal pattern list.

@@ -1,4 +1,4 @@
-"""Bounded sensitive query-value candidates in HTTP(S) URLs.
+"""Bounded sensitive query-value candidates in HTTP(S) and relative URLs.
 
 Only explicit parameter names are signals. A public URL, host, path, or
 ordinary query parameter is not automatically personal information. Offsets
@@ -6,6 +6,7 @@ refer to the raw input so percent-encoded values can be suppressed whole.
 """
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass
 import re
 from typing import Iterator
@@ -13,6 +14,10 @@ from urllib.parse import unquote_plus
 
 
 URL_TOKEN = re.compile(r"(?i)\bhttps?://[^\s<>\"']+")
+# Only path-rooted or dot-relative links are admitted. Bare ``view?x=y`` can
+# be ordinary prose or a code token, so it is not promoted to URL context.
+# The slash guards avoid matching the path inside an absolute HTTP(S) URL.
+RELATIVE_URL_TOKEN = re.compile(r"(?<![\w/])(?:/(?!/)|\.{1,2}/)[^\s<>\"']+")
 URL_TRAILING_PUNCTUATION = ".,;:!?)]}"
 EMAIL_VALUE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 # Key names are canonicalized by removing ASCII separators after URL decoding.
@@ -46,7 +51,14 @@ class UrlQueryCandidate:
 
 
 def find_url_query_candidates(text: str) -> Iterator[UrlQueryCandidate]:
-    for match in URL_TOKEN.finditer(text):
+    absolute_tokens = list(URL_TOKEN.finditer(text))
+    absolute_starts = [match.start() for match in absolute_tokens]
+    tokens = absolute_tokens.copy()
+    for match in RELATIVE_URL_TOKEN.finditer(text):
+        index = bisect_right(absolute_starts, match.start()) - 1
+        if index < 0 or match.start() >= absolute_tokens[index].end():
+            tokens.append(match)
+    for match in sorted(tokens, key=lambda token: token.start()):
         url = match.group().rstrip(URL_TRAILING_PUNCTUATION)
         question = url.find("?")
         fragment = url.find("#")

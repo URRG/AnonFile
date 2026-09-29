@@ -21,7 +21,7 @@ from typing import Any
 from app.candidate import LedgerAction
 from app.contracts import ActualOutputOperation, Finding, PayloadError, ProcessingResult, Span
 from app.regional_identifiers import CA_SIN, UK_NHS, find_regional_identifier_candidates
-from app.url_query_identifiers import EMAIL_VALUE, QUERY_KEY_TYPES, URL_TOKEN, find_url_query_candidates
+from app.url_query_identifiers import EMAIL_VALUE, QUERY_KEY_TYPES, RELATIVE_URL_TOKEN, URL_TOKEN, find_url_query_candidates
 
 MAX_BYTES = 2_000_000
 MAX_RECORDS = 10_000
@@ -33,7 +33,7 @@ RULES_METHOD_ID = "rules-v1"
 # beyond the declarative inputs below.  The digest is a reproducible identity,
 # not an assertion that these bounded rules are sufficient for release.
 RULES_METHOD_VERSION = "rules-processor-v1"
-RULES_METHOD_ALGORITHM_REVISION = "rules-processing-algorithm-v7"
+RULES_METHOD_ALGORITHM_REVISION = "rules-processing-algorithm-v8"
 RULES_METHOD_BUILD_REVISION = "anonflow-m9"
 _RULES_METHOD_CONFIG_SCHEMA = "rules-processing-config-v2"
 LIMITATIONS = (
@@ -43,7 +43,7 @@ LIMITATIONS = (
     "Only text and JSON records are supported; language, semantic, document, media and linkage coverage are unqualified.",
     "Pattern matches are candidates, not validated identity or payment identifiers; false positives and false negatives remain.",
     "Regional-ID check digits are integrity signals, not proof of issuance; labelled mismatches remain sensitive candidates.",
-    "URL query coverage is limited to explicit HTTP(S) parameter names; public links, paths and arbitrary identifiers are not comprehensively classified.",
+    "URL query coverage is limited to explicit HTTP(S) and rooted/dot-relative parameter names; public links, paths and arbitrary identifiers are not comprehensively classified.",
     "Precise location coordinates are candidates only with bounded explicit labels or structured field names; linkage risk is not assessed.",
     "Container-valued sensitive fields and reserved transformation markers in source strings or keys are unsupported and rejected.",
 )
@@ -109,6 +109,14 @@ _IMEI_CONTEXT = re.compile(
     r"(?i)\bimei(?:[ \t]*(?:number|no\.?))?[ \t]*(?:[:=#-][ \t]*|[ \t]+)"
     r"(?P<value>[0-9]{15})(?![\w-])"
 )
+# Advertising identifiers are UUID-shaped, but arbitrary UUIDs are not
+# advertising IDs. Require a nearby explicit label and do not promote the
+# all-zero opt-out/unavailable sentinel to a personal identifier.
+_ADVERTISING_ID_CONTEXT = re.compile(
+    r"(?i)\b(?:idfa|gaid|aaid|(?:mobile[ \t]+)?advertising[ \t]+id|"
+    r"(?:google|apple)[ \t]+advertising[ \t]+id)[ \t]*(?:[:=#][ \t]*|[ \t]+)"
+    r"(?P<value>[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})(?![\w-])"
+)
 _EMPLOYEE_ID = re.compile(
     r"(?i)\b(?:employee|staff)[ \t]*id[ \t]*[:=#][ \t]*"
     r"(?P<value>[A-Z0-9]{2,12}(?:-[A-Z0-9]{2,12}){0,2})(?![\w-])"
@@ -168,6 +176,7 @@ for _names, _kind, _severity in (
       "driverlicense", "drivinglicence", "drivinglicense", "licencenumber", "licensenumber"), "GOVERNMENT_ID", "high"),
     (("vin", "vehicleidentificationnumber", "licenseplate", "licenceplate", "vehicleplate"), "VEHICLE_ID", "high"),
     (("macaddress", "deviceid", "deviceserial", "imei", "imsi", "advertisingid", "mobileadvertisingid",
+      "idfa", "gaid", "aaid", "googleadvertisingid", "appleadvertisingid",
       "cookieid", "rfidtag"), "DEVICE_ID", "high"),
     (("username", "userid", "accountid", "socialhandle", "socialmediahandle", "screenname",
       "profileid", "employeeid", "staffid", "customerid", "passengerid"), "USER_ID", "high"),
@@ -218,8 +227,10 @@ def _rules_method_identity_config(*, algorithm_revision: str, build_revision: st
         ("ca_sin", CA_SIN.pattern, CA_SIN.flags),
         ("uk_nhs", UK_NHS.pattern, UK_NHS.flags),
         ("url_query", URL_TOKEN.pattern, URL_TOKEN.flags),
+        ("relative_url_query", RELATIVE_URL_TOKEN.pattern, RELATIVE_URL_TOKEN.flags),
         ("url_email_value", EMAIL_VALUE.pattern, EMAIL_VALUE.flags),
         ("imei_context", _IMEI_CONTEXT.pattern, _IMEI_CONTEXT.flags),
+        ("advertising_id_context", _ADVERTISING_ID_CONTEXT.pattern, _ADVERTISING_ID_CONTEXT.flags),
         ("employee_id", _EMPLOYEE_ID.pattern, _EMPLOYEE_ID.flags),
         ("vehicle_vin", _VEHICLE_VIN.pattern, _VEHICLE_VIN.flags),
         ("birth_context", _BIRTH_CONTEXT.pattern, _BIRTH_CONTEXT.flags),
@@ -355,8 +366,17 @@ def detect_text(text: str) -> tuple[Span, ...]:
     imei_ranges = {match.span("value") for match in _IMEI_CONTEXT.finditer(normalized)}
     for start, end in sorted(imei_ranges):
         add(start, end, "DEVICE_ID", "high")
+    advertising_id_ranges = sorted({match.span("value") for match in _ADVERTISING_ID_CONTEXT.finditer(normalized)})
+    advertising_id_starts = [start for start, _ in advertising_id_ranges]
+    for start, end in advertising_id_ranges:
+        value = normalized[start:end]
+        if int(value.replace("-", ""), 16) != 0:
+            add(start, end, "DEVICE_ID", "high")
     for match in _NUMBER.finditer(normalized):
         value = match.group()
+        advertising_index = bisect_right(advertising_id_starts, match.start()) - 1
+        if advertising_index >= 0 and match.end() <= advertising_id_ranges[advertising_index][1]:
+            continue
         # A labelled IMEI is not a payment card merely because it has 15 digits.
         if match.span() in imei_ranges:
             continue
