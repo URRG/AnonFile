@@ -149,9 +149,21 @@ the qualification gate.
   Structured `latitude`, `longitude` and coordinate field names are also
   treated as quasi-identifiers; sensitive numeric fields become `null` in core
   output. The synthetic batch demo generalizes labelled pairs and string-valued
-  JSON coordinate fields, but deliberately refuses numeric sensitive JSON
-  fields rather than emitting invalid JSON. The aggregate residual scanner
-  flags labelled pairs as a possible PII signal.
+  JSON coordinate fields; numeric sensitive JSON fields are nullified as JSON
+  literals while preserving parseability. The aggregate residual scanner flags
+  labelled pairs as a possible PII signal.
+
+## Eighth implementation tranche: JSON scalar nullification in batch preview
+
+- Sensitive JSON/JSONL numeric and boolean scalars now become literal `null`,
+  matching the conservative core-processor behavior while retaining valid
+  syntax. The detected entity and its mention show a `SCALAR_NULLIFICATION`
+  strategy. Ordinary numeric fields are left unchanged. A full JSON number
+  token, including exponent notation, must match the bounded field scanner;
+  a parsed-object accounting pass rejects missed sensitive fields, duplicate
+  keys and sensitive containers. Tests reparse the exact candidate. This is
+  still a synthetic, review-only candidate and does not establish semantic
+  recognition of arbitrary keys, utility, or release safety.
 - [Azure's PII categories](https://learn.microsoft.com/en-us/azure/ai-services/language-service/personally-identifiable-information/concepts/entity-categories)
   describe geolocation as personal when it can pinpoint or track a person;
   [Google's detector guidance](https://docs.cloud.google.com/sensitive-data-protection/docs/concepts-infotypes)

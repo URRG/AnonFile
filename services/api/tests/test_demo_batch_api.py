@@ -114,14 +114,63 @@ def test_batch_review_generalizes_labelled_precise_location(demo_client):
     assert body["verification"]["status"] == "REVIEW_REQUIRED"
 
 
-def test_batch_review_refuses_numeric_structured_coordinates_without_echoing_source(demo_client):
+def test_batch_review_nullifies_numeric_and_boolean_sensitive_json_scalars(demo_client):
     request = {"synthetic_only": True, "files": [
-        file("location", "location.json", '[{"latitude":37.7749,"longitude":-122.4194}]'),
+        file("location", "location.json",
+             '[{"latitude":37.7749,"longitude":-122.4194,"medical_condition":true,'
+             '"age":1.23e+1,"meeting_duration":30}]'),
+        file("note", "note.txt", "Follow-up tomorrow."),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    candidate = body["documents"][0]["candidate_text"]
+    assert "37.7749" not in candidate and "122.4194" not in candidate and "1.23e+1" not in candidate
+    assert body["documents"][0]["structure_check"] == "pass"
+    assert json.loads(candidate) == [{"latitude": None, "longitude": None,
+                                      "medical_condition": None, "age": None, "meeting_duration": 30}]
+    assert {entity["strategy"] for entity in body["entities"] if entity["alias"] == "null"} == {
+        "SCALAR_NULLIFICATION"}
+    assert body["verification"]["status"] == "REVIEW_REQUIRED"
+
+
+@pytest.mark.parametrize("source", [
+    '{"latitude":[37.7749]}',
+    '{"latitude":37.7749,"latitude":12.3456}',
+])
+def test_batch_review_refuses_sensitive_json_containers_and_duplicate_keys(demo_client, source):
+    request = {"synthetic_only": True, "files": [
+        file("location", "location.json", source),
         file("note", "note.txt", "Follow-up tomorrow."),
     ]}
     response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
     assert response.status_code == 422
-    assert "37.7749" not in response.text and "122.4194" not in response.text
+    assert "37.7749" not in response.text
+
+
+def test_batch_review_accounts_for_escaped_sensitive_json_key(demo_client):
+    request = {"synthetic_only": True, "files": [
+        file("location", "location.json", '{"lat\\u0069tude":37.7749}'),
+        file("note", "note.txt", "Follow-up tomorrow."),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    candidate = response.json()["documents"][0]["candidate_text"]
+    assert "37.7749" not in candidate
+    assert json.loads(candidate)["latitude"] is None
+
+
+def test_batch_review_nullifies_sensitive_jsonl_scalars_record_by_record(demo_client):
+    request = {"synthetic_only": True, "files": [
+        file("records", "records.jsonl", '{"age":41,"duration":30}\n{"latitude":37.7749,"duration":45}\n'),
+        file("note", "note.txt", "Follow-up tomorrow."),
+    ]}
+    response = demo_client.post("/demo/batch/inspect", headers=auth(), json=request)
+    assert response.status_code == 200, response.text
+    candidate = response.json()["documents"][0]["candidate_text"]
+    assert [json.loads(line) for line in candidate.splitlines()] == [
+        {"age": None, "duration": 30}, {"latitude": None, "duration": 45}]
+    assert response.json()["documents"][0]["structure_check"] == "pass"
 
 
 def test_batch_review_keeps_string_structured_coordinates_parseable(demo_client):

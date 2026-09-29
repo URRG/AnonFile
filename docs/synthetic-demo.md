@@ -73,6 +73,9 @@ PNG, or JPEG files (100 KB per text file, 500 KB per PDF/image, 1.5 MB combined)
 two PDF pages per file and OCRs each raster page or image. The entire batch is
 limited to three million media pixels. Detected spans are applied to the OCR
 lines on a new pixel image, with side-by-side source and candidate page views.
+For JSON/JSONL, sensitive numeric and boolean scalar fields are proposed as
+literal `null` so the candidate stays parseable; ordinary numeric fields are
+untouched. This can break a downstream schema and requires reviewer attention.
 PDF pages are rendered at a bounded 1.7× raster scale. At 100% zoom the UI
 shows native preview pixels rather than squeezing the full page into a narrow
 pane; higher zoom magnifies pixels but cannot recover detail absent from the
