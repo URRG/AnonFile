@@ -63,9 +63,11 @@ versioned adapter based on the [Swift IBAN registry](https://www.swift.com/stand
 The next structured-field increment adds exact key matches for further
 government, finance, device, vehicle, online-account, contact and patient-ID
 families. It does **not** infer those categories from arbitrary field names,
-unlabelled prose or embedded media. Numeric/boolean sensitive JSON values and
-quoted multiline CSV cells remain unsupported in the batch preview rather
-than being silently emitted or given a misleading schema-preservation claim.
+unlabelled prose or embedded media. The synthetic batch preview now nullifies
+numeric/boolean JSON scalars under its explicitly sensitive keys; this is not
+semantic classification of arbitrary values. Quoted multiline CSV cells remain
+unsupported rather than being silently emitted or given a misleading
+schema-preservation claim.
 
 The [September 2026 market-gap ledger](pii-coverage-market-gap-2026-09.md)
 compares these bounded paths with current AWS, Azure, Google and Presidio
