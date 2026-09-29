@@ -12,6 +12,7 @@ does not make linkage, utility, or re-identification claims.
 """
 from __future__ import annotations
 
+from bisect import bisect_right
 import hashlib
 import json
 import re
@@ -26,7 +27,7 @@ DETECTOR_ID = "m8-independent-residual"
 # Evidence-relevant, immutable release inputs.  Algorithm revision covers
 # matching, classification and traversal semantics; build revision identifies
 # the packaged control-plane build.  Bump either when its behavior changes.
-ALGORITHM_REVISION = "independent-residual-algorithm-v3"
+ALGORITHM_REVISION = "independent-residual-algorithm-v4"
 BUILD_REVISION = "anonflow-m8.1"
 _CONFIG_SCHEMA = "residual-detector-config-v1"
 MAX_DIRECT_SCAN_NODES = 100_000
@@ -46,6 +47,11 @@ _CREDENTIAL_ASSIGNMENT = re.compile(
 )
 _AUTHORIZATION = re.compile(r"(?i)\b(?:bearer|basic)\s+[a-z0-9._~+/=-]{8,}")
 _AWS_ACCESS_KEY_ID = re.compile(r"(?<!\w)(?:AKIA|ASIA)[A-Z0-9]{16}(?!\w)")
+_LABELLED_AD_ID = re.compile(
+    r"(?i)\b(?:idfa|gaid|aaid|(?:mobile[ \t]+)?advertising[ \t]+id|"
+    r"(?:google|apple)[ \t]+advertising[ \t]+id)[ \t]*(?:[:=#][ \t]*|[ \t]+)"
+    r"(?P<id>[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})(?![\w-])"
+)
 _PRECISE_LOCATION = re.compile(
     r"(?i)\b(?:gps(?:[ \t]+coordinates?)?|geo[ \t]*coordinates?|location[ \t]+coordinates?)"
     r"[ \t]*[:=][ \t]*(?P<lat>[+-]?[0-9]{1,2}\.[0-9]{3,12})[ \t]*,[ \t]*"
@@ -61,6 +67,7 @@ _RULE_CONFIGURATION = (
     ("credential_assignment", _CREDENTIAL_ASSIGNMENT.pattern, _CREDENTIAL_ASSIGNMENT.flags),
     ("authorization", _AUTHORIZATION.pattern, _AUTHORIZATION.flags),
     ("aws_access_key_id", _AWS_ACCESS_KEY_ID.pattern, _AWS_ACCESS_KEY_ID.flags),
+    ("labelled_advertising_id", _LABELLED_AD_ID.pattern, _LABELLED_AD_ID.flags),
     ("precise_location", _PRECISE_LOCATION.pattern, _PRECISE_LOCATION.flags),
     ("payment_secret", _PAYMENT_SECRET.pattern, _PAYMENT_SECRET.flags),
 )
@@ -127,13 +134,21 @@ def _has_precise_location(text: str) -> bool:
 def _families_in_text(text: str) -> set[str]:
     """Return family labels only; raw matches never leave this function."""
     families: set[str] = set()
+    ad_matches = list(_LABELLED_AD_ID.finditer(text))
+    ad_ranges = [match.span("id") for match in ad_matches]
+    ad_starts = [start for start, _ in ad_ranges]
     if _CREDENTIAL_ASSIGNMENT.search(text) or _AUTHORIZATION.search(text) or _AWS_ACCESS_KEY_ID.search(text):
         families.add("CREDENTIAL")
     if _PAYMENT_SECRET.search(text):
         families.add("PAYMENT")
-    if _EMAIL.search(text) or _PAN.search(text) or _has_valid_ipv4(text) or _has_precise_location(text):
+    if (_EMAIL.search(text) or _PAN.search(text) or _has_valid_ipv4(text) or
+            _has_precise_location(text) or
+            any(int(match.group("id").replace("-", ""), 16) != 0 for match in ad_matches)):
         families.add("PII")
     for match in _NUMBERISH.finditer(text):
+        ad_index = bisect_right(ad_starts, match.start()) - 1
+        if ad_index >= 0 and match.end() <= ad_ranges[ad_index][1]:
+            continue
         digits = "".join(char for char in match.group() if "0" <= char <= "9")
         if _luhn(digits):
             families.add("PAYMENT")

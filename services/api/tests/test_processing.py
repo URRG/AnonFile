@@ -194,6 +194,29 @@ def test_url_query_value_stops_at_fragment_and_repeated_parameters_are_distinct(
     assert [text[span.start:span.end] for span in detect_text(text)] == ["first", "second"]
 
 
+def test_root_and_dot_relative_url_query_values_are_suppressed_without_touching_public_parts():
+    text = ("/view?patient_id=PAT-7&theme=dark "
+            "./contact?email=riya%40example.org#bio "
+            "../account?session_id=synthetic-session")
+    spans = detect_text(text)
+    assert [(text[span.start:span.end], span.entity_type) for span in spans] == [
+        ("PAT-7", "HEALTH_SENSITIVE"), ("riya%40example.org", "EMAIL"),
+        ("synthetic-session", "CREDENTIAL")]
+    output = process_payload(content=text).output
+    assert all(value not in output for value in ("PAT-7", "riya%40example.org", "synthetic-session"))
+    assert "theme=dark" in output and "#bio" in output
+
+
+@pytest.mark.parametrize("text", [
+    "view?patient_id=PUBLIC-7",  # Bare text is not unambiguously a URL.
+    "/view?theme=dark&ref=PUBLIC-7",
+    "//other.example/view?patient_id=PUBLIC-7",  # Protocol-relative hosts are out of scope.
+    "/view#fragment?session_id=fictional",
+])
+def test_ambiguous_or_public_relative_links_are_not_promoted(text):
+    assert detect_text(text) == ()
+
+
 @pytest.mark.parametrize(("key", "kind"), [
     ("patient_id", "HEALTH_SENSITIVE"),
     ("phone", "PHONE"),
@@ -217,6 +240,46 @@ def test_explicit_structured_session_and_customer_ids(field, kind):
 
 def test_overlong_labelled_imei_is_not_misrepresented_as_device_id():
     assert all(span.entity_type != "DEVICE_ID" for span in detect_text("IMEI: 4901542032375189"))
+
+
+@pytest.mark.parametrize("label", ["IDFA", "GAID", "AAID", "Mobile advertising ID", "Apple advertising ID"])
+def test_labelled_advertising_uuid_is_wholly_suppressed_with_original_offsets(label):
+    fictional_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    source = f"🙂 {label}: {fictional_id} after"
+    spans = detect_text(source)
+    assert [(source[span.start:span.end], span.entity_type, span.severity) for span in spans] == [
+        (fictional_id, "DEVICE_ID", "high")]
+    result = process_payload(content=source)
+    assert result.output == f"🙂 {label}: [REDACTED_DEVICE_ID] after"
+    assert fictional_id not in repr(result.findings)
+
+
+@pytest.mark.parametrize("source", [
+    "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",  # A bare UUID is not necessarily an ad ID.
+    "IDFA: 00000000-0000-0000-0000-000000000000",  # Unavailable/opt-out sentinel.
+    "GAID: aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee-extra",
+    "IDFA: aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee0",
+    "IDFA: aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee_",
+    "IDFA: aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeeg",
+])
+def test_advertising_id_rule_does_not_promote_unlabelled_or_partial_uuids(source):
+    assert not any(span.entity_type == "DEVICE_ID" for span in detect_text(source))
+
+
+def test_numeric_advertising_uuid_is_not_misclassified_as_payment_or_generic_number():
+    value = "11111111-2222-4333-8444-555555555555"
+    source = "GAID: " + value
+    spans = detect_text(source)
+    assert [(source[span.start:span.end], span.entity_type) for span in spans] == [(value, "DEVICE_ID")]
+    assert detect_text("IDFA: 00000000-0000-0000-0000-000000000000") == ()
+
+
+@pytest.mark.parametrize("field", ["idfa", "gaid", "aaid", "google_advertising_id"])
+def test_structured_advertising_id_aliases_are_device_ids(field):
+    source = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    result = process_payload(records=[{field: source, "event_uuid": source}])
+    assert result.output == [{field: "[REDACTED_DEVICE_ID]", "event_uuid": source}]
+    assert [finding.entity_type for finding in result.findings] == ["DEVICE_ID"]
 
 
 def test_contextual_identifier_offsets_survive_unicode_prefix():
