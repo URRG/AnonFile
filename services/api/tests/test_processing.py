@@ -118,9 +118,11 @@ def test_overlong_nhs_lookalike_is_not_given_nhs_validation_status():
 def test_regional_check_digits_are_recorded_without_leaving_labelled_mismatches_exposed():
     assert ca_sin_mod10_passes("000 000 000")
     assert not ca_sin_mod10_passes("000 000 001")
+    assert not ca_sin_mod10_passes("00 0000 000")
     assert uk_nhs_mod11_passes("999 123 4578")
     assert not uk_nhs_mod11_passes("999 123 4567")
     assert not uk_nhs_mod11_passes("999 123 45678")
+    assert not uk_nhs_mod11_passes("99 9123 4578")
     text = "🙂 SIN: 000-000-001; NHS number: 999 123 4567"
     spans = detect_text(text)
     assert [(text[span.start:span.end], span.entity_type, span.recognizer) for span in spans] == [

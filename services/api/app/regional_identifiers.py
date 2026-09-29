@@ -36,9 +36,9 @@ class RegionalIdentifierCandidate:
 
 def ca_sin_mod10_passes(value: str) -> bool:
     """Luhn/Mod-10 for a nine-digit Canadian SIN shape, not issuance status."""
-    digits = re.sub(r"[ -]", "", value)
-    if len(digits) != 9 or not digits.isascii() or not digits.isdecimal():
+    if re.fullmatch(r"[0-9]{3}(?:[ -]?[0-9]{3}){2}", value) is None:
         return False
+    digits = re.sub(r"[ -]", "", value)
     total = 0
     for index, char in enumerate(reversed(digits)):
         number = int(char)
@@ -52,9 +52,9 @@ def ca_sin_mod10_passes(value: str) -> bool:
 
 def uk_nhs_mod11_passes(value: str) -> bool:
     """NHS Mod-11 check digit for ten-digit shape, not an NHS lookup."""
-    digits = re.sub(r"[ -]", "", value)
-    if len(digits) != 10 or not digits.isascii() or not digits.isdecimal():
+    if re.fullmatch(r"[0-9]{3}[ -]?[0-9]{3}[ -]?[0-9]{4}", value) is None:
         return False
+    digits = re.sub(r"[ -]", "", value)
     check = 11 - sum(int(char) * (10 - index) for index, char in enumerate(digits[:9])) % 11
     if check == 11:
         check = 0
