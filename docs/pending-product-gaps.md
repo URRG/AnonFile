@@ -319,6 +319,19 @@ supplier data. `Blocked externally` is not the same as done.
 - [x] **B02 — Explicit, typed relationship map with evidence and source-free
   labels.** PR #86; no inferred employment/client ties from mail domains or
   co-mentions.
+- [x] **B03 — Demo contract and review-download regressions.** PR #146;
+  the web client accepts the API's typed scalar nullification and canonical
+  percent-encoded email aliases, blocks formula-shaped CSV review copies,
+  and separately acknowledges final-text scan flags. Web and real-HTTP
+  regression tests passed. This is a safer fictional review workflow, not
+  permission to export real data or proof of complete detection.
+- [x] **B04 — Development build and dependency checks.** PRs #147–#150;
+  CI audits resolved Python and runtime web dependencies, builds both
+  development images, pins their base-image digests, pins first-party GitHub
+  Action commits and pins its PostgreSQL test service image. All seven CI jobs
+  passed on each merged PR. These checks do not establish production parser
+  isolation, a complete SBOM, security qualification, or a reproducible lock
+  of all Python transitive dependencies.
 
 Related detail: [demo roadmap](demo-to-product-roadmap.md), [production gate](production-readiness-gate.md),
 [format-aware policy](format-aware-pseudonyms.md), and [graph contract](entity-relationship-graph.md).
