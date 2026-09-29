@@ -70,6 +70,19 @@ Have the blind annotator populate source labels and set `labels_complete` to
 Then run the intake validator above. Do not use model findings to fill gaps in
 the holdout's reference labels.
 
+For a completed fictional inventory containing text files, run
+`python -m app.holdout_text_gold <absolute-corpus-directory>` from
+`services/api`. This exclusively creates a private `text-gold.jsonl` beside
+the manifest, using the validated source bytes and exact text offsets. It
+includes explicit zero-label text cases and preserves batch membership as
+`group_id`. It does not convert PDF/image boxes to guessed text spans, does
+not print source text, and refuses to overwrite an existing gold file. Keep
+that JSONL outside Git. The report remains `NOT_QUALIFIED`; the file is merely
+an input to the existing text-span evaluator. Verify annotation independence
+and freeze the corpus externally before interpreting any score. The inventory
+and scaffold also reject identical source bytes under different filenames;
+the inventory rejects source files omitted from its manifest.
+
 Example *accepted intake manifest* (fictional values; replace the digest with
 the actual SHA-256 of the exact file bytes):
 

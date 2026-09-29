@@ -71,3 +71,12 @@ def test_scaffold_rejects_symlinked_source(tmp_path):
     with pytest.raises(HoldoutInventoryError):
         scaffold_fictional_holdout(root)
     assert not (root / "manifest.json").exists()
+
+
+def test_scaffold_rejects_same_bytes_with_another_filename(tmp_path):
+    root = corpus(tmp_path, 2)
+    source = root / "files" / "source-0.txt"
+    (root / "files" / "source-1.txt").write_bytes(source.read_bytes())
+    with pytest.raises(HoldoutInventoryError):
+        scaffold_fictional_holdout(root)
+    assert not (root / "manifest.json").exists()

@@ -137,6 +137,7 @@ def inspect_fictional_holdout(root: Path) -> dict[str, object]:
             _fail()
         seen_ids: set[str] = set()
         seen_files: set[str] = set()
+        seen_source_hashes: set[str] = set()
         batch_counts: Counter[str] = Counter()
         batch_bytes: Counter[str] = Counter()
         formats: Counter[str] = Counter()
@@ -161,8 +162,11 @@ def inspect_fictional_holdout(root: Path) -> dict[str, object]:
             limit = 100_000 if kind in _TEXT else 500_000
             with target.open("rb") as stream:
                 data = stream.read(limit + 1)
-            if not 1 <= len(data) <= limit or "sha256:" + hashlib.sha256(data).hexdigest() != _digest(case["source_sha256"]):
+            source_hash = "sha256:" + hashlib.sha256(data).hexdigest()
+            if (not 1 <= len(data) <= limit or source_hash != _digest(case["source_sha256"])
+                    or source_hash in seen_source_hashes):
                 _fail()
+            seen_source_hashes.add(source_hash)
             source = data.decode("utf-8") if kind in _TEXT else ""
             if kind in _TEXT and not source.strip():
                 _fail()
@@ -186,6 +190,9 @@ def inspect_fictional_holdout(root: Path) -> dict[str, object]:
             formats[kind] += 1
         if any(not 2 <= count <= 3 or batch_bytes[batch_id] > _MAX_TOTAL_PER_BATCH
                for batch_id, count in batch_counts.items()):
+            _fail()
+        # A private corpus must not silently leave source files out of scoring.
+        if {path.name for path in files_dir.iterdir()} != seen_files:
             _fail()
         return {"schema_version": "fictional-holdout-inventory-report-v1",
                 "status": "STRUCTURALLY_VALID_ONLY", "qualification": "NOT_QUALIFIED",
