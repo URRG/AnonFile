@@ -136,3 +136,106 @@ def test_weak_name_repetition_respects_the_entity_budget():
     raw = package({'word/document.xml': '<doc><p><t>'+text+'</t></p></doc>'})
     with pytest.raises(DocumentError, match='ENTITY_LIMIT'):
         review_document('many-names.docx', raw)
+
+
+@pytest.mark.parametrize('names', [
+    ('Straße Müller', 'Strasse Müller'), ('Strasse Müller', 'Straße Müller'),
+])
+@pytest.mark.parametrize('evidence', ['field', 'weak', 'metadata', 'manual'])
+def test_casefold_collisions_preserve_every_observed_spelling(names, evidence):
+    paragraphs = [('Name: ' if evidence == 'field' else '') + name for name in names]
+    paragraphs += ['straße müller', 'strasse müller']
+    parts = {'word/document.xml': '<doc>' + ''.join('<p><t>'+escape(p)+'</t></p>' for p in paragraphs) + '</doc>'}
+    if evidence == 'metadata':
+        parts['docProps/core.xml'] = '<props><creator>'+names[0]+'</creator></props>'
+    reviewed = [{'value': name, 'kind': 'PERSON_NAME'} for name in names] if evidence == 'manual' else []
+    result = review_document('variants.docx', package(parts), reviewed_values=reviewed)
+    body = next(s for s in result['surfaces'] if s['kind'] == 'docx-part')
+    assert 'straße müller' not in body['candidate']
+    assert 'strasse müller' not in body['candidate']
+    assert len(body['matches']) == 4
+    assert len({match['replacement'] for match in body['matches']}) == 1
+    assert result['summary']['known_values_remaining'] == 0
+    assert result['release_eligible'] is False
+    if evidence == 'weak':
+        assert all(match['basis'].startswith('capitalization') for match in body['matches'])
+
+
+@pytest.mark.parametrize('name', ['Анастасия Иванова', '李小明', 'Elena Navarro', 'Élodie Dubois',
+                                  'Elena  Navarro', 'Élodie  Dubois'])
+@pytest.mark.parametrize('label', ['Customer ID', 'Social security', 'Case Number', 'Custom account reference'])
+def test_inline_multiword_labels_survive_context_and_weak_proposal_merging(name, label):
+    source = f'Name: {name}  {label}: AB321'
+    spans = [s for s in detect_text(source) if s.entity_type == 'PERSON_NAME']
+    assert len(spans) == 1
+    assert source[spans[0].start:spans[0].end] == name
+    result = review_document('fields.docx', package({'word/document.xml': '<doc><p><t>'+source+'</t></p></doc>'}))
+    body = next(s for s in result['surfaces'] if s['kind'] == 'docx-part')
+    assert name not in body['candidate']
+    assert f'  {label}: AB321' in body['candidate']
+
+
+@pytest.mark.parametrize('prefix', ['\u0301', 'A\u0301', 'कि'])
+def test_weak_proposals_cannot_start_after_a_combining_mark(prefix):
+    source = 'Elena Navarro\n' + prefix + 'Elena Navarro'
+    result = review_document('boundary.docx', package({'word/document.xml': '<doc><p><t>'+source+'</t></p></doc>'}))
+    body = next(s for s in result['surfaces'] if s['kind'] == 'docx-part')
+    assert prefix + 'Elena Navarro' in body['candidate']
+    assert len(body['matches']) == 1
+
+
+def test_observed_case_variants_cannot_bypass_the_seed_work_budget():
+    # 1024 distinct spellings share one casefold identity; each still adds work.
+    values = [''.join(char.upper() if mask & (1 << bit) else char for bit, char in enumerate('abcdefghij')) + ' Müller'
+              for mask in range(1024)]
+    source = '\n'.join('Name: ' + value for value in values)
+    with pytest.raises(DocumentError, match='ENTITY_LIMIT'):
+        review_document('variants.docx', package({'word/document.xml': '<doc><p><t>'+source+'</t></p></doc>'}))
+
+
+def test_transcript_speaker_labels_still_seed_surname_repetitions():
+    source = '19   MS. WALBURN: Roberta Walburn.\n20   MR. PERRY WILSON: Present.\nwalburn\nperry wilson'
+    result = review_document('transcript.docx', package({'word/document.xml': '<doc><p><t>'+source+'</t></p></doc>'}))
+    body = next(s for s in result['surfaces'] if s['kind'] == 'docx-part')
+    assert 'walburn' not in body['candidate'].lower()
+    assert 'perry wilson' not in body['candidate'].lower()
+    assert any(body['text'][m['start']:m['end']] == 'WALBURN' and m['basis'] == 'contextual-rule' for m in body['matches'])
+
+
+def test_long_single_paragraph_preserves_all_repeated_proposals():
+    source = 'Elena Navarro. ' * 10_000
+    result = review_document('long-paragraph.docx', package({'word/document.xml': '<doc><p><t>'+source+'</t></p></doc>'}))
+    body = next(s for s in result['surfaces'] if s['kind'] == 'docx-part')
+    assert len(body['matches']) == 10_000
+    assert 'Elena Navarro' not in body['candidate']
+
+
+@pytest.mark.parametrize('label', ['Customer ID', 'Case Number', 'Custom account reference'])
+def test_wrapped_name_keeps_inline_labels_on_its_continuation_line(label):
+    source = 'Name: Elena\nNavarro  ' + label + ': AB321\nMS. WALBURN: Present.\nwalburn'
+    result = review_document('wrapped.docx', package({'word/document.xml': '<doc><p><t>'+source+'</t></p></doc>'}))
+    body = next(s for s in result['surfaces'] if s['kind'] == 'docx-part')
+    assert 'Elena' not in body['candidate'] and 'Navarro' not in body['candidate']
+    assert label + ': AB321' in body['candidate']
+    assert 'walburn' not in body['candidate'].lower()
+
+
+@pytest.mark.parametrize('next_line', ['MS. WALBURN: Present.', '19   MS. WALBURN: Present.'])
+def test_an_incomplete_name_field_cannot_absorb_a_transcript_speaker(next_line):
+    source = 'Name: Elena\n' + next_line + '\nwalburn'
+    result = review_document('speaker.docx', package({'word/document.xml': '<doc><p><t>'+source+'</t></p></doc>'}))
+    body = next(s for s in result['surfaces'] if s['kind'] == 'docx-part')
+    assert 'walburn' not in body['candidate'].lower()
+    assert 'Name: Elena\n' in body['candidate']
+    assert 'MS.' in body['candidate']
+
+
+@pytest.mark.parametrize('label', ['Name', 'Full name'])
+def test_adjacent_name_fields_keep_their_own_inline_boundaries(label):
+    source = f'Name: Elena\n{label}: Alice Brown  Email: contact@example.test  Case Number: AB321'
+    result = review_document('adjacent.docx', package({'word/document.xml': '<doc><p><t>'+source+'</t></p></doc>'}))
+    body = next(s for s in result['surfaces'] if s['kind'] == 'docx-part')
+    assert 'Name: Elena\n' in body['candidate']
+    assert label + ': ' in body['candidate']
+    assert 'Alice Brown' not in body['candidate']
+    assert 'Email:' in body['candidate'] and 'Case Number: AB321' in body['candidate']

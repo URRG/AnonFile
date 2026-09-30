@@ -1,5 +1,7 @@
 # Name coverage follow-up
 
+This records the #154 change. The subsequent [independent QA follow-up](document-review-independent-qa.md) covers observed spelling collisions, field boundaries, and transcript regressions.
+
 The expanded challenge set at #153 left four annotated misses: three explicitly labelled names in Cyrillic, Devanagari and Chinese, and a capitalization-only name whose lowercase repetition survived on the next page. This change addresses all four while keeping every document result review-required.
 
 ## Detection and proposal behavior
