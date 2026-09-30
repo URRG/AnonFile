@@ -1,0 +1,22 @@
+body:has(.document-review) { background: #f8fafc; color: #16233b; }
+.document-review { max-width: 1200px; margin: 0 auto; padding: 32px; background: #f8fafc; color: #16233b; font-family: system-ui, sans-serif; line-height: 1.5; }
+.document-review :is(h1, h2, h3, p, label, li) { color: inherit; }
+.document-review a { color: #253fb3; }
+.document-review h1 { font-size: 2rem; }
+.document-review form, .document-review details { border: 1px solid #c7d1df; border-radius: 8px; padding: 16px; margin: 16px 0; background: #fff; }
+.document-review label { display: block; margin: 16px 0; font-weight: 600; }
+.document-review input:not([type=checkbox]), .document-review select, .document-review textarea { display: block; width: 100%; box-sizing: border-box; padding: 10px; margin-top: 6px; border: 1px solid #8494aa; border-radius: 4px; font: inherit; background: #fff; color: #16233b; }
+.document-review .document-ack { display: flex; gap: 10px; align-items: baseline; }
+.document-actions { display: flex; gap: 12px; }
+.document-review button { background: #213ba1; color: white; border: 0; border-radius: 6px; padding: 12px 20px; font: inherit; cursor: pointer; }
+.document-review button:disabled { background: #68748a; cursor: default; }
+.document-review :focus-visible { outline: 3px solid #4262d2; outline-offset: 3px; }
+.document-review .document-warning { background: #fff3d7; border-left: 4px solid #936400; padding: 12px; }
+.document-comparison { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.document-comparison section { min-width: 0; }
+.document-comparison pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 650px; overflow: auto; background: #f3f5f8; padding: 16px; border: 1px solid #c7d1df; font: 14px/1.7 ui-monospace, monospace; }
+.document-table { max-height: 320px; overflow: auto; }
+.document-review table { width: 100%; border-collapse: collapse; text-align: left; }
+.document-review td, .document-review th { padding: 8px; border-bottom: 1px solid #c7d1df; overflow-wrap: anywhere; }
+.document-review summary { cursor: pointer; }
+@media (max-width: 750px) { .document-review { padding: 20px; } .document-comparison { grid-template-columns: 1fr; } }

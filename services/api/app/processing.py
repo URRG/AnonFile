@@ -9,6 +9,7 @@ reserved output markers are rejected, not renamed. Offsets refer to original tex
 from __future__ import annotations
 
 from bisect import bisect_right
+import base64
 from collections import Counter
 import hashlib
 import ipaddress
@@ -20,6 +21,7 @@ from typing import Any
 
 from app.candidate import LedgerAction
 from app.contracts import ActualOutputOperation, Finding, PayloadError, ProcessingResult, Span
+from app.document_entities import CONTEXTUAL_RULE_CONFIG, contextual_entities
 from app.regional_identifiers import CA_SIN, UK_NHS, find_regional_identifier_candidates
 from app.url_query_identifiers import EMAIL_VALUE, QUERY_KEY_TYPES, RELATIVE_URL_TOKEN, URL_TOKEN, find_url_query_candidates
 
@@ -33,7 +35,7 @@ RULES_METHOD_ID = "rules-v1"
 # beyond the declarative inputs below.  The digest is a reproducible identity,
 # not an assertion that these bounded rules are sufficient for release.
 RULES_METHOD_VERSION = "rules-processor-v1"
-RULES_METHOD_ALGORITHM_REVISION = "rules-processing-algorithm-v8"
+RULES_METHOD_ALGORITHM_REVISION = "rules-processing-algorithm-v9"
 RULES_METHOD_BUILD_REVISION = "anonflow-m9"
 _RULES_METHOD_CONFIG_SCHEMA = "rules-processing-config-v2"
 LIMITATIONS = (
@@ -64,7 +66,11 @@ _CREDENTIAL = re.compile(
         ["']?\s*[:=]\s*(?:"(?:[^"\\\r\n]|\\.)*(?:"|$)|'(?:[^'\\\r\n]|\\.)*(?:'|$)|[^\s,;}\]]+)''',
     re.MULTILINE,
 )
-_AUTH_TOKEN = re.compile(r"(?i)\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+")
+_AUTH_TOKEN = re.compile(
+    r"(?i)\bBearer[ \t]+[A-Za-z0-9._~+/=-]+|"
+    r"\b(?:proxy-)?authorization[ \t]*:[ \t]*Basic[ \t]+[A-Za-z0-9+/=]+|"
+    r"\bBasic[ \t]+[A-Za-z0-9+/]{8,}={0,2}(?!\w)"
+)
 # AWS documents AKIA and ASIA as access-key ID prefixes. This is a
 # source-shaped credential candidate, not a live-key or account lookup.
 _AWS_ACCESS_KEY_ID = re.compile(r"(?<!\w)(?:AKIA|ASIA)[A-Z0-9]{16}(?!\w)")
@@ -94,8 +100,8 @@ _IDENTITY_DOCUMENT = re.compile(
 # Shape alone is not evidence of an issued ID; fictional invalid examples are
 # still candidates, so no registry/validity claim is made.
 _US_TAX_ID = re.compile(
-    r"(?i)\b(?:ssn|social[ \t]+security(?:[ \t]+number)?|itin|individual[ \t]+taxpayer[ \t]+identification(?:[ \t]+number)?)"
-    r"[ \t]*(?:[:=#-][ \t]*|[ \t]+)(?P<value>[0-9]{3}[- ]?[0-9]{2}[- ]?[0-9]{4})(?![\w-])"
+    r"(?i)\b(?:(?:primary|spouse|dependent)[ _-]*ssn|ssn|social[ \t]+security(?:[ \t]+number)?|itin|individual[ \t]+taxpayer[ \t]+identification(?:[ \t]+number)?)"
+    r"[ \t]*(?:[:=#-][ \t]*|[ \t]+)(?P<value>[0-9]{3}[ \t|:'’.-]{0,4}[0-9]{2}[ \t|:'’.-]{0,4}[0-9]{4})(?![\w-])"
 )
 _UK_NINO = re.compile(
     r"(?i)\b(?:nino|national[ \t]+insurance(?:[ \t]+number)?)[ \t]*(?:[:=#-][ \t]*|[ \t]+)"
@@ -135,7 +141,12 @@ _GPS_CONTEXT = re.compile(
     r"[ \t]*[:=][ \t]*(?P<value>[+-]?[0-9]{1,2}\.[0-9]{3,12}[ \t]*,[ \t]*"
     r"[+-]?[0-9]{1,3}\.[0-9]{3,12})(?![\w.])"
 )
-_NUMBER = re.compile(r"(?<!\w)\+?[0-9](?:[0-9 ()-]*[0-9])?(?!\w)")
+_NUMBER = re.compile(r"(?<!\w)\+?[0-9](?:(?:[0-9()-]| (?=\S))*[0-9])?(?!\w)")
+_PDF_DATE = re.compile(r"(?<!\w)D:[0-9]{14}(?:Z|[+-][0-9]{2}'?[0-9]{2}'?)?(?!\d)")
+_DOCUMENT_REFERENCE = re.compile(
+    r"(?i)\b(?:TID|Bates|document(?:[ \t]+(?:number|no\.?))?)[ \t:=#-]*"
+    r"(?:[0-2]?[0-9]:[0-5][0-9]:[0-5][0-9][ \t]*)?(?:\r?\n[ \t]*){0,2}(?:[0-9]{1,3}[ \t]{2,})?$"
+)
 # These are intentionally contextual rules, not vocabulary matches.  A bare
 # word such as "allergy" or "confidential" is not enough to redact prose.
 # A match consumes the entire delimited value.  Truncating at an arbitrary
@@ -158,7 +169,7 @@ _BUSINESS_CONTEXT = re.compile(
 _QUASI_CONTEXT = re.compile(
     r'''(?ix)\b(?:age|birth[_\s-]?year|postal[_\s-]?code|zip(?:[_\s-]?code)?|postcode|
         gender|sex|race|ethnicity|nationality|occupation|marital[_\s-]?status|household[_\s-]?size)\b
-        \s*(?:[:=]|is\b)\s*(?:"(?:[^"\\\r\n]|\\.)+"|'(?:[^'\\\r\n]|\\.)+'|[^\r\n,;]+)''',
+        \s*(?:[:=]|is\b(?=[ \t]*(?:[0-9]|male\b|female\b|nonbinary\b|married\b|single\b)))\s*(?:"(?:[^"\\\r\n]|\\.)+"|'(?:[^'\\\r\n]|\\.)+'|[^\r\n,;]+)''',
     re.MULTILINE,
 )
 _FIELD_TYPES: dict[str, tuple[str, str]] = {}
@@ -170,7 +181,7 @@ for _names, _kind, _severity in (
     (("bankaccount", "bankaccountnumber", "checkingaccount", "savingsaccount", "routingnumber",
       "bankroutingnumber", "sortcode", "iban", "cryptowalletaddress", "walletaddress"), "FINANCIAL_ACCOUNT", "critical"),
     (("aadhaar", "aadhar", "aadhaarnumber", "aadharnumber", "governmentid", "ssn", "socialsecuritynumber",
-      "nationalid", "nationalidnumber", "taxid", "taxpayerid", "taxidentificationnumber", "voterid",
+      "primaryssn", "spousessn", "dependentssn", "nationalid", "nationalidnumber", "taxid", "taxpayerid", "taxidentificationnumber", "voterid",
       "nationalinsurancenumber", "socialinsurancenumber", "canadiansin"), "GOVERNMENT_ID", "critical"),
     (("pan", "pannumber", "passport", "passportnumber", "passportid", "driverslicense",
       "driverlicense", "drivinglicence", "drivinglicense", "licencenumber", "licensenumber"), "GOVERNMENT_ID", "high"),
@@ -180,8 +191,8 @@ for _names, _kind, _severity in (
       "cookieid", "rfidtag"), "DEVICE_ID", "high"),
     (("username", "userid", "accountid", "socialhandle", "socialmediahandle", "screenname",
       "profileid", "employeeid", "staffid", "customerid", "passengerid"), "USER_ID", "high"),
-    (("name", "firstname", "lastname", "fullname", "customername", "passengername", "patientname"), "PERSON_NAME", "high"),
-    (("address", "street", "streetaddress", "homeaddress", "billingaddress", "shippingaddress"), "ADDRESS", "high"),
+    (("name", "firstname", "lastname", "fullname", "customername", "passengername", "patientname", "taxpayer", "nameline1txt", "author", "creator", "lastmodifiedby", "editor"), "PERSON_NAME", "high"),
+    (("address", "street", "streetaddress", "homeaddress", "billingaddress", "shippingaddress", "foreignaddress"), "ADDRESS", "high"),
     (("email", "emailaddress"), "EMAIL", "high"),
     (("phone", "phonenumber", "mobile", "mobilenumber", "telephone", "faxnumber"), "PHONE", "high"),
     (("dob", "dateofbirth", "birthdate"), "DATE_OF_BIRTH", "high"),
@@ -218,6 +229,8 @@ def _rules_method_identity_config(*, algorithm_revision: str, build_revision: st
         ("bank_account", _BANK_ACCOUNT.pattern, _BANK_ACCOUNT.flags),
         ("bank_routing", _BANK_ROUTING.pattern, _BANK_ROUTING.flags),
         ("ipv4", _IP.pattern, _IP.flags), ("number", _NUMBER.pattern, _NUMBER.flags),
+        ("pdf_date", _PDF_DATE.pattern, _PDF_DATE.flags),
+        ("document_reference", _DOCUMENT_REFERENCE.pattern, _DOCUMENT_REFERENCE.flags),
         ("ipv6", _IPV6.pattern, _IPV6.flags), ("mac", _MAC.pattern, _MAC.flags),
         ("user_handle", _USER_HANDLE.pattern, _USER_HANDLE.flags),
         ("identity_document", _IDENTITY_DOCUMENT.pattern, _IDENTITY_DOCUMENT.flags),
@@ -245,7 +258,7 @@ def _rules_method_identity_config(*, algorithm_revision: str, build_revision: st
         "build_revision": build_revision, "modes": sorted(MODES),
         "bounds": {"max_bytes": MAX_BYTES, "max_records": MAX_RECORDS,
                    "max_depth": MAX_DEPTH, "max_nodes": MAX_NODES},
-        "patterns": patterns, "field_types": sorted((key, *value) for key, value in _FIELD_TYPES.items()),
+        "patterns": patterns, "document_context_rules": CONTEXTUAL_RULE_CONFIG, "field_types": sorted((key, *value) for key, value in _FIELD_TYPES.items()),
         "url_query_keys": sorted((key, *value) for key, value in QUERY_KEY_TYPES.items()),
         "severity": sorted(SEVERITY.items()), "priority": sorted(PRIORITY.items()),
         "output_semantics": {"external": "redact", "restricted": "ordinal_alias",
@@ -314,6 +327,16 @@ def detect_text(text: str) -> tuple[Span, ...]:
                                     (_BUSINESS_CONTEXT, "BUSINESS_CONFIDENTIAL", "high"),
                                     (_QUASI_CONTEXT, "QUASI_IDENTIFIER", "medium")):
         for match in pattern.finditer(normalized):
+            if pattern is _AUTH_TOKEN and re.match(r"(?i)^Basic[ \t]", match.group()):
+                token = match.group().split()[-1]
+                try:
+                    # Bare Basic credentials must decode to user:password.
+                    # Explicit Authorization assignments remain sensitive even
+                    # when malformed, but ordinary "basic needs" is prose.
+                    if b":" not in base64.b64decode(token + "=" * (-len(token) % 4), validate=True):
+                        continue
+                except ValueError:
+                    continue
             add(match.start(), match.end(), kind, severity)
     for pattern in (_GB_IBAN, _DE_IBAN):
         for match in pattern.finditer(normalized):
@@ -372,8 +395,17 @@ def detect_text(text: str) -> tuple[Span, ...]:
         value = normalized[start:end]
         if int(value.replace("-", ""), 16) != 0:
             add(start, end, "DEVICE_ID", "high")
+    date_ranges = [match.span() for match in _PDF_DATE.finditer(normalized)]
+    for start, end, kind in contextual_entities(normalized):
+        add(start, end, kind, "high", "explicit-document-context-v1")
     for match in _NUMBER.finditer(normalized):
         value = match.group()
+        if any(start <= match.start() < end for start, end in date_ranges):
+            continue
+        if (_DOCUMENT_REFERENCE.search(normalized[max(0, match.start() - 128):match.start()])
+                or re.fullmatch(r"[0-9]{9}-[0-9]{4}", value)
+                or re.fullmatch(r"(?:[1-9] [0-9]{4} ){2,}[1-9]", value)):
+            continue
         advertising_index = bisect_right(advertising_id_starts, match.start()) - 1
         if advertising_index >= 0 and match.end() <= advertising_id_ranges[advertising_index][1]:
             continue

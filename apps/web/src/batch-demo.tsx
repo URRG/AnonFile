@@ -393,6 +393,7 @@ export default function BatchDemo() {
           return <button key={key} type="button" className={`step-link ${step === key ? 'active' : ''}`} disabled={!enabled} onClick={() => setStep(key)} aria-current={step === key ? 'step' : undefined}><span>{number}</span>{label}{step === key && <ChevronRight size={16} />}</button>
         })}
       </nav>
+      <a className="step-link" href="?mode=documents">Document coverage review</a>
       <div className="sidebar-divider" />
       <div className="sidebar-section-label">CURRENT SESSION</div>
       <div className="session-card"><Files size={19} /><div><strong>{files.length ? `${files.length} files staged` : 'No files staged'}</strong><span>{files.length ? 'Ready for batch review' : 'Upload 2–3 files to begin'}</span></div></div>
