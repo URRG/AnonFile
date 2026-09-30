@@ -1196,6 +1196,926 @@
           transition: none !important;
         }
       }
+
+      /* Preserve the original workbench's feature hierarchy with shorter copy. */
+      :root {
+        --bg: #f5f7fb;
+        --line: #dde5ed;
+        --ink: #182b44;
+        --muted: #596d85;
+        --accent: #087d77;
+        --tint: #e8f5f3;
+      }
+      .shell {
+        grid-template-columns: 216px minmax(0, 1fr);
+      }
+      .rail {
+        background: #102039;
+        color: #fff;
+        border: 0;
+      }
+      .brand {
+        color: white;
+      }
+      .brandmark {
+        color: #35c4b7;
+      }
+      .nav-label,
+      .rail-bottom {
+        color: #a5b7cd;
+      }
+      .rail-bottom strong {
+        color: #e9f3ff;
+      }
+      .step {
+        color: #b6c6db;
+      }
+      .step:hover {
+        background: #1b3451;
+      }
+      .step[aria-current="step"] {
+        background: #234459;
+        color: #effffc;
+        box-shadow: inset 3px 0 #2cc8b8;
+      }
+      .topbar {
+        background: white;
+      }
+      .brand {
+        font-size: 22px;
+      }
+      .page {
+        padding-top: 32px;
+      }
+      .doc-title {
+        font-family: inherit;
+        font-size: 23px;
+        font-weight: 600;
+      }
+      .doc-title,
+      .paper-eyebrow {
+        display: none;
+      }
+      .document-body {
+        min-height: 360px;
+      }
+      .pagehead {
+        margin-bottom: 24px;
+      }
+      h1 {
+        font-size: 32px;
+      }
+      .restore-metrics {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 16px;
+        margin-bottom: 24px;
+      }
+      .restore-metric {
+        background: white;
+        border: 1px solid var(--line);
+        padding: 18px 20px;
+        border-radius: 12px;
+      }
+      .restore-metric span {
+        display: block;
+        font-size: 12px;
+        color: var(--muted);
+        margin-bottom: 12px;
+      }
+      .restore-metric strong {
+        font-size: 27px;
+        font-weight: 650;
+        letter-spacing: -0.6px;
+      }
+      .register-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 264px;
+        gap: 20px;
+        margin-bottom: 24px;
+      }
+      .feature-card {
+        background: white;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 24px;
+        min-width: 0;
+      }
+      .feature-heading {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 16px;
+        margin-bottom: 20px;
+      }
+      .feature-heading h2 {
+        font-size: 18px;
+        margin: 0;
+        font-weight: 650;
+        letter-spacing: -0.3px;
+      }
+      .feature-heading p {
+        font-size: 12px;
+        color: var(--muted);
+        margin: 8px 0 0;
+        line-height: 1.6;
+      }
+      .mini-tag {
+        font-size: 11px;
+        font-weight: 600;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 6px 9px;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      .register-toolbar {
+        display: flex;
+        gap: 12px;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 20px;
+      }
+      .filters {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+      .filter {
+        font-size: 12px;
+        min-height: 40px;
+        padding: 8px 12px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+      }
+      .filter[aria-pressed="true"] {
+        color: var(--accent);
+        border-color: #52a8a0;
+        background: var(--tint);
+      }
+      .register-search {
+        max-width: 200px;
+        min-width: 80px;
+      }
+      .table-scroll {
+        overflow: auto;
+        border-radius: 8px;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        text-align: left;
+        font-size: 12px;
+        line-height: 1.6;
+      }
+      th {
+        font-size: 10px;
+        letter-spacing: 0.5px;
+        text-transform: uppercase;
+        font-weight: 650;
+        color: var(--muted);
+        padding: 12px;
+        background: #f4f7fb;
+        white-space: nowrap;
+      }
+      td {
+        padding: 14px 12px;
+        border-bottom: 1px solid var(--line);
+        vertical-align: middle;
+      }
+      tbody tr:last-child td {
+        border: 0;
+      }
+      td strong {
+        font-weight: 600;
+      }
+      .register-table {
+        min-width: 540px;
+      }
+      .register-table .button {
+        font-size: 11px;
+        min-height: 40px;
+        padding: 8px 12px;
+      }
+      .type-label {
+        font-size: 10px;
+        border-radius: 5px;
+        background: #edf2fa;
+        padding: 5px 7px;
+        white-space: nowrap;
+      }
+      .row-state {
+        display: block;
+        font-size: 10px;
+        color: var(--muted);
+        margin-top: 3px;
+      }
+      .alias-button {
+        color: var(--accent);
+        font-size: 12px;
+        text-align: left;
+        min-height: 40px;
+        padding: 8px 0;
+        overflow-wrap: anywhere;
+      }
+      .manual-card h2 {
+        font-size: 18px;
+        margin: 0 0 8px;
+      }
+      .manual-card p {
+        font-size: 12px;
+        line-height: 1.6;
+        color: var(--muted);
+        margin: 0 0 20px;
+      }
+      .manual-card select,
+      .graph-review-select {
+        font: inherit;
+        color: var(--ink);
+        min-height: 44px;
+        border: 1px solid #a6b8c9;
+        background: white;
+        border-radius: 7px;
+        padding: 10px;
+        width: 100%;
+        font-size: 12px;
+      }
+      .manual-card .field-label {
+        margin-top: 16px;
+      }
+      .manual-card .button {
+        margin-top: 16px;
+        width: 100%;
+      }
+      .manual-card .error {
+        margin: 10px 0 0;
+      }
+      .manual-card .manual-note {
+        margin: 16px 0 0;
+        font-size: 11px;
+      }
+      .context-preview {
+        margin-top: 16px;
+      }
+      .context-preview > summary {
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 600;
+        min-height: 48px;
+        padding: 16px 0;
+        color: var(--accent);
+      }
+      .context-preview .review-grid {
+        margin-top: 12px;
+      }
+      .context-preview .files {
+        display: none;
+      }
+      .context-preview .review-grid {
+        grid-template-columns: minmax(0, 1fr) 272px;
+      }
+      .results-tabs {
+        display: flex;
+        gap: 8px;
+        border-bottom: 1px solid var(--line);
+        margin: 8px 0 24px;
+      }
+      .results-tabs button {
+        position: relative;
+        min-height: 48px;
+        padding: 12px 18px;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .results-tabs button[aria-selected="true"] {
+        color: var(--accent);
+      }
+      .results-tabs button[aria-selected="true"]:after {
+        content: "";
+        position: absolute;
+        bottom: -1px;
+        height: 3px;
+        background: var(--accent);
+        left: 0;
+        right: 0;
+        border-radius: 3px;
+      }
+      .results-panel {
+        min-width: 0;
+      }
+      .result-filebar {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 20px;
+        overflow: auto;
+        padding: 4px;
+      }
+      .result-filebar button {
+        min-height: 44px;
+        white-space: nowrap;
+        padding: 10px 14px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        font-size: 12px;
+        background: white;
+      }
+      .result-filebar button[aria-pressed="true"] {
+        background: var(--tint);
+        color: var(--accent);
+        border-color: #69ada7;
+      }
+      .comparison {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+      }
+      .compare-card {
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        overflow: hidden;
+        min-width: 0;
+      }
+      .compare-label {
+        padding: 14px 16px;
+        font-size: 12px;
+        font-weight: 600;
+        background: #f6f8fb;
+        border-bottom: 1px solid var(--line);
+      }
+      .compare-content {
+        padding: 20px;
+        min-height: 280px;
+        font-size: 12px;
+        line-height: 2;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        margin: 0;
+      }
+      .compare-content mark {
+        background: #dcefe7;
+        color: #173c33;
+        border-radius: 3px;
+        padding: 2px;
+      }
+      .compare-content .evidence-line {
+        background: #fff0c8;
+      }
+      .comparison-meta {
+        display: flex;
+        gap: 16px;
+        justify-content: space-between;
+        align-items: center;
+        margin-top: 20px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .format-coverage {
+        margin-top: 20px;
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.7;
+      }
+      .format-coverage summary {
+        cursor: pointer;
+        min-height: 44px;
+        padding: 12px 0;
+      }
+      .format-coverage p {
+        margin: 0;
+      }
+      .graph-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 296px;
+        gap: 20px;
+      }
+      .graph-toolbar {
+        display: flex;
+        gap: 12px;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 16px;
+        flex-wrap: wrap;
+      }
+      .graph-controls {
+        display: flex;
+        gap: 6px;
+      }
+      .graph-controls .button {
+        font-size: 12px;
+        min-width: 44px;
+        padding: 8px 12px;
+      }
+      .graph-board {
+        overflow: auto;
+        background: #f8fbfc;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        min-height: 340px;
+        padding: 12px;
+      }
+      .graph-board svg {
+        display: block;
+        max-width: none;
+      }
+      .graph-edge {
+        stroke: #8c9eb3;
+        stroke-width: 2;
+        fill: none;
+      }
+      .graph-edge.selected {
+        stroke: var(--accent);
+        stroke-width: 3;
+      }
+      .graph-edge.rejected {
+        stroke: #b36761;
+        stroke-dasharray: 6 5;
+      }
+      .graph-node {
+        cursor: pointer;
+      }
+      .graph-node circle {
+        fill: #e5f4f2;
+        stroke: #76b5af;
+        stroke-width: 1.5;
+      }
+      .graph-node.company circle {
+        fill: #ebeffb;
+        stroke: #91a3d5;
+      }
+      .graph-node.selected circle {
+        stroke: var(--accent);
+        stroke-width: 3;
+      }
+      .graph-node text {
+        fill: var(--ink);
+        font-family: inherit;
+        font-size: 15px;
+        font-weight: 600;
+      }
+      .graph-node .kind {
+        font-size: 11px;
+        font-weight: 400;
+        fill: var(--muted);
+      }
+      .graph-node:focus-visible circle {
+        stroke: #247dbc;
+        stroke-width: 4;
+      }
+      .graph-edge-label {
+        font-family: inherit;
+        font-size: 11px;
+        fill: var(--muted);
+      }
+      .edge-list {
+        display: grid;
+        gap: 6px;
+        margin-top: 16px;
+      }
+      .edge-button {
+        min-height: 48px;
+        padding: 12px 14px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        align-items: center;
+        text-align: left;
+        font-size: 12px;
+        background: white;
+      }
+      .edge-button[aria-pressed="true"] {
+        background: var(--tint);
+        border-color: #69ada7;
+      }
+      .edge-button span:last-child {
+        font-size: 10px;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      .evidence-card {
+        padding: 20px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: #fbfcff;
+      }
+      .evidence-card h3 {
+        font-size: 16px;
+        margin: 0 0 10px;
+        line-height: 1.5;
+      }
+      .evidence-card p {
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.6;
+        margin: 0 0 20px;
+      }
+      .evidence-text {
+        padding: 14px;
+        background: white;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        font-size: 12px;
+        line-height: 1.7;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        margin: 16px 0;
+      }
+      .evidence-card .button {
+        width: 100%;
+        margin: 16px 0;
+      }
+      .evidence-list {
+        display: grid;
+        gap: 8px;
+        margin-top: 16px;
+      }
+      .evidence-list button {
+        text-align: left;
+        font-size: 12px;
+        min-height: 44px;
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: white;
+      }
+      .evidence-list small {
+        display: block;
+        color: var(--muted);
+        margin-top: 4px;
+      }
+      .node-documents {
+        margin: 16px 0;
+        padding-left: 18px;
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.8;
+      }
+      .score-top {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        align-items: center;
+        margin-bottom: 24px;
+      }
+      .reference-toggle {
+        font-size: 12px;
+        color: var(--muted);
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        line-height: 1.6;
+      }
+      .reference-toggle input {
+        width: 18px;
+        height: 18px;
+        accent-color: var(--accent);
+      }
+      .score-metrics {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 16px;
+        margin-bottom: 24px;
+      }
+      .score-metric {
+        padding: 20px;
+        background: #f6f9fc;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+      }
+      .score-metric span {
+        font-size: 11px;
+        color: var(--muted);
+        display: block;
+        line-height: 1.6;
+      }
+      .score-metric strong {
+        display: block;
+        font-size: 28px;
+        margin-top: 10px;
+        font-weight: 600;
+        letter-spacing: -0.5px;
+      }
+      .score-metric small {
+        display: block;
+        font-size: 10px;
+        color: var(--muted);
+        line-height: 1.6;
+        margin-top: 8px;
+      }
+      .score-section {
+        margin-top: 28px;
+      }
+      .score-section h3 {
+        font-size: 15px;
+        margin: 0 0 16px;
+      }
+      .baseline {
+        display: flex;
+        gap: 24px;
+        padding: 16px 20px;
+        background: var(--tint);
+        border-radius: 8px;
+        margin-bottom: 20px;
+        align-items: center;
+        flex-wrap: wrap;
+        font-size: 12px;
+      }
+      .baseline strong {
+        color: var(--accent);
+      }
+      .check-list {
+        display: grid;
+        gap: 0;
+      }
+      .check-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 20px;
+        padding: 14px 0;
+        border-bottom: 1px solid var(--line);
+        font-size: 12px;
+      }
+      .check-row:last-child {
+        border: 0;
+      }
+      .check-row span:last-child {
+        color: var(--muted);
+        text-align: right;
+      }
+      .score-caveat {
+        margin: 20px 0 0;
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.7;
+      }
+      .score-caveat summary {
+        min-height: 44px;
+        cursor: pointer;
+        padding: 12px 0;
+      }
+      .unmeasured {
+        padding: 24px;
+        border: 1px dashed #b5c4d8;
+        border-radius: 10px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.7;
+        margin-bottom: 24px;
+      }
+      .results-footer {
+        display: flex;
+        justify-content: space-between;
+        gap: 24px;
+        align-items: center;
+        margin-top: 24px;
+      }
+      .results-footer p {
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+      .table-empty {
+        padding: 24px;
+        text-align: center;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .review-warning {
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 12px;
+        line-height: 1.6;
+      }
+      @media (max-width: 1250px) {
+        .shell {
+          grid-template-columns: 180px minmax(0, 1fr);
+        }
+        .register-layout {
+          grid-template-columns: minmax(0, 1fr) 232px;
+        }
+        .feature-card {
+          padding: 20px;
+        }
+        .graph-layout {
+          grid-template-columns: minmax(0, 1fr) 248px;
+        }
+      }
+      @media (max-width: 1000px) {
+        .register-layout {
+          grid-template-columns: 1fr;
+        }
+        .manual-card {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 20px;
+        }
+        .manual-card > div {
+          min-width: 0;
+        }
+        .manual-card p {
+          margin-bottom: 0;
+        }
+        .graph-layout {
+          grid-template-columns: 1fr;
+        }
+        .graph-board {
+          min-height: 320px;
+        }
+        .score-metrics {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .register-search {
+          max-width: 240px;
+        }
+        .restore-metric {
+          padding: 16px;
+        }
+      }
+      @media (max-width: 800px) {
+        .shell {
+          display: block;
+        }
+        .rail {
+          display: flex;
+          flex-direction: row;
+          align-items: center;
+          justify-content: space-between;
+          padding: 16px 20px;
+          gap: 16px;
+        }
+        .brand {
+          font-size: 20px;
+          gap: 8px;
+        }
+        .steps {
+          gap: 4px;
+        }
+        .step {
+          padding: 10px 12px;
+          min-width: 0;
+        }
+        .step .num {
+          display: none;
+        }
+        .page {
+          padding: 24px 20px;
+        }
+        .feature-heading {
+          align-items: flex-start;
+        }
+        .restore-metrics {
+          gap: 12px;
+        }
+        .restore-metric strong {
+          font-size: 25px;
+        }
+        .restore-metric span {
+          font-size: 11px;
+        }
+        .context-preview .review-grid {
+          grid-template-columns: 1fr 248px;
+        }
+        .comparison {
+          gap: 12px;
+        }
+        .compare-content {
+          padding: 16px;
+        }
+        .results-tabs button {
+          padding: 12px 16px;
+        }
+        .score-top {
+          align-items: flex-start;
+        }
+        .graph-board {
+          min-height: 300px;
+        }
+      }
+      @media (max-width: 600px) {
+        .rail {
+          display: block;
+        }
+        .brand {
+          margin-bottom: 16px;
+        }
+        .steps {
+          justify-content: space-between;
+        }
+        .step {
+          flex: 1;
+        }
+        .restore-metrics {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .restore-metric {
+          padding: 14px 16px;
+        }
+        .restore-metric span {
+          margin-bottom: 8px;
+        }
+        .feature-card {
+          padding: 18px;
+        }
+        .register-toolbar {
+          flex-direction: column;
+          align-items: stretch;
+        }
+        .register-search {
+          max-width: none;
+        }
+        .filters {
+          gap: 6px;
+        }
+        .filter {
+          padding: 8px 10px;
+        }
+        .manual-card {
+          display: block;
+        }
+        .manual-card > div + div {
+          margin-top: 16px;
+        }
+        .context-preview .review-grid {
+          display: block;
+        }
+        .context-preview .document {
+          margin-bottom: 16px;
+        }
+        .comparison {
+          grid-template-columns: 1fr;
+        }
+        .comparison-meta,
+        .results-footer {
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 12px;
+        }
+        .results-footer .button {
+          width: 100%;
+        }
+        .results-tabs {
+          gap: 0;
+          justify-content: space-between;
+        }
+        .results-tabs button {
+          padding: 12px 8px;
+          font-size: 12px;
+          flex: 1;
+          min-width: 0;
+        }
+        .score-top {
+          flex-direction: column;
+          gap: 16px;
+        }
+        .score-metrics {
+          gap: 10px;
+        }
+        .score-metric {
+          padding: 14px;
+        }
+        .score-metric strong {
+          font-size: 25px;
+        }
+        .graph-toolbar {
+          align-items: flex-start;
+        }
+        .graph-controls .button {
+          padding: 8px 10px;
+        }
+        .graph-board {
+          padding: 4px;
+        }
+        .feature-heading .mini-tag {
+          white-space: normal;
+          text-align: right;
+          font-size: 10px;
+          max-width: 112px;
+        }
+        .score-table {
+          min-width: 380px;
+        }
+        .edge-button {
+          gap: 12px;
+        }
+        .baseline {
+          gap: 12px;
+          padding: 16px;
+        }
+        .feature-heading h2 {
+          font-size: 17px;
+        }
+        .register-table {
+          min-width: 560px;
+        }
+        .pagehead h1 {
+          font-size: 27px;
+        }
+        .head-actions {
+          align-items: flex-end;
+        }
+      }
     </style>
   </head>
   <body>
@@ -1239,13 +2159,13 @@
           <div class="nav-label">Workspace</div>
           <div class="steps">
             <button class="step" data-screen="files">
-              <span class="num">01</span>Files
+              <span class="num">01</span>Upload
             </button>
             <button class="step" data-screen="review" aria-current="step">
               <span class="num">02</span>Review
             </button>
             <button class="step" data-screen="summary">
-              <span class="num">03</span>Summary
+              <span class="num">03</span>Results
             </button>
           </div>
         </nav>
@@ -1266,7 +2186,7 @@
         <section class="page" id="screen-review" aria-labelledby="review-title">
           <div class="pagehead">
             <div>
-              <h1 id="review-title" tabindex="-1">Review changes</h1>
+              <h1 id="review-title" tabindex="-1">Review detected entities</h1>
               <p class="subline">
                 3 files <span aria-hidden="true">·</span> 4 suggestions
               </p>
@@ -1276,91 +2196,229 @@
                 ><span class="status-dot"></span
                 ><span id="review-status">Needs review</span></span
               ><button class="button quiet" data-screen="summary">
-                View summary
+                View results
                 <svg aria-hidden="true"><use href="#arrow-icon" /></svg>
               </button>
             </div>
           </div>
-          <div class="review-grid">
-            <aside class="files" aria-label="Sample files">
-              <div class="section-label">Files <span>3</span></div>
-              <div class="file-list" id="file-list"></div>
-              <p class="file-note">
-                One replacement.<br />Every matching mention.
-              </p>
-            </aside>
-            <article class="document" aria-label="Document preview">
-              <div class="document-tools">
-                <strong id="document-label">Email</strong>
-                <div class="segmented" role="group" aria-label="Document view">
-                  <button data-view="original" aria-pressed="true">
-                    Original</button
-                  ><button data-view="copy" aria-pressed="false">
-                    Review copy
-                  </button>
-                </div>
-              </div>
-              <div class="document-body">
-                <div class="paper-eyebrow" id="paper-type">Customer email</div>
-                <h2 class="doc-title" id="document-title">A smooth handoff.</h2>
-                <div class="document-text" id="document-text"></div>
-              </div>
-              <div class="document-footer">
-                <span class="legend"
-                  ><span class="legend-dot"></span
-                  ><span id="legend-label">Suggested change</span></span
-                ><span id="document-count"></span>
-              </div>
-            </article>
-            <aside class="inspector" aria-label="Review suggestions">
-              <div class="inspector-top">
-                <div class="inspector-top-row">
-                  <h2>Suggestions</h2>
-                  <span class="count" id="progress-label">0 / 4 reviewed</span>
-                </div>
-                <div
-                  class="progress"
-                  role="progressbar"
-                  aria-label="Suggestions reviewed"
-                  aria-valuemin="0"
-                  aria-valuemax="4"
-                  aria-valuenow="0"
-                >
-                  <div class="progress-fill" id="progress-fill"></div>
-                </div>
-              </div>
-              <div class="findings" id="finding-list"></div>
-              <form class="edit" id="edit-form" novalidate>
-                <div class="eyebrow" id="finding-kind">Person</div>
-                <h3 class="source-value" id="source-value">Maya Patel</h3>
-                <p class="occurrences" id="occurrences"></p>
-                <label class="field-label" for="replacement">Replace with</label
-                ><input
-                  class="input"
-                  id="replacement"
-                  name="replacement"
-                  maxlength="100"
-                  autocomplete="off"
-                  spellcheck="false"
-                  aria-describedby="replacement-error"
-                />
-                <p class="error" id="replacement-error" role="alert" hidden></p>
-                <div class="decision-state" id="decision-state"></div>
-                <div class="decision-actions">
-                  <button class="button primary" type="submit">
-                    <svg aria-hidden="true"><use href="#check-icon" /></svg
-                    >Confirm change</button
-                  ><button
-                    class="button quiet"
-                    type="button"
-                    id="keep-original"
-                  >
-                    Keep original
-                  </button>
-                </div>
-              </form>
-            </aside>
+
+          <div class="restore-metrics" aria-label="Batch overview">
+            <div class="restore-metric">
+              <span>Documents</span><strong>3</strong>
+            </div>
+            <div class="restore-metric">
+              <span>Mentions</span><strong id="batch-mentions">13</strong>
+            </div>
+            <div class="restore-metric">
+              <span>Entities</span><strong id="batch-entities">4</strong>
+            </div>
+            <div class="restore-metric">
+              <span>Relationships</span><strong>3</strong>
+            </div>
           </div>
+          <div class="register-layout">
+            <section class="feature-card" aria-labelledby="register-title">
+              <div class="feature-heading">
+                <div>
+                  <h2 id="register-title">Detected entities</h2>
+                  <p>Review consistent replacements across the batch.</p>
+                </div>
+                <span class="mini-tag" id="register-count">4 entities</span>
+              </div>
+              <div class="register-toolbar">
+                <div class="filters" role="group" aria-label="Entity category">
+                  <button class="filter" data-filter="all" aria-pressed="true">
+                    All</button
+                  ><button
+                    class="filter"
+                    data-filter="people"
+                    aria-pressed="false"
+                  >
+                    People</button
+                  ><button
+                    class="filter"
+                    data-filter="contacts"
+                    aria-pressed="false"
+                  >
+                    Contacts</button
+                  ><button
+                    class="filter"
+                    data-filter="added"
+                    aria-pressed="false"
+                  >
+                    Added
+                  </button>
+                </div>
+                <input
+                  class="input register-search"
+                  id="entity-search"
+                  type="search"
+                  aria-label="Search entities"
+                  placeholder="Search entities"
+                />
+              </div>
+              <div class="table-scroll">
+                <table class="register-table">
+                  <thead>
+                    <tr>
+                      <th>Source value</th>
+                      <th>Type</th>
+                      <th>Mentions</th>
+                      <th>Replacement</th>
+                      <th>Review</th>
+                    </tr>
+                  </thead>
+                  <tbody id="register-body"></tbody>
+                </table>
+              </div>
+            </section>
+            <section
+              class="feature-card manual-card"
+              aria-labelledby="manual-title"
+            >
+              <div>
+                <h2 id="manual-title">Found a miss?</h2>
+                <p>Add an exact name or sensitive value.</p>
+              </div>
+              <div>
+                <form id="manual-form" novalidate>
+                  <label class="field-label" for="manual-value"
+                    >Source value</label
+                  ><input
+                    class="input"
+                    id="manual-value"
+                    maxlength="100"
+                    placeholder="Northstar Studio"
+                    autocomplete="off"
+                  /><label class="field-label" for="manual-kind">Category</label
+                  ><select id="manual-kind">
+                    <option>Business confidential</option>
+                    <option>Person</option>
+                    <option>Other sensitive</option></select
+                  ><button class="button primary" type="submit">
+                    Add finding
+                  </button>
+                  <p id="manual-error" class="error" role="alert" hidden></p>
+                </form>
+                <p class="manual-note">
+                  Sample corrections are separate from the automatic baseline.
+                </p>
+              </div>
+            </section>
+          </div>
+          <details class="context-preview" id="context-preview">
+            <summary>Inspect a document or edit a replacement</summary>
+            <div class="review-grid">
+              <aside class="files" aria-label="Sample files">
+                <div class="section-label">Files <span>3</span></div>
+                <div class="file-list" id="file-list"></div>
+                <p class="file-note">
+                  One replacement.<br />Every matching mention.
+                </p>
+              </aside>
+              <article class="document" aria-label="Document preview">
+                <div class="document-tools">
+                  <strong id="document-label">Email</strong>
+                  <div
+                    class="segmented"
+                    role="group"
+                    aria-label="Document view"
+                  >
+                    <button data-view="original" aria-pressed="true">
+                      Original</button
+                    ><button data-view="copy" aria-pressed="false">
+                      Review copy
+                    </button>
+                  </div>
+                </div>
+                <div class="document-body">
+                  <div class="paper-eyebrow" id="paper-type">
+                    Customer email
+                  </div>
+                  <h2 class="doc-title" id="document-title">
+                    A smooth handoff.
+                  </h2>
+                  <div class="document-text" id="document-text"></div>
+                </div>
+                <div class="document-footer">
+                  <span class="legend"
+                    ><span class="legend-dot"></span
+                    ><span id="legend-label">Suggested change</span></span
+                  ><span id="document-count"></span>
+                </div>
+              </article>
+              <aside class="inspector" aria-label="Review suggestions">
+                <div class="inspector-top">
+                  <div class="inspector-top-row">
+                    <h2>Suggestions</h2>
+                    <span class="count" id="progress-label"
+                      >0 / 4 reviewed</span
+                    >
+                  </div>
+                  <div
+                    class="progress"
+                    role="progressbar"
+                    aria-label="Suggestions reviewed"
+                    aria-valuemin="0"
+                    aria-valuemax="4"
+                    aria-valuenow="0"
+                  >
+                    <div class="progress-fill" id="progress-fill"></div>
+                  </div>
+                </div>
+                <div class="findings" id="finding-list"></div>
+                <form class="edit" id="edit-form" novalidate>
+                  <div class="eyebrow" id="finding-kind">Person</div>
+                  <h3 class="source-value" id="source-value">Maya Patel</h3>
+                  <p class="occurrences" id="occurrences"></p>
+                  <div id="manual-category-field" hidden>
+                    <label class="field-label" for="finding-category"
+                      >Category</label
+                    >
+                    <select
+                      class="input"
+                      id="finding-category"
+                      style="margin-bottom: 16px"
+                    >
+                      <option>Person</option>
+                      <option>Business confidential</option>
+                      <option>Other sensitive</option>
+                    </select>
+                  </div>
+                  <label class="field-label" for="replacement"
+                    >Replace with</label
+                  ><input
+                    class="input"
+                    id="replacement"
+                    name="replacement"
+                    maxlength="100"
+                    autocomplete="off"
+                    spellcheck="false"
+                    aria-describedby="replacement-error"
+                  />
+                  <p
+                    class="error"
+                    id="replacement-error"
+                    role="alert"
+                    hidden
+                  ></p>
+                  <div class="decision-state" id="decision-state"></div>
+                  <div class="decision-actions">
+                    <button class="button primary" type="submit">
+                      <svg aria-hidden="true"><use href="#check-icon" /></svg
+                      >Confirm change</button
+                    ><button
+                      class="button quiet"
+                      type="button"
+                      id="keep-original"
+                    >
+                      Keep original
+                    </button>
+                  </div>
+                </form>
+              </aside>
+            </div>
+          </details>
           <div class="review-note">
             <span class="review-note-main"
               ><svg class="icon" aria-hidden="true">
@@ -1421,54 +2479,214 @@
         >
           <div class="pagehead">
             <div>
-              <h1 id="summary-title" tabindex="-1">Your review</h1>
-              <p class="subline">A clear view of what changed.</p>
+              <h1 id="summary-title" tabindex="-1">Results &amp; evaluation</h1>
+              <p class="subline">
+                Inspect changes, relationships, and sample agreement.
+              </p>
             </div>
             <span class="status"
               ><span class="status-dot"></span>Review copy</span
             >
           </div>
-          <div class="summary">
-            <div class="summary-card">
-              <div class="summary-heading">
-                <span class="upload-icon"
-                  ><svg class="icon" aria-hidden="true">
-                    <use href="#file-icon" /></svg
-                ></span>
-                <div>
-                  <h2 id="summary-heading">4 suggestions to review</h2>
-                  <p id="summary-description">
-                    Confirm a replacement or keep the original.
-                  </p>
-                </div>
-              </div>
-              <div class="metrics">
-                <div class="metric"><strong>3</strong><span>Files</span></div>
-                <div class="metric">
-                  <strong id="confirmed-count">0</strong
-                  ><span>Changes confirmed</span>
-                </div>
-                <div class="metric">
-                  <strong id="kept-count">0</strong><span>Kept original</span>
-                </div>
-              </div>
-              <div id="summary-files"></div>
+
+          <div class="restore-metrics" aria-label="Review results">
+            <div class="restore-metric">
+              <span>Documents</span><strong>3</strong>
             </div>
-            <div class="summary-bottom">
-              <p>
-                Review copy. Not cleared for sharing.<br /><button
-                  class="button quiet"
-                  data-details
-                  style="padding-left: 0"
-                >
-                  What does this mean?
-                </button>
-              </p>
-              <button class="button primary" id="summary-primary">
-                Continue review
-                <svg aria-hidden="true"><use href="#arrow-icon" /></svg>
+            <div class="restore-metric">
+              <span>Changes confirmed</span
+              ><strong id="result-confirmed">0</strong>
+            </div>
+            <div class="restore-metric">
+              <span>Kept original</span><strong id="result-kept">0</strong>
+            </div>
+            <div class="restore-metric">
+              <span>Pending review</span><strong id="result-pending">4</strong>
+            </div>
+          </div>
+          <div class="results-tabs" role="tablist" aria-label="Result views">
+            <button
+              role="tab"
+              id="tab-documents"
+              aria-controls="panel-documents"
+              aria-selected="true"
+              tabindex="0"
+              data-result-tab="documents"
+            >
+              Documents
+            </button>
+            <button
+              role="tab"
+              id="tab-relationships"
+              aria-controls="panel-relationships"
+              aria-selected="false"
+              tabindex="-1"
+              data-result-tab="relationships"
+            >
+              Relationships
+            </button>
+            <button
+              role="tab"
+              id="tab-evaluation"
+              aria-controls="panel-evaluation"
+              aria-selected="false"
+              tabindex="-1"
+              data-result-tab="evaluation"
+            >
+              Evaluation
+            </button>
+          </div>
+          <section
+            id="panel-documents"
+            class="feature-card results-panel"
+            role="tabpanel"
+            aria-labelledby="tab-documents"
+          >
+            <div class="feature-heading">
+              <div>
+                <h2>Document comparison</h2>
+                <p>Source and the current review copy.</p>
+              </div>
+              <span class="mini-tag">Review required</span>
+            </div>
+            <div
+              class="result-filebar"
+              id="comparison-files"
+              role="group"
+              aria-label="Comparison document"
+            ></div>
+            <p
+              class="review-warning"
+              id="evidence-notice"
+              tabindex="-1"
+              role="status"
+              hidden
+            ></p>
+            <div class="comparison">
+              <article class="compare-card">
+                <div class="compare-label">Original</div>
+                <pre class="compare-content" id="comparison-source"></pre>
+              </article>
+              <article class="compare-card">
+                <div class="compare-label">Review copy</div>
+                <pre class="compare-content" id="comparison-copy"></pre>
+              </article>
+            </div>
+            <div class="comparison-meta">
+              <span id="comparison-count"></span
+              ><button class="button" id="edit-comparison">
+                Edit a replacement
               </button>
             </div>
+            <details class="format-coverage">
+              <summary>Format coverage</summary>
+              <p>
+                These samples cover TXT, JSON, and CSV. PDF/image pixels, Office
+                hidden content, metadata, and digital signatures are not
+                evaluated by this preview.
+              </p>
+            </details>
+          </section>
+          <section
+            id="panel-relationships"
+            class="feature-card results-panel"
+            role="tabpanel"
+            aria-labelledby="tab-relationships"
+            hidden
+          >
+            <div class="feature-heading">
+              <div>
+                <h2>Entity relationship map</h2>
+                <p>Explicit claims, with source evidence.</p>
+              </div>
+              <span class="mini-tag">3 sample claims</span>
+            </div>
+            <div class="graph-toolbar">
+              <div class="segmented" role="group" aria-label="Graph labels">
+                <button data-graph-label="original" aria-pressed="true">
+                  Original</button
+                ><button data-graph-label="copy" aria-pressed="false">
+                  Review copy
+                </button>
+              </div>
+              <div class="graph-controls">
+                <button class="button" id="graph-minus" aria-label="Zoom out">
+                  −</button
+                ><button class="button" id="graph-fit">Fit</button
+                ><button class="button" id="graph-plus" aria-label="Zoom in">
+                  +
+                </button>
+              </div>
+            </div>
+            <div class="graph-layout">
+              <div>
+                <div class="graph-board" id="graph-board"></div>
+                <div
+                  class="edge-list"
+                  id="edge-list"
+                  aria-label="Relationship claims"
+                ></div>
+              </div>
+              <aside
+                class="evidence-card"
+                id="graph-evidence"
+                aria-label="Relationship evidence"
+              ></aside>
+            </div>
+            <p class="score-caveat">
+              Claim decisions stay in this preview. Co-mentions do not establish
+              relationships.
+            </p>
+          </section>
+          <section
+            id="panel-evaluation"
+            class="feature-card results-panel"
+            role="tabpanel"
+            aria-labelledby="tab-evaluation"
+            hidden
+          >
+            <div class="score-top">
+              <div class="feature-heading" style="margin: 0">
+                <div>
+                  <h2>Evaluation scorecard</h2>
+                  <p>Sample-label agreement, before and after review.</p>
+                </div>
+              </div>
+              <label class="reference-toggle"
+                ><input id="reference-labels" type="checkbox" checked />Use
+                sample labels</label
+              >
+            </div>
+            <div id="score-content"></div>
+            <section class="score-section">
+              <h3>Coverage &amp; checks</h3>
+              <div class="check-list" id="coverage-checks"></div>
+            </section>
+            <details class="score-caveat">
+              <summary>How to read these scores</summary>
+              <p>
+                Scores use fixed fictional labels and the sample choices you
+                apply. No detector or final-content validator runs here. Manual
+                additions do not alter the automatic baseline. This is not an
+                independent holdout, anonymity score, or sharing approval.
+              </p>
+            </details>
+          </section>
+          <div class="results-footer">
+            <p>
+              Review copy. Not cleared for sharing.<br /><button
+                class="button quiet"
+                data-details
+                style="padding-left: 0"
+              >
+                Details
+              </button>
+            </p>
+            <button class="button primary" id="summary-primary">
+              Continue review<svg aria-hidden="true">
+                <use href="#arrow-icon" />
+              </svg>
+            </button>
           </div>
         </section>
       </main>
@@ -1523,7 +2741,7 @@
           short: "Customer record",
           type: "Customer record",
           title: "The person behind the account.",
-          text: '{\n  "name": "Maya Patel",\n  "email": "maya@example.test",\n  "account_owner": "Isha Rao",\n  "company": "Northstar Studio"\n}',
+          text: '{\n  "name": "Maya Patel",\n  "email": "maya@example.test",\n  "account_owner": "Isha Rao",\n  "employer": "Northstar Studio"\n}',
         },
         {
           name: "account-owners.csv",
@@ -1670,13 +2888,18 @@
       }
       function render() {
         const reviewed = findings.filter((f) => f.decision).length;
-        $("progress-label").textContent = reviewed + " / 4 reviewed";
-        $("progress-fill").style.width = (reviewed / 4) * 100 + "%";
+        $("progress-label").textContent =
+          reviewed + " / " + findings.length + " reviewed";
+        $("progress-fill").style.width =
+          (reviewed / findings.length) * 100 + "%";
         document
           .querySelector('[role="progressbar"]')
           .setAttribute("aria-valuenow", reviewed);
+        document
+          .querySelector('[role="progressbar"]')
+          .setAttribute("aria-valuemax", findings.length);
         $("review-status").textContent =
-          reviewed === 4 ? "Review complete" : "Needs review";
+          reviewed === findings.length ? "Review complete" : "Needs review";
         $("file-list").replaceChildren(
           ...docs.map((d, i) => {
             const b = node("button", undefined, "file");
@@ -1732,6 +2955,8 @@
         );
         const f = findings[selected];
         $("finding-kind").textContent = f.kind;
+        $("manual-category-field").hidden = !f.manual;
+        $("finding-category").value = f.kind;
         $("source-value").textContent = f.value;
         $("occurrences").textContent =
           docs.reduce((n, d) => n + occurrences(d.text, f.value), 0) +
@@ -1746,6 +2971,7 @@
               ? "Original kept"
               : "";
         renderDocument();
+        renderRegister();
         renderSummary();
       }
       function nextFinding() {
@@ -1783,47 +3009,7 @@
         nextFinding();
       }
       function renderSummary() {
-        const reviewed = findings.filter((f) => f.decision).length;
-        $("confirmed-count").textContent = findings.filter(
-          (f) => f.decision === "replace",
-        ).length;
-        $("kept-count").textContent = findings.filter(
-          (f) => f.decision === "keep",
-        ).length;
-        $("summary-heading").textContent =
-          reviewed === 4
-            ? "All suggestions reviewed"
-            : 4 -
-              reviewed +
-              " suggestion" +
-              (4 - reviewed === 1 ? "" : "s") +
-              " to review";
-        $("summary-description").textContent =
-          reviewed === 4
-            ? "Your sample decisions are recorded."
-            : "Confirm a replacement or keep the original.";
-        $("summary-files").replaceChildren(
-          ...docs.map((d, i) => {
-            const row = node("div", undefined, "summary-file");
-            const label = node("div");
-            label.append(node("strong", d.short), node("small", d.name));
-            const button = node("button", "View copy", "button quiet");
-            button.onclick = () => {
-              file = i;
-              view = "copy";
-              render();
-              navigate("review");
-            };
-            row.append(label, button);
-            return row;
-          }),
-        );
-        $("summary-primary").replaceChildren(
-          document.createTextNode(
-            reviewed === 4 ? "Download sample" : "Continue review",
-          ),
-          icon("arrow"),
-        );
+        renderResults();
       }
       document
         .querySelectorAll("[data-screen]")
@@ -1847,10 +3033,21 @@
       };
       $("keep-original").onclick = () => record("keep");
       $("replacement").oninput = clearError;
+      $("finding-category").onchange = () => {
+        const f = findings[selected];
+        if (!f.manual) return;
+        f.kind = $("finding-category").value;
+        f.decision = null;
+        clearError();
+        render();
+        $("finding-category").focus();
+        announce("Category updated. Confirm the replacement again.");
+      };
       $("summary-primary").onclick = () => {
         if (findings.some((f) => !f.decision)) {
-          selectFinding(findings.findIndex((f) => !f.decision));
+          const next = findings.findIndex((f) => !f.decision);
           navigate("review");
+          editFinding(next);
         } else {
           $("download-ack").checked = false;
           $("download-sample").disabled = true;
@@ -1866,13 +3063,13 @@
           : value;
       }
       function replaceTerms(text) {
-        return text.replace(
-          /Maya Patel|Isha Rao|maya@example\.test|isha@example\.test/g,
-          (value) => {
-            const f = findings.find((f) => f.value === value);
-            return f.decision === "replace" ? f.alias : value;
-          },
+        const terms = findings.map((f) =>
+          f.value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
         );
+        return text.replace(new RegExp(terms.join("|"), "g"), (value) => {
+          const f = findings.find((f) => f.value === value);
+          return f.decision === "replace" ? f.alias : value;
+        });
       }
       function sampleText(doc) {
         if (doc.name.endsWith(".json"))
@@ -1902,6 +3099,11 @@
           verified: false,
           clearedForSharing: false,
           decisions: findings.map((f) => ({ ...f })),
+          relationshipDecisions: claims.map((c) => ({
+            id: c.id,
+            decision: c.decision,
+          })),
+          referenceLabelsAttached: $("reference-labels").checked,
           documents: docs.map((d) => ({
             name: d.name,
             type: d.type,
@@ -1924,6 +3126,16 @@
       };
       $("reset-sample").onclick = () => {
         findings = initial.map((f) => ({ ...f, decision: null }));
+        claims.forEach((c) => (c.decision = "pending"));
+        graphSelection = { kind: "edge", id: "mail" };
+        graphLabel = "original";
+        graphZoom = 1;
+        entityFilter = "all";
+        $("entity-search").value = "";
+        $("reference-labels").checked = true;
+        $("manual-value").value = "";
+        $("manual-error").hidden = true;
+        evidenceTarget = null;
         selected = 0;
         file = 0;
         view = "original";
@@ -1956,6 +3168,840 @@
           return card;
         }),
       );
+
+      let entityFilter = "all",
+        resultTab = "documents",
+        comparisonFile = 0,
+        graphLabel = "original",
+        graphZoom = 1,
+        graphSelection = { kind: "edge", id: "mail" },
+        evidenceTarget = null;
+      const graphNodes = [
+        { id: "maya", value: "Maya Patel", kind: "Person" },
+        { id: "isha", value: "Isha Rao", kind: "Person" },
+        { id: "company", value: "Northstar Studio", kind: "Organization" },
+      ];
+      const claims = [
+        {
+          id: "mail",
+          source: "maya",
+          target: "isha",
+          label: "sent to",
+          evidence: [{ doc: 0, start: 1, end: 2, kind: "Mail header" }],
+          decision: "pending",
+        },
+        {
+          id: "owner",
+          source: "isha",
+          target: "maya",
+          label: "account owner for",
+          evidence: [
+            { doc: 1, start: 2, end: 4, kind: "Structured fields" },
+            { doc: 2, start: 1, end: 2, kind: "CSV fields" },
+          ],
+          decision: "pending",
+        },
+        {
+          id: "employer",
+          source: "maya",
+          target: "company",
+          label: "works at",
+          evidence: [{ doc: 1, start: 2, end: 5, kind: "Employer field" }],
+          decision: "pending",
+        },
+      ];
+      const goldEntities = [
+        ...initial.map((f) => ({ value: f.value, kind: f.kind })),
+        { value: "Northstar Studio", kind: "Business confidential" },
+      ];
+      const totalMentions = (f) =>
+        docs.reduce((n, d) => n + occurrences(d.text, f.value), 0);
+      const reviewedCount = () => findings.filter((f) => f.decision).length;
+      function sourceSpans(entity, doc) {
+        const result = [];
+        let offset = 0;
+        while (true) {
+          const start = doc.text.indexOf(entity.value, offset);
+          if (start === -1) break;
+          result.push({
+            start,
+            end: start + entity.value.length,
+            kind: entity.kind,
+          });
+          offset = start + entity.value.length;
+        }
+        return result;
+      }
+      function scoreFor(docIndex) {
+        const gold = goldEntities.flatMap((f) =>
+          sourceSpans(f, docs[docIndex]),
+        );
+        const predicted = findings
+          .filter((f) => f.decision === "replace")
+          .flatMap((f) => sourceSpans(f, docs[docIndex]));
+        const matched = predicted.filter((p) =>
+          gold.some(
+            (g) => g.start === p.start && g.end === p.end && g.kind === p.kind,
+          ),
+        );
+        return {
+          tp: matched.length,
+          fp: predicted.length - matched.length,
+          fn: gold.length - matched.length,
+          gold: gold.length,
+        };
+      }
+      function scoreAll() {
+        return docs
+          .map((_, i) => scoreFor(i))
+          .reduce(
+            (a, b) => ({
+              tp: a.tp + b.tp,
+              fp: a.fp + b.fp,
+              fn: a.fn + b.fn,
+              gold: a.gold + b.gold,
+            }),
+            { tp: 0, fp: 0, fn: 0, gold: 0 },
+          );
+      }
+      const percentage = (n, d) => (d ? Math.round((n * 100) / d) + "%" : "—");
+      function editFinding(index) {
+        selectFinding(index);
+        $("context-preview").open = true;
+        $("replacement").focus();
+        $("context-preview").scrollIntoView({
+          block: "start",
+          behavior: "instant",
+        });
+      }
+      function renderRegister() {
+        $("batch-mentions").textContent = findings.reduce(
+          (n, f) => n + totalMentions(f),
+          0,
+        );
+        $("batch-entities").textContent = findings.length;
+        $("register-count").textContent = findings.length + " entities";
+        document.querySelector("#screen-review .subline").textContent =
+          "3 files · " + findings.length + " suggestions";
+        document
+          .querySelectorAll("[data-filter]")
+          .forEach((b) =>
+            b.setAttribute(
+              "aria-pressed",
+              String(b.dataset.filter === entityFilter),
+            ),
+          );
+        const search = $("entity-search").value.toLocaleLowerCase();
+        const entries = findings
+          .map((f, i) => ({ f, i }))
+          .filter(
+            ({ f }) =>
+              (entityFilter === "all" ||
+                (entityFilter === "people" && f.kind === "Person") ||
+                (entityFilter === "contacts" && f.kind === "Email") ||
+                (entityFilter === "added" && f.manual)) &&
+              (!search ||
+                f.value.toLocaleLowerCase().includes(search) ||
+                f.alias.toLocaleLowerCase().includes(search)),
+          );
+        $("register-body").replaceChildren(
+          ...entries.map(({ f, i }) => {
+            const row = node("tr");
+            const source = node("td");
+            source.append(
+              node("strong", f.value),
+              node(
+                "span",
+                f.manual ? "Manual addition" : "Automatic sample",
+                "row-state",
+              ),
+            );
+            const type = node("td");
+            type.append(node("span", f.kind, "type-label"));
+            const count = node("td", String(totalMentions(f)));
+            const alias = node("td");
+            const edit = node(
+              "button",
+              f.decision === "keep" ? "Original retained" : f.alias,
+              "alias-button",
+            );
+            edit.setAttribute("aria-label", "Edit replacement for " + f.value);
+            edit.onclick = () => editFinding(i);
+            alias.append(edit);
+            const decision = node("td");
+            const button = node(
+              "button",
+              f.decision === "replace"
+                ? "Confirmed"
+                : f.decision === "keep"
+                  ? "Kept"
+                  : "Review",
+              "button",
+            );
+            button.setAttribute("aria-label", "Review " + f.value);
+            button.onclick = () => editFinding(i);
+            decision.append(button);
+            row.append(source, type, count, alias, decision);
+            return row;
+          }),
+        );
+        if (!entries.length) {
+          const row = node("tr");
+          const cell = node(
+            "td",
+            "No entities match this filter.",
+            "table-empty",
+          );
+          cell.colSpan = 5;
+          row.append(cell);
+          $("register-body").append(row);
+        }
+      }
+      function setResultTab(tab, focus = false) {
+        resultTab = tab;
+        document.querySelectorAll("[data-result-tab]").forEach((b) => {
+          const active = b.dataset.resultTab === tab;
+          b.setAttribute("aria-selected", String(active));
+          b.tabIndex = active ? 0 : -1;
+        });
+        ["documents", "relationships", "evaluation"].forEach(
+          (t) => ($("panel-" + t).hidden = t !== tab),
+        );
+        renderResults();
+        if (focus) $("tab-" + tab).focus();
+      }
+      function renderResults() {
+        $("result-confirmed").textContent = findings.filter(
+          (f) => f.decision === "replace",
+        ).length;
+        $("result-kept").textContent = findings.filter(
+          (f) => f.decision === "keep",
+        ).length;
+        $("result-pending").textContent = findings.length - reviewedCount();
+        $("summary-primary").replaceChildren(
+          document.createTextNode(
+            reviewedCount() === findings.length
+              ? "Download sample"
+              : "Continue review",
+          ),
+          icon("arrow"),
+        );
+        renderComparison();
+        renderGraph();
+        renderScore();
+      }
+      function renderComparison() {
+        $("comparison-files").replaceChildren(
+          ...docs.map((d, i) => {
+            const b = node("button", d.short);
+            b.setAttribute("aria-pressed", String(i === comparisonFile));
+            b.setAttribute("aria-label", "Compare " + d.name);
+            b.onclick = () => {
+              comparisonFile = i;
+              evidenceTarget = null;
+              renderComparison();
+              $("comparison-files").children[i].focus();
+            };
+            return b;
+          }),
+        );
+        const doc = docs[comparisonFile];
+        const original = $("comparison-source");
+        original.replaceChildren();
+        const lines = doc.text.split("\n");
+        lines.forEach((line, i) => {
+          const el = node(
+            evidenceTarget?.doc === comparisonFile &&
+              i + 1 >= evidenceTarget.start &&
+              i + 1 <= evidenceTarget.end
+              ? "mark"
+              : "span",
+            line + (i < lines.length - 1 ? "\n" : ""),
+          );
+          if (el.tagName === "MARK") el.className = "evidence-line";
+          original.append(el);
+        });
+        $("comparison-copy").textContent = sampleText(doc);
+        const applied = findings
+          .filter((f) => f.decision === "replace")
+          .reduce((n, f) => n + occurrences(doc.text, f.value), 0);
+        $("comparison-count").textContent =
+          applied + " mentions changed · " + doc.name;
+        $("evidence-notice").hidden =
+          !evidenceTarget || evidenceTarget.doc !== comparisonFile;
+        if (!$("evidence-notice").hidden)
+          $("evidence-notice").textContent =
+            "Relationship evidence · source lines " +
+            evidenceTarget.start +
+            "–" +
+            evidenceTarget.end;
+      }
+      function graphName(id) {
+        const g = graphNodes.find((n) => n.id === id);
+        const f = findings.find((f) => f.value === g.value);
+        return graphLabel === "copy" && f?.decision === "replace"
+          ? f.alias
+          : g.value;
+      }
+      function openEvidence(e) {
+        comparisonFile = e.doc;
+        evidenceTarget = e;
+        navigate("summary");
+        setResultTab("documents", true);
+        $("evidence-notice").focus();
+      }
+      function svgEl(tag, attributes = {}) {
+        const el = document.createElementNS("http://www.w3.org/2000/svg", tag);
+        Object.entries(attributes).forEach(([k, v]) =>
+          el.setAttribute(k, String(v)),
+        );
+        return el;
+      }
+      function chooseGraph(kind, id, focus = false) {
+        graphSelection = { kind, id };
+        renderGraph();
+        if (focus) {
+          const target =
+            kind === "node"
+              ? document.querySelector('[data-graph-node="' + id + '"]')
+              : document.querySelector('[data-edge="' + id + '"]');
+          target?.focus({ preventScroll: true });
+        }
+      }
+      function renderGraph() {
+        document
+          .querySelectorAll("[data-graph-label]")
+          .forEach((b) =>
+            b.setAttribute(
+              "aria-pressed",
+              String(b.dataset.graphLabel === graphLabel),
+            ),
+          );
+        const mobile = $("graph-board").getBoundingClientRect().width < 560;
+        const width = mobile ? 440 : 760,
+          height = mobile ? 540 : 360;
+        const positions = mobile
+          ? {
+              maya: { x: 140, y: 90 },
+              isha: { x: 290, y: 285 },
+              company: { x: 140, y: 470 },
+            }
+          : {
+              maya: { x: 140, y: 100 },
+              isha: { x: 590, y: 100 },
+              company: { x: 365, y: 290 },
+            };
+        const svg = svgEl("svg", {
+          viewBox: "0 0 " + width + " " + height,
+          role: "group",
+          "aria-label": "Entity relationship map",
+        });
+        svg.style.width = graphZoom * 100 + "%";
+        svg.style.minWidth = "100%";
+        svg.style.height = "auto";
+        const defs = svgEl("defs");
+        const arrow = svgEl("marker", {
+          id: "graph-arrow",
+          viewBox: "0 0 10 10",
+          refX: 9,
+          refY: 5,
+          markerWidth: 5,
+          markerHeight: 5,
+          orient: "auto-start-reverse",
+        });
+        arrow.append(svgEl("path", { d: "M0 0L10 5L0 10z", fill: "#789b98" }));
+        defs.append(arrow);
+        svg.append(defs);
+        claims.forEach((c) => {
+          const a = positions[c.source],
+            b = positions[c.target],
+            dx = b.x - a.x,
+            dy = b.y - a.y,
+            length = Math.hypot(dx, dy);
+          const offset = c.id === "owner" || c.id === "mail" ? 14 : 0;
+          const x1 = a.x + (dx * 66) / length - (dy * offset) / length,
+            y1 = a.y + (dy * 66) / length + (dx * offset) / length,
+            x2 = b.x - (dx * 66) / length - (dy * offset) / length,
+            y2 = b.y - (dy * 66) / length + (dx * offset) / length;
+          const path = svgEl("path", {
+            d: `M${x1} ${y1}L${x2} ${y2}`,
+            class:
+              "graph-edge" +
+              (graphSelection.id === c.id ? " selected" : "") +
+              (c.decision === "rejected" ? " rejected" : ""),
+            "marker-end": "url(#graph-arrow)",
+          });
+          svg.append(path);
+          const label = svgEl("text", {
+            x: (x1 + x2) / 2,
+            y: (y1 + y2) / 2 + (c.id === "mail" ? 18 : -10),
+            "text-anchor": "middle",
+            class: "graph-edge-label",
+          });
+          label.textContent = c.label;
+          svg.append(label);
+        });
+        graphNodes.forEach((n, i) => {
+          const pos = positions[n.id];
+          const group = svgEl("g", {
+            transform: `translate(${pos.x} ${pos.y})`,
+            class:
+              "graph-node" +
+              (n.kind === "Organization" ? " company" : "") +
+              (graphSelection.id === n.id ? " selected" : ""),
+            role: "button",
+            tabindex: 0,
+            "data-graph-node": n.id,
+            "aria-label": n.kind + " " + graphName(n.id),
+          });
+          group.append(svgEl("circle", { r: 64 }));
+          const label = svgEl("text", { "text-anchor": "middle", y: -3 });
+          const name = graphName(n.id);
+          label.textContent = name.length > 19 ? name.slice(0, 18) + "…" : name;
+          const kind = svgEl("text", {
+            "text-anchor": "middle",
+            y: 19,
+            class: "kind",
+          });
+          kind.textContent = n.kind;
+          group.append(label, kind);
+          group.onclick = () => chooseGraph("node", n.id, true);
+          group.onkeydown = (e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              chooseGraph("node", n.id, true);
+            } else if (
+              ["ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp"].includes(
+                e.key,
+              )
+            ) {
+              e.preventDefault();
+              const step =
+                e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : -1;
+              chooseGraph(
+                "node",
+                graphNodes[(i + step + graphNodes.length) % graphNodes.length]
+                  .id,
+                true,
+              );
+            }
+          };
+          svg.append(group);
+        });
+        $("graph-board").replaceChildren(svg);
+        $("edge-list").replaceChildren(
+          ...claims.map((c) => {
+            const b = node("button", undefined, "edge-button");
+            b.dataset.edge = c.id;
+            b.setAttribute(
+              "aria-pressed",
+              String(
+                graphSelection.kind === "edge" && graphSelection.id === c.id,
+              ),
+            );
+            b.append(
+              node(
+                "span",
+                graphName(c.source) + " " + c.label + " " + graphName(c.target),
+              ),
+              node("span", c.decision[0].toUpperCase() + c.decision.slice(1)),
+            );
+            b.onclick = () => chooseGraph("edge", c.id, true);
+            return b;
+          }),
+        );
+        const panel = $("graph-evidence");
+        panel.replaceChildren();
+        if (graphSelection.kind === "node") {
+          const n = graphNodes.find((n) => n.id === graphSelection.id);
+          panel.append(
+            node("div", n.kind, "eyebrow"),
+            node("h3", graphName(n.id)),
+            node(
+              "p",
+              "Appears in " +
+                docs.filter((d) => d.text.includes(n.value)).length +
+                " sample documents.",
+            ),
+          );
+          const list = node("div", undefined, "evidence-list");
+          docs.forEach((d, i) => {
+            if (!d.text.includes(n.value)) return;
+            const b = node("button", d.short);
+            b.onclick = () => {
+              comparisonFile = i;
+              evidenceTarget = null;
+              navigate("summary");
+              setResultTab("documents", true);
+            };
+            list.append(b);
+          });
+          panel.append(list);
+        } else {
+          const c = claims.find((c) => c.id === graphSelection.id);
+          panel.append(
+            node("div", "Claim evidence", "eyebrow"),
+            node(
+              "h3",
+              graphName(c.source) + " " + c.label + " " + graphName(c.target),
+            ),
+          );
+          const label = node("label", "Review decision", "field-label");
+          label.htmlFor = "claim-decision";
+          const select = node("select", undefined, "graph-review-select");
+          select.id = "claim-decision";
+          ["pending", "accepted", "rejected"].forEach((value) => {
+            const o = node("option", value[0].toUpperCase() + value.slice(1));
+            o.value = value;
+            select.append(o);
+          });
+          select.value = c.decision;
+          select.onchange = () => {
+            c.decision = select.value;
+            renderGraph();
+            renderScore();
+            $("claim-decision").focus();
+            announce("Sample claim decision updated.");
+          };
+          panel.append(label, select);
+          c.evidence.forEach((e) => {
+            const quote = docs[e.doc].text
+              .split("\n")
+              .slice(e.start - 1, e.end)
+              .join("\n");
+            panel.append(node("div", quote, "evidence-text"));
+            const b = node(
+              "button",
+              "Open " + docs[e.doc].short + " · lines " + e.start + "–" + e.end,
+              "button",
+            );
+            b.onclick = () => openEvidence(e);
+            panel.append(b);
+          });
+          panel.append(
+            node("p", "Evidence: " + c.evidence.map((e) => e.kind).join(" · ")),
+          );
+        }
+      }
+      function addManual(value, kind) {
+        value = value.trim();
+        let error = "";
+        if (!value) error = "Enter a source value.";
+        else if (findings.length >= 20)
+          error = "This sample supports up to 20 findings.";
+        else if (!docs.some((d) => d.text.includes(value)))
+          error = "This value is not in the sample files.";
+        else if (
+          findings.some(
+            (f) => f.value.includes(value) || value.includes(f.value),
+          )
+        )
+          error = "This value overlaps an existing finding.";
+        if (error) {
+          $("manual-error").textContent = error;
+          $("manual-error").hidden = false;
+          $("manual-value").setAttribute("aria-invalid", "true");
+          return false;
+        }
+        findings.push({
+          value,
+          kind,
+          alias: kind === "Person" ? "Alex Chen" : "[Private value]",
+          decision: null,
+          manual: true,
+        });
+        $("manual-value").value = "";
+        $("manual-error").hidden = true;
+        $("manual-value").removeAttribute("aria-invalid");
+        entityFilter = "all";
+        $("entity-search").value = "";
+        selected = findings.length - 1;
+        file = docs.findIndex((d) => d.text.includes(value));
+        render();
+        announce("Finding added to the sample.");
+        return true;
+      }
+      function reviewMiss() {
+        const gold = goldEntities.find((g) => g.value === "Northstar Studio");
+        let found = findings.findIndex((f) => f.value === gold.value);
+        if (found === -1) {
+          found = findings.findIndex(
+            (f) =>
+              f.manual &&
+              (gold.value.includes(f.value) || f.value.includes(gold.value)),
+          );
+        }
+        if (found === -1) {
+          if (!addManual(gold.value, gold.kind)) {
+            navigate("review");
+            $("manual-value").focus();
+            return;
+          }
+          found = findings.length - 1;
+        } else if (
+          findings[found].value !== gold.value ||
+          findings[found].kind !== gold.kind
+        ) {
+          findings[found].value = gold.value;
+          findings[found].kind = gold.kind;
+          findings[found].decision = null;
+        }
+        clearError();
+        navigate("review");
+        editFinding(found);
+        announce(
+          "Reference category applied: Business confidential. Confirm the replacement.",
+        );
+      }
+      function renderScore() {
+        const score = scoreAll(),
+          attached = $("reference-labels").checked;
+        const target = $("score-content");
+        target.replaceChildren();
+        if (!attached)
+          target.append(
+            node(
+              "div",
+              "Precision and recall are unmeasured. No sample reference labels are attached.",
+              "unmeasured",
+            ),
+          );
+        else {
+          const baseline = node("div", undefined, "baseline");
+          baseline.append(
+            node("strong", "Automatic sample baseline"),
+            node("span", "Precision 100%"),
+            node(
+              "span",
+              "Recall " +
+                percentage(
+                  initial.reduce((n, f) => n + totalMentions(f), 0),
+                  score.gold,
+                ),
+            ),
+          );
+          target.append(baseline);
+          const metrics = node("div", undefined, "score-metrics");
+          [
+            [
+              "Precision after review",
+              percentage(score.tp, score.tp + score.fp),
+              score.fp + " unmatched predictions",
+            ],
+            [
+              "Recall after review",
+              percentage(score.tp, score.gold),
+              score.fn + " missed labels",
+            ],
+            ["Labelled spans", String(score.gold), "3 fictional documents"],
+            [
+              "Applied spans",
+              String(score.tp + score.fp),
+              "Confirmed replacements only",
+            ],
+          ].forEach(([label, value, detail]) => {
+            const card = node("div", undefined, "score-metric");
+            card.append(
+              node("span", label),
+              node("strong", value),
+              node("small", detail),
+            );
+            metrics.append(card);
+          });
+          target.append(metrics);
+          const categorySection = node("section", undefined, "score-section");
+          categorySection.append(node("h3", "Agreement by category"));
+          const table = node("table", undefined, "score-table");
+          const head = node("thead"),
+            row = node("tr");
+          ["Category", "Matched", "Unmatched", "Missed"].forEach((label) =>
+            row.append(node("th", label)),
+          );
+          head.append(row);
+          const body = node("tbody");
+          const kinds = [
+            ...new Set([
+              ...goldEntities.map((f) => f.kind),
+              ...findings.map((f) => f.kind),
+            ]),
+          ];
+          kinds.forEach((kind) => {
+            const gold = goldEntities
+              .filter((g) => g.kind === kind)
+              .reduce((n, g) => n + totalMentions(g), 0);
+            const applied = findings.filter(
+              (f) => f.kind === kind && f.decision === "replace",
+            );
+            const tp = applied
+              .filter((f) =>
+                goldEntities.some(
+                  (g) => g.value === f.value && g.kind === f.kind,
+                ),
+              )
+              .reduce((n, f) => n + totalMentions(f), 0);
+            const fp = applied.reduce((n, f) => n + totalMentions(f), 0) - tp;
+            const r = node("tr");
+            [kind, tp, fp, gold - tp].forEach((value) =>
+              r.append(node("td", String(value))),
+            );
+            body.append(r);
+          });
+          table.append(head, body);
+          const scroll = node("div", undefined, "table-scroll");
+          scroll.append(table);
+          categorySection.append(scroll);
+          target.append(categorySection);
+          const fileSection = node("section", undefined, "score-section");
+          fileSection.append(node("h3", "Review by document"));
+          const ft = node("table", undefined, "score-table");
+          const fh = node("thead"),
+            fr = node("tr");
+          ["Document", "Matched", "Missed", "Inspect"].forEach((value) =>
+            fr.append(node("th", value)),
+          );
+          fh.append(fr);
+          const fb = node("tbody");
+          docs.forEach((d, i) => {
+            const sc = scoreFor(i),
+              r = node("tr");
+            [d.short, sc.tp, sc.fn].forEach((value) =>
+              r.append(node("td", String(value))),
+            );
+            const action = node("td");
+            const b = node("button", "View copy", "button quiet");
+            b.onclick = () => {
+              comparisonFile = i;
+              evidenceTarget = null;
+              setResultTab("documents", true);
+            };
+            action.append(b);
+            r.append(action);
+            fb.append(r);
+          });
+          ft.append(fh, fb);
+          const fs = node("div", undefined, "table-scroll");
+          fs.append(ft);
+          fileSection.append(fs);
+          target.append(fileSection);
+          if (
+            !findings.some(
+              (f) =>
+                f.value === "Northstar Studio" &&
+                f.kind === "Business confidential" &&
+                f.decision === "replace",
+            )
+          ) {
+            const miss = node("section", undefined, "score-section");
+            miss.append(
+              node("h3", "Missed reference value"),
+              node(
+                "p",
+                "Northstar Studio · Business confidential · 2 spans",
+                "subline",
+              ),
+            );
+            const button = node("button", "Add correction", "button");
+            button.style.marginTop = "12px";
+            button.onclick = () => reviewMiss();
+            miss.append(button);
+            target.append(miss);
+          }
+        }
+        $("coverage-checks").replaceChildren(
+          ...[
+            [
+              "Entity decisions",
+              reviewedCount() + " / " + findings.length + " reviewed",
+            ],
+            [
+              "Relationship claims",
+              claims.filter((c) => c.decision !== "pending").length +
+                " / " +
+                claims.length +
+                " reviewed",
+            ],
+            ["Source text samples", "TXT · JSON · CSV"],
+            ["Metadata & hidden content", "Not evaluated"],
+            ["PDF/image pixels", "Not evaluated"],
+            ["Release clearance", "Not qualified"],
+          ].map(([label, state]) => {
+            const row = node("div", undefined, "check-row");
+            row.append(node("span", label), node("span", state));
+            return row;
+          }),
+        );
+      }
+      document.querySelectorAll("[data-filter]").forEach(
+        (b) =>
+          (b.onclick = () => {
+            entityFilter = b.dataset.filter;
+            renderRegister();
+          }),
+      );
+      $("entity-search").oninput = renderRegister;
+      $("manual-form").onsubmit = (e) => {
+        e.preventDefault();
+        if (addManual($("manual-value").value, $("manual-kind").value))
+          editFinding(findings.length - 1);
+      };
+      $("manual-value").oninput = () => {
+        $("manual-error").hidden = true;
+        $("manual-value").removeAttribute("aria-invalid");
+      };
+      document
+        .querySelectorAll("[data-result-tab]")
+        .forEach((b, i, buttons) => {
+          b.onclick = () => setResultTab(b.dataset.resultTab);
+          b.onkeydown = (e) => {
+            let index = null;
+            if (e.key === "ArrowRight") index = (i + 1) % buttons.length;
+            else if (e.key === "ArrowLeft")
+              index = (i - 1 + buttons.length) % buttons.length;
+            else if (e.key === "Home") index = 0;
+            else if (e.key === "End") index = buttons.length - 1;
+            if (index !== null) {
+              e.preventDefault();
+              setResultTab(buttons[index].dataset.resultTab, true);
+            }
+          };
+        });
+      document.querySelectorAll("[data-graph-label]").forEach(
+        (b) =>
+          (b.onclick = () => {
+            graphLabel = b.dataset.graphLabel;
+            renderGraph();
+          }),
+      );
+      $("graph-plus").onclick = () => {
+        graphZoom = Math.min(2, graphZoom + 0.25);
+        renderGraph();
+      };
+      $("graph-minus").onclick = () => {
+        graphZoom = Math.max(1, graphZoom - 0.25);
+        renderGraph();
+      };
+      $("graph-fit").onclick = () => {
+        graphZoom = 1;
+        renderGraph();
+      };
+      $("reference-labels").onchange = renderScore;
+      $("edit-comparison").onclick = () => {
+        file = comparisonFile;
+        navigate("review");
+        $("context-preview").open = true;
+        render();
+        $("replacement").focus();
+        $("context-preview").scrollIntoView({
+          block: "start",
+          behavior: "instant",
+        });
+      };
+      let resizeFrame;
+      window.addEventListener("resize", () => {
+        cancelAnimationFrame(resizeFrame);
+        resizeFrame = requestAnimationFrame(renderGraph);
+      });
+
       render();
     </script>
   </body>

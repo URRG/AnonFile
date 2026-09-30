@@ -8,9 +8,14 @@ WORKDIR /app
 COPY requirements.txt ./
 COPY requirements-media.txt ./
 COPY requirements-dev.txt ./
-RUN apt-get update && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng \
+# OpenCV's OCR import requires libGL even for this server's raster workflow.
+RUN apt-get update && apt-get install -y --no-install-recommends libgl1 tesseract-ocr tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir -r requirements-dev.txt
+# Optional trust bundle for package installs behind a managed TLS proxy.
+# BuildKit mounts it only for this step; it is not copied into the image.
+RUN --mount=type=secret,id=package_ca \
+    if [ -f /run/secrets/package_ca ]; then export PIP_CERT=/run/secrets/package_ca; fi \
+    && pip install --no-cache-dir -r requirements-dev.txt
 COPY app ./app
 COPY tests ./tests
 RUN useradd --create-home --uid 10001 anonflow && chown -R anonflow:anonflow /app
