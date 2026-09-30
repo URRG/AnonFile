@@ -48,7 +48,7 @@ The API suite passed 1,736 tests with 61 optional integration skips. Web tests p
 
 ## Remaining limitations
 
-The four remaining labelled misses are Cyrillic, Devanagari and Chinese names plus a capitalization-only name proposal repeated in lowercase without contextual evidence. These require explicit reviewer corrections; they are not described as qualified automatic coverage. Manual exact-value corrections for the three non-Latin names and the repeated SSN were checked separately. Weak capitalization proposals intentionally do not propagate without confirmation.
+At #153, four labelled misses remained: Cyrillic, Devanagari and Chinese names plus a capitalization-only name proposal repeated in lowercase without contextual evidence. Manual exact-value corrections for the three non-Latin names and the repeated SSN were checked separately. The subsequent [name coverage follow-up](document-name-coverage.md) addresses these four cases with bounded Unicode field rules and separately labelled weak repetition proposals. The 46/50 results above remain the historical measurements for #153.
 
 This run does not establish production precision/recall, exhaustive multilingual OCR, handwriting/signature coverage, Office pixel/embedded-object coverage, complete international address recognition, original-format sanitization, or multi-user throughput. The document route remains a bounded development review tool. Every result stays `REVIEW_REQUIRED`; pixels remain `UNMEASURED`; no cleaned original-format file is produced.
 
