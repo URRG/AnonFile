@@ -35,7 +35,7 @@ RULES_METHOD_ID = "rules-v1"
 # beyond the declarative inputs below.  The digest is a reproducible identity,
 # not an assertion that these bounded rules are sufficient for release.
 RULES_METHOD_VERSION = "rules-processor-v1"
-RULES_METHOD_ALGORITHM_REVISION = "rules-processing-algorithm-v9"
+RULES_METHOD_ALGORITHM_REVISION = "rules-processing-algorithm-v10"
 RULES_METHOD_BUILD_REVISION = "anonflow-m9"
 _RULES_METHOD_CONFIG_SCHEMA = "rules-processing-config-v2"
 LIMITATIONS = (
@@ -141,7 +141,11 @@ _GPS_CONTEXT = re.compile(
     r"[ \t]*[:=][ \t]*(?P<value>[+-]?[0-9]{1,2}\.[0-9]{3,12}[ \t]*,[ \t]*"
     r"[+-]?[0-9]{1,3}\.[0-9]{3,12})(?![\w.])"
 )
-_NUMBER = re.compile(r"(?<!\w)\+?[0-9](?:(?:[0-9()-]| (?=\S))*[0-9])?(?!\w)")
+_NUMBER = re.compile(r"(?<!\w)\+?[0-9](?:[0-9 ()\t-]*[0-9])?(?!\w)")
+# Transcript gutters are separate from the identifier that follows them.
+# Do not narrow whitespace inside every phone/card to accommodate line numbers.
+_TRANSCRIPT_LINE_NUMBER = re.compile(r"(?m)^[ \t]*(?P<number>[1-9]|1[0-9]|2[0-5])[ \t]{2,}(?=\S)")
+_YEAR_RANGE = re.compile(r"(?:18|19|20)[0-9]{2}[ \t]*-[ \t]*(?:18|19|20)[0-9]{2}")
 _PDF_DATE = re.compile(r"(?<!\w)D:[0-9]{14}(?:Z|[+-][0-9]{2}'?[0-9]{2}'?)?(?!\d)")
 _DOCUMENT_REFERENCE = re.compile(
     r"(?i)\b(?:TID|Bates|document(?:[ \t]+(?:number|no\.?))?)[ \t:=#-]*"
@@ -167,9 +171,13 @@ _BUSINESS_CONTEXT = re.compile(
     re.MULTILINE,
 )
 _QUASI_CONTEXT = re.compile(
-    r'''(?ix)\b(?:age|birth[_\s-]?year|postal[_\s-]?code|zip(?:[_\s-]?code)?|postcode|
-        gender|sex|race|ethnicity|nationality|occupation|marital[_\s-]?status|household[_\s-]?size)\b
-        \s*(?:[:=]|is\b(?=[ \t]*(?:[0-9]|male\b|female\b|nonbinary\b|married\b|single\b)))\s*(?:"(?:[^"\\\r\n]|\\.)+"|'(?:[^'\\\r\n]|\\.)+'|[^\r\n,;]+)''',
+    r'''(?ix)\b(?:
+        (?:age|birth[_\s-]?year|postal[_\s-]?code|zip(?:[_\s-]?code)?|postcode|
+           gender|sex|race|ethnicity|nationality|occupation|marital[_\s-]?status|household[_\s-]?size)\b\s*[:=]
+        |(?:age|birth[_\s-]?year|household[_\s-]?size)\b[ \t]+is\b(?=[ \t]*["']?[0-9])
+        |(?:gender|sex)\b[ \t]+is\b(?=[ \t]*["']?(?:male|female|non[ -]?binary|transgender|cisgender|intersex|agender|genderfluid|genderqueer|other|unknown)\b)
+        |(?:postal[_\s-]?code|zip(?:[_\s-]?code)?|postcode|race|ethnicity|nationality|occupation|marital[_\s-]?status)\b[ \t]+is\b
+        )\s*(?:"(?:[^"\\\r\n]|\\.)+"|'(?:[^'\\\r\n]|\\.)+'|[^\r\n,;]+)''',
     re.MULTILINE,
 )
 _FIELD_TYPES: dict[str, tuple[str, str]] = {}
@@ -229,6 +237,8 @@ def _rules_method_identity_config(*, algorithm_revision: str, build_revision: st
         ("bank_account", _BANK_ACCOUNT.pattern, _BANK_ACCOUNT.flags),
         ("bank_routing", _BANK_ROUTING.pattern, _BANK_ROUTING.flags),
         ("ipv4", _IP.pattern, _IP.flags), ("number", _NUMBER.pattern, _NUMBER.flags),
+        ("transcript_line_number", _TRANSCRIPT_LINE_NUMBER.pattern, _TRANSCRIPT_LINE_NUMBER.flags),
+        ("year_range", _YEAR_RANGE.pattern, _YEAR_RANGE.flags),
         ("pdf_date", _PDF_DATE.pattern, _PDF_DATE.flags),
         ("document_reference", _DOCUMENT_REFERENCE.pattern, _DOCUMENT_REFERENCE.flags),
         ("ipv6", _IPV6.pattern, _IPV6.flags), ("mac", _MAC.pattern, _MAC.flags),
@@ -398,11 +408,24 @@ def detect_text(text: str) -> tuple[Span, ...]:
     date_ranges = [match.span() for match in _PDF_DATE.finditer(normalized)]
     for start, end, kind in contextual_entities(normalized):
         add(start, end, kind, "high", "explicit-document-context-v1")
+    gutters = list(_TRANSCRIPT_LINE_NUMBER.finditer(normalized))
+    transcript_starts = {}
+    for previous, current in zip(gutters, gutters[1:]):
+        # A bare country code plus extra spacing is not a transcript gutter.
+        # Require consecutive numbered lines before stripping such a prefix.
+        if (int(current.group("number")) == int(previous.group("number")) + 1
+                and normalized.count("\n", previous.end(), current.start()) == 1):
+            transcript_starts.update({m.start("number"): m.end() for m in (previous, current)})
+    gutter_starts = {m.start("number"): m.end() for m in gutters}
     for match in _NUMBER.finditer(normalized):
-        value = match.group()
-        if any(start <= match.start() < end for start, end in date_ranges):
+        gutter_end = gutter_starts.get(match.start())
+        if gutter_end is not None and _YEAR_RANGE.fullmatch(normalized[gutter_end:match.end()]):
             continue
-        if (_DOCUMENT_REFERENCE.search(normalized[max(0, match.start() - 128):match.start()])
+        number_start, number_end = transcript_starts.get(match.start(), match.start()), match.end()
+        value = normalized[number_start:number_end]
+        if any(start <= number_start < end for start, end in date_ranges):
+            continue
+        if (_DOCUMENT_REFERENCE.search(normalized[max(0, number_start - 128):number_start])
                 or re.fullmatch(r"[0-9]{9}-[0-9]{4}", value)
                 or re.fullmatch(r"(?:[1-9] [0-9]{4} ){2,}[1-9]", value)):
             continue
@@ -430,7 +453,7 @@ def detect_text(text: str) -> tuple[Span, ...]:
             kind, severity = "PHONE", "high"
         else:
             kind, severity = "SENSITIVE_NUMBER", "critical"
-        add(match.start(), match.end(), kind, severity)
+        add(number_start, number_end, kind, severity)
 
     merged: list[Span] = []
     for candidate in sorted(candidates, key=lambda span: (span.start, span.end)):

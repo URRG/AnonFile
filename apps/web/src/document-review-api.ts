@@ -26,6 +26,18 @@ function strings(value: unknown): value is string[] { return Array.isArray(value
 function counts(value: unknown): boolean { return record(value) && Object.values(value).every(n => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0) }
 function count(value: unknown): boolean { return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 }
 
+function surface(value: unknown): boolean {
+  if (!record(value) || !['id', 'kind', 'text', 'candidate', 'status'].every(key => typeof value[key] === 'string') ||
+      !record(value.location) || !counts(value.residual_families) || !count(value.known_values_remaining) || !Array.isArray(value.matches)) return false
+  // Offsets are Unicode code points, not UTF-16 units. Count once for the whole
+  // surface, without allocating a second copy for each of potentially 20k spans.
+  let length = 0
+  for (const _ of value.text as string) length++
+  return value.matches.every(match => record(match) && ['kind', 'basis', 'replacement'].every(key => typeof match[key] === 'string') &&
+    Number.isSafeInteger(match.start) && Number.isSafeInteger(match.end) && (match.start as number) >= 0 &&
+    (match.end as number) > (match.start as number) && (match.end as number) <= length)
+}
+
 export function parseDocumentReview(value: unknown): DocumentReview {
   if (!record(value) || value.schema !== 'document-review-v1' || value.posture !== 'REVIEW_REQUIRED' || value.release_eligible !== false ||
     typeof value.name !== 'string' || typeof value.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(value.sha256) || typeof value.format !== 'string' ||
@@ -33,10 +45,7 @@ export function parseDocumentReview(value: unknown): DocumentReview {
     !['surfaces', 'nonempty_surfaces', 'pages', 'matches', 'residual_units', 'known_values_remaining'].every(key => count((value.summary as Record<string, unknown>)[key])) ||
     !record(value.coverage) || value.coverage.text !== 'PARSED_WITH_GAPS' || value.coverage.names_addresses !== 'UNQUALIFIED' || value.coverage.pixels !== 'UNMEASURED' || value.coverage.original_format_output !== 'NOT_PRODUCED' ||
     !Array.isArray(value.inventory) || !value.inventory.every(item => record(item) && ['id', 'kind', 'status'].every(key => typeof item[key] === 'string')) ||
-    !Array.isArray(value.surfaces) || !value.surfaces.every(item => record(item) && ['id', 'kind', 'text', 'candidate', 'status'].every(key => typeof item[key] === 'string') &&
-      record(item.location) && counts(item.residual_families) && count(item.known_values_remaining) && Array.isArray(item.matches) &&
-      item.matches.every(match => record(match) && ['kind', 'basis', 'replacement'].every(key => typeof match[key] === 'string') &&
-        Number.isSafeInteger(match.start) && Number.isSafeInteger(match.end) && (match.start as number) >= 0 && (match.end as number) > (match.start as number) && (match.end as number) <= Array.from(item.text as string).length))) {
+    !Array.isArray(value.surfaces) || !value.surfaces.every(surface)) {
     throw new Error('The server returned an invalid review. No coverage result is available.')
   }
   return value as DocumentReview
