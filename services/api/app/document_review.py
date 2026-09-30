@@ -17,8 +17,9 @@ import subprocess
 import sys
 import tempfile
 from threading import BoundedSemaphore
+import unicodedata
 
-from app.document_entities import FULL_NAME, LETTER, is_court_caption
+from app.document_entities import FULL_NAME, LETTER, is_court_caption, is_unicode_name
 from app.document_extract import DocumentError, MAX_FILE_BYTES, extract_office, extract_pdf
 from app.independent_residual import scan_residual_candidate
 from app.processing import detect_text
@@ -34,6 +35,7 @@ _FORM_ID = re.compile(r"(?<!\w)[0-9]{3}[ \t|:'’.-]{1,4}[0-9]{2}[ \t|:'’.-]{1
 _URL = re.compile(r"(?i)\b(?:https?://|www\.)[^\s<>\"']+")
 _REPEAT_KINDS = frozenset({"PERSON_NAME", "GOVERNMENT_ID", "PAN", "AADHAAR", "EMAIL", "PHONE", "CARD",
                            "FINANCIAL_ACCOUNT", "DEVICE_ID", "USER_ID", "VEHICLE_ID", "IP_ADDRESS", "IDENTIFYING_LINK"})
+_WEAK_NAME_BASES = frozenset({"capitalization-review", "capitalization-repeat-review"})
 # These common document/title words are not identity evidence on their own.
 # Capitalization proposals are always labelled for review, never qualified NER.
 _TITLE_WORDS = frozenset("The This That These Those Court Supreme United States Department Ministry Government Report Table Figure Page Section Chapter Basic Rights Public Meeting Minutes Document Annual Smart Grid Forum Work Stream Form Schedule Tax Return Total Income Address Social Security Number Date Name Telephone Email University College School Conference Presentation See Note Notes For Of And No Yes Not None".casefold().split())
@@ -47,7 +49,14 @@ def _occurrences(text: str, value: str):
     # Preserve offsets in the actual source surface; flexible whitespace handles
     # the same identifier split across transcript lines or OCR word boundaries.
     pattern = r"(?<!\w)" + r"\s+".join(re.escape(word) for word in value.split()) + r"(?!\w)"
-    return re.finditer(pattern, text, re.IGNORECASE)
+    for match in re.finditer(pattern, text, re.IGNORECASE):
+        # Python's \w excludes combining marks. Do not remove a prefix of a
+        # differently accented name or leave a dangling script vowel mark.
+        if match.start() and unicodedata.category(text[match.start() - 1])[0] == "M":
+            continue
+        if match.end() < len(text) and unicodedata.category(text[match.end()])[0] == "M":
+            continue
+        yield match
 
 
 def review_document(name: str, raw: bytes, *, ocr: bool = True, reviewed_values: list[dict] | None = None) -> dict:
@@ -64,6 +73,7 @@ def review_document(name: str, raw: bytes, *, ocr: bool = True, reviewed_values:
         raise DocumentError("INVALID_REVIEW_VALUES")
     source = extract_pdf(raw, ocr=ocr) if extension == "pdf" else extract_office(raw, extension)
     seeds: dict[tuple[str, str], str] = {}
+    possible_names: dict[str, str] = {}
     per_surface = []
     for surface in source.surfaces:
         text = surface["text"]
@@ -71,7 +81,7 @@ def review_document(name: str, raw: bytes, *, ocr: bool = True, reviewed_values:
                  for span in detect_text(text)]
         if surface["kind"] == "metadata":
             for match in _AUTHOR.finditer(text):
-                if _POSSIBLE_NAME.fullmatch(match.group(1).strip()):
+                if _POSSIBLE_NAME.fullmatch(match.group(1).strip()) or is_unicode_name(match.group(1).strip()):
                     value = match.group(1).strip()
                     seeds[("PERSON_NAME", _key(value))] = value
         # Document-only proposals catch rosters and name cells. These weaker
@@ -97,26 +107,36 @@ def review_document(name: str, raw: bytes, *, ocr: bool = True, reviewed_values:
                         if len(run) >= 2:
                             start = line.start() + match.start() + run[0].start()
                             end = line.start() + match.start() + run[-1].end()
+                            if end < len(text) and unicodedata.category(text[end])[0] == "M":
+                                continue
                             spans.append({"start": start, "end": end, "kind": "PERSON_NAME", "basis": "capitalization-review"})
         if _FORM_CONTEXT.search(text):
             for match in _FORM_ID.finditer(text):
                 spans.append({"start": match.start(), "end": match.end(), "kind": "GOVERNMENT_ID", "basis": "form-context-review"})
         for match in _URL.finditer(text):
             spans.append({"start": match.start(), "end": match.end(), "kind": "IDENTIFYING_LINK", "basis": "link-review"})
-        # Propagate identifiers with direct/contextual evidence, including IDs
-        # found only in form context. Weak capitalization proposals still need
-        # confirmation before they can cause removal elsewhere in the document.
+        # Keep weaker name proposals separate from contextually evidenced IDs.
+        # Repeated weak proposals retain that basis instead of becoming known
+        # identities merely because the same text occurs on another page.
         for span in spans:
-            if span["kind"] in _REPEAT_KINDS and span["basis"] != "capitalization-review":
-                value = text[span["start"]:span["end"]]
+            value = text[span["start"]:span["end"]]
+            if span["basis"] in _WEAK_NAME_BASES:
+                if len(value) <= 150:
+                    possible_names[_key(value)] = value
+            elif span["kind"] in _REPEAT_KINDS:
                 seeds[(span["kind"], _key(value))] = value
         per_surface.append(spans)
     for item in reviewed_values:
         if not any(next(_occurrences(surface["text"], item["value"]), None) for surface in source.surfaces):
             raise DocumentError("REVIEW_VALUE_NOT_FOUND")
         seeds[(item["kind"], _key(item["value"]))] = item["value"]
-    if len(seeds) > 1_000:
+    confirmed_keys = {_key(item["value"]) for item in reviewed_values}
+    possible_names = {key: value for key, value in possible_names.items()
+                      if ("PERSON_NAME", key) not in seeds and key not in confirmed_keys}
+    if len(seeds) + len(possible_names) > 1_000:
         raise DocumentError("ENTITY_LIMIT")
+    if possible_names:
+        source.gaps.add("CAPITALIZATION_REPEAT_REVIEW_REQUIRED")
 
     entities, counts, total_matches, residual_units = {}, Counter(), 0, 0
     for surface, spans in zip(source.surfaces, per_surface):
@@ -124,6 +144,9 @@ def review_document(name: str, raw: bytes, *, ocr: bool = True, reviewed_values:
         for (kind, _), value in seeds.items():
             for match in _occurrences(text, value):
                 spans.append({"start": match.start(), "end": match.end(), "kind": kind, "basis": "document-repeat"})
+        for value in possible_names.values():
+            for match in _occurrences(text, value):
+                spans.append({"start": match.start(), "end": match.end(), "kind": "PERSON_NAME", "basis": "capitalization-repeat-review"})
         if surface["kind"] in {"metadata", "signature-metadata", "custom-xml", "package-relationship"} and text:
             # Property blocks can contain paths, dates, usernames and arbitrary
             # custom values. Drop all from the text candidate; do not pretend a
@@ -134,7 +157,7 @@ def review_document(name: str, raw: bytes, *, ocr: bool = True, reviewed_values:
         for span in sorted(spans, key=lambda item: (item["start"], item["end"])):
             if merged and span["start"] < merged[-1]["end"]:
                 prior = merged.pop()
-                strongest = max((prior, span), key=lambda item: (priority.get(item["kind"], 3), item["basis"] != "capitalization-review"))
+                strongest = max((prior, span), key=lambda item: (priority.get(item["kind"], 3), item["basis"] not in _WEAK_NAME_BASES))
                 merged.append({**strongest, "start": prior["start"], "end": max(prior["end"], span["end"])})
             else:
                 merged.append(span)
@@ -171,7 +194,8 @@ def review_document(name: str, raw: bytes, *, ocr: bool = True, reviewed_values:
             "coverage": {"text": "PARSED_WITH_GAPS", "names_addresses": "UNQUALIFIED",
                          "pixels": "UNMEASURED", "original_format_output": "NOT_PRODUCED"},
             "limitations": ["Text candidates retain undetected identifiers. Review source text, findings and coverage gaps.",
-                            "Capitalization and form-context proposals may be false positives; OCR can corrupt or omit values.",
+                            "Capitalization, repeated capitalization, and form-context proposals may be false positives; OCR can corrupt or omit values.",
+                            "Explicit name fields use bounded Unicode letter rules, not general multilingual name recognition.",
                             "Repeated known values are checked separately; unknown names, handwriting and image content can remain.",
                             "No original-format file is changed or authorized for release."]}
 
