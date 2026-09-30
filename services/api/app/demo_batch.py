@@ -1115,6 +1115,12 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
             value = document["text"][start:end]
             if kind == "PERSON_NAME" and SAFE_NAME.fullmatch(value):
                 names.add(value)
+    for document in documents:
+        for span in detect_text(document["text"]):
+            if span.entity_type == "PERSON_NAME":
+                value = document["text"][span.start:span.end]
+                if SAFE_NAME.fullmatch(value):
+                    names.add(value)
     automatic_name_keys = {name.casefold() for name in names}
     names.update(phrases)
     names_by_key = {name.casefold(): name for name in sorted(names, key=lambda value: (value.casefold(), value))}
@@ -1132,6 +1138,12 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
         for span in detect_text(doc["text"]):
             if span.entity_type == "USER_ID" and (span.start, span.end) in employee_ranges:
                 continue
+            if span.entity_type == "ADDRESS" and any(
+                    kind == "ADDRESS" and start <= span.start and span.end <= end
+                    for start, end, kind in (*contextual, *doc["_fields"])):
+                continue
+            if span.entity_type == "PERSON_NAME" and doc["text"][span.start:span.end].casefold() not in names_by_key:
+                raise PayloadError("A detected name is unsupported for same-length demo aliases.")
             remember(span.entity_type, doc["text"][span.start:span.end])
         for start, end, kind in contextual:
             remember(kind, doc["text"][start:end])
@@ -1252,6 +1264,10 @@ def analyze_batch(payload: dict[str, Any]) -> dict[str, Any]:
             spans.append((start, end, entity_id, 3, "AUTOMATIC"))
         for span in detect_text(text):
             if span.entity_type == "USER_ID" and (span.start, span.end) in employee_ranges:
+                continue
+            if span.entity_type == "ADDRESS" and any(
+                    kind == "ADDRESS" and start <= span.start and span.end <= end
+                    for start, end, kind in (*contextual, *doc["_fields"])):
                 continue
             entity_id = id_by_key[(span.entity_type, text[span.start:span.end].casefold())]
             spans.append((span.start, span.end, entity_id, 2, "AUTOMATIC"))

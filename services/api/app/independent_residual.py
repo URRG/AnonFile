@@ -13,6 +13,7 @@ does not make linkage, utility, or re-identification claims.
 from __future__ import annotations
 
 from bisect import bisect_right
+import base64
 import hashlib
 import json
 import re
@@ -27,7 +28,7 @@ DETECTOR_ID = "m8-independent-residual"
 # Evidence-relevant, immutable release inputs.  Algorithm revision covers
 # matching, classification and traversal semantics; build revision identifies
 # the packaged control-plane build.  Bump either when its behavior changes.
-ALGORITHM_REVISION = "independent-residual-algorithm-v4"
+ALGORITHM_REVISION = "independent-residual-algorithm-v5"
 BUILD_REVISION = "anonflow-m8.1"
 _CONFIG_SCHEMA = "residual-detector-config-v1"
 MAX_DIRECT_SCAN_NODES = 100_000
@@ -45,7 +46,22 @@ _CREDENTIAL_ASSIGNMENT = re.compile(
     r"(?ix)\b(?:api[ _-]?key|access[ _-]?token|authorization|password|passwd|secret|"
     r"private[ _-]?key|refresh[ _-]?token)\b\s*(?::|=)\s*(?:\S+|['\"][^'\"]+['\"])",
 )
-_AUTHORIZATION = re.compile(r"(?i)\b(?:bearer|basic)\s+[a-z0-9._~+/=-]{8,}")
+_AUTHORIZATION = re.compile(r"(?i)\bbearer[ \t]+[a-z0-9._~+/=-]{8,}|\bbasic[ \t]+[a-z0-9+/]{8,}={0,2}")
+# Independently owned contextual rules. A PII-family scan is still not general
+# name/address coverage: unlabelled and multilingual content remains unqualified.
+_CONTEXT_NAME = re.compile(
+    r"\b(?i:Dr\.?|Mr\.?|Mrs\.?|Ms\.?|name:|author:|taxpayer:)[ \t]+"
+    r"[A-Z][a-z'’-]+(?:[ \t]+[A-Z][a-z'’-]+){0,3}\b"
+)
+_STREET_ADDRESS = re.compile(
+    r"(?i)\b[0-9]{1,6}[ \t]+(?:[a-z][a-z.'’-]*[ \t]+){1,7}"
+    r"(?:street|avenue|road|lane|drive|boulevard|mall|parkway|quay)\b"
+)
+_SOCIAL_SECURITY = re.compile(
+    r"(?i)\b(?:(?:primary|spouse|dependent)[ _-]*)?(?:ssn|social[ \t]+security(?:[ \t]+number)?)"
+    r"[ \t:=#-]+[0-9]{3}[ \t|:'’.-]{0,4}[0-9]{2}[ \t|:'’.-]{0,4}[0-9]{4}\b"
+)
+_METADATA_DATE = re.compile(r"\bD:[0-9]{14}(?:Z|[+-][0-9]{2}'?[0-9]{2}'?)?")
 _AWS_ACCESS_KEY_ID = re.compile(r"(?<!\w)(?:AKIA|ASIA)[A-Z0-9]{16}(?!\w)")
 _LABELLED_AD_ID = re.compile(
     r"(?i)\b(?:idfa|gaid|aaid|(?:mobile[ \t]+)?advertising[ \t]+id|"
@@ -66,6 +82,10 @@ _RULE_CONFIGURATION = (
     ("numberish", _NUMBERISH.pattern, _NUMBERISH.flags),
     ("credential_assignment", _CREDENTIAL_ASSIGNMENT.pattern, _CREDENTIAL_ASSIGNMENT.flags),
     ("authorization", _AUTHORIZATION.pattern, _AUTHORIZATION.flags),
+    ("context_name", _CONTEXT_NAME.pattern, _CONTEXT_NAME.flags),
+    ("street_address", _STREET_ADDRESS.pattern, _STREET_ADDRESS.flags),
+    ("social_security", _SOCIAL_SECURITY.pattern, _SOCIAL_SECURITY.flags),
+    ("metadata_date", _METADATA_DATE.pattern, _METADATA_DATE.flags),
     ("aws_access_key_id", _AWS_ACCESS_KEY_ID.pattern, _AWS_ACCESS_KEY_ID.flags),
     ("labelled_advertising_id", _LABELLED_AD_ID.pattern, _LABELLED_AD_ID.flags),
     ("precise_location", _PRECISE_LOCATION.pattern, _PRECISE_LOCATION.flags),
@@ -137,15 +157,25 @@ def _families_in_text(text: str) -> set[str]:
     ad_matches = list(_LABELLED_AD_ID.finditer(text))
     ad_ranges = [match.span("id") for match in ad_matches]
     ad_starts = [start for start, _ in ad_ranges]
-    if _CREDENTIAL_ASSIGNMENT.search(text) or _AUTHORIZATION.search(text) or _AWS_ACCESS_KEY_ID.search(text):
+    authorization = False
+    for match in _AUTHORIZATION.finditer(text):
+        scheme, token = match.group().split()
+        try:
+            authorization |= scheme.lower() == "bearer" or b":" in base64.b64decode(token + "=" * (-len(token) % 4), validate=True)
+        except ValueError:
+            pass
+    if _CREDENTIAL_ASSIGNMENT.search(text) or authorization or _AWS_ACCESS_KEY_ID.search(text):
         families.add("CREDENTIAL")
     if _PAYMENT_SECRET.search(text):
         families.add("PAYMENT")
     if (_EMAIL.search(text) or _PAN.search(text) or _has_valid_ipv4(text) or
+            _CONTEXT_NAME.search(text) or _STREET_ADDRESS.search(text) or _SOCIAL_SECURITY.search(text) or
             _has_precise_location(text) or
             any(int(match.group("id").replace("-", ""), 16) != 0 for match in ad_matches)):
         families.add("PII")
     for match in _NUMBERISH.finditer(text):
+        if any(date.start() <= match.start() < date.end() for date in _METADATA_DATE.finditer(text)):
+            continue
         ad_index = bisect_right(ad_starts, match.start()) - 1
         if ad_index >= 0 and match.end() <= ad_ranges[ad_index][1]:
             continue

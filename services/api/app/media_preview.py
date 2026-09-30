@@ -391,13 +391,16 @@ def _pdf_pages_locked(raw: bytes) -> tuple[list[Any], list[str]]:
 
     try:
         reader = PdfReader(BytesIO(raw), strict=True)
+        if reader.is_encrypted:
+            raise PayloadError("The PDF is unsupported for bounded raster review: encrypted PDF.")
         root = reader.trailer["/Root"]
-        if (reader.is_encrypted or not 1 <= len(reader.pages) <= MAX_MEDIA_PAGES or
-                any(key in root for key in ("/AcroForm", "/Names", "/OpenAction", "/AA",
-                                            "/AF", "/OCProperties", "/Collection")) or
-                any(key in page for page in reader.pages
-                    for key in ("/Annots", "/AA", "/AF", "/PresSteps"))):
-            raise ValueError
+        if not 1 <= len(reader.pages) <= MAX_MEDIA_PAGES:
+            raise PayloadError("The PDF is unsupported for bounded raster review: two pages maximum.")
+        if any(key in root for key in ("/AcroForm", "/Names", "/OpenAction", "/AA",
+                                      "/AF", "/OCProperties", "/Collection")):
+            raise PayloadError("The PDF is unsupported for bounded raster review: forms, layers, actions or attachments.")
+        if any(key in page for page in reader.pages for key in ("/Annots", "/AA", "/AF", "/PresSteps")):
+            raise PayloadError("The PDF is unsupported for bounded raster review: page annotations or actions.")
         pdf = pdfium.PdfDocument(raw)
         try:
             if len(pdf) != len(reader.pages):
@@ -412,11 +415,11 @@ def _pdf_pages_locked(raw: bytes) -> tuple[list[Any], list[str]]:
                     height = math.ceil(page.get_height() * PDF_SCALE)
                     total_pixels += width * height
                     if width < 16 or height < 16 or width * height > MAX_PAGE_PIXELS or total_pixels > MAX_TOTAL_PIXELS:
-                        raise ValueError
+                        raise PayloadError("The PDF is unsupported for bounded raster review: pixel limit.")
                     textpage = page.get_textpage()
                     try:
                         if textpage.count_chars() > MAX_OCR_CHARS:
-                            raise ValueError
+                            raise PayloadError("The PDF is unsupported for bounded raster review: text limit.")
                         native_texts.append(textpage.get_text_bounded())
                     finally:
                         textpage.close()
@@ -430,8 +433,10 @@ def _pdf_pages_locked(raw: bytes) -> tuple[list[Any], list[str]]:
         finally:
             pdf.close()
         return pages, native_texts
+    except PayloadError:
+        raise
     except Exception:
-        raise PayloadError("The PDF is unsupported for bounded raster review (two pages maximum).") from None
+        raise PayloadError("The PDF is unsupported for bounded raster review: parser or renderer failure.") from None
 
 
 def _assert_no_detected_qr(image: Any) -> None:
@@ -521,6 +526,16 @@ def _verify_pdf_text_layer(native_text: str, lines: list[dict[str, Any]]) -> Non
         return
     ocr_values = [line["text"].casefold() for line in lines]
     required: Counter[tuple[str, str]] = Counter()
+    seen: set[tuple[str, int, int]] = set()
+
+    def require(kind: str, source: str, start: int, end: int) -> None:
+        # Different recognizers can cover the same source occurrence. Count
+        # positions, not detector hits, while retaining true repeated mentions.
+        identity = (kind, start, end)
+        if identity not in seen:
+            seen.add(identity)
+            required[(kind, source)] += 1
+
     for span in detect_text(native_text):
         # Every rules candidate in the native layer must be visible to OCR,
         # including credentials, health, business and quasi-identifier spans.
@@ -529,7 +544,7 @@ def _verify_pdf_text_layer(native_text: str, lines: list[dict[str, Any]]) -> Non
         source = native_text[span.start:span.end].casefold()
         if span.entity_type in {"PHONE", "AADHAAR", "CARD", "FINANCIAL_ACCOUNT", "DEVICE_ID", "VEHICLE_ID"}:
             source = "".join(char for char in source if char.isalnum())
-        required[(span.entity_type, source)] += 1
+        require(span.entity_type, source, span.start, span.end)
     # A native text layer can expose explicit relationship evidence that is not
     # matched by detect_text.  Require OCR to preserve those bounded person
     # signals too, otherwise a graph could claim a relationship from text the
@@ -539,12 +554,13 @@ def _verify_pdf_text_layer(native_text: str, lines: list[dict[str, Any]]) -> Non
             for group in ("name", "worker", "assignee"):
                 value = match.groupdict().get(group)
                 if value:
-                    required[("PERSON_NAME", value.strip().casefold())] += 1
+                    start = match.start(group) + len(value) - len(value.lstrip())
+                    require("PERSON_NAME", value.strip().casefold(), start, start + len(value.strip()))
     for start, end, kind in contextual_spans(native_text):
         source = native_text[start:end].casefold()
         if kind == "ADDRESS":
             source = " ".join(source.split())
-        required[(kind, source)] += 1
+        require(kind, source, start, end)
     for (kind, source), count in required.items():
         whole = re.compile(rf"(?<!\w){re.escape(source)}(?!\w)")
         if kind == "ADDRESS":

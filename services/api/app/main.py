@@ -24,6 +24,8 @@ from app.processing import (RULES_METHOD_CONFIG_DIGEST, RULES_METHOD_ID, RULES_M
                             detect_text, process_payload)
 from app.ingestion import IngestionError, parse_source
 from app.demo_batch import analyze_batch
+from app.document_extract import DocumentError, MAX_FILE_BYTES
+from app.document_review import MAX_REQUEST_BYTES as DOCUMENT_MAX_REQUEST_BYTES, run_document_review
 from app.storage_config import create_store
 from app.security import Principal, configure_auth, require_roles
 from app.policies import PolicyError, PolicyProfile, PolicyRule, PolicySnapshot
@@ -135,13 +137,14 @@ class BodyLimitMiddleware:
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
         headers = dict(scope.get("headers", []))
+        limit = DOCUMENT_MAX_REQUEST_BYTES if scope.get("path") == "/development/documents/review" else self.max_bytes
         try:
             length = int(headers.get(b"content-length", b"0"))
             if length < 0:
                 raise ValueError
         except ValueError:
             return await JSONResponse({"detail": "Invalid request"}, status_code=400)(scope, receive, send)
-        if length > self.max_bytes:
+        if length > limit:
             return await JSONResponse({"detail": "Request body too large"}, status_code=413)(scope, receive, send)
         body = bytearray()
         while True:
@@ -149,7 +152,7 @@ class BodyLimitMiddleware:
             if message["type"] == "http.disconnect":
                 return
             chunk = message.get("body", b"")
-            if len(body) + len(chunk) > self.max_bytes:
+            if len(body) + len(chunk) > limit:
                 return await JSONResponse({"detail": "Request body too large"}, status_code=413)(scope, receive, send)
             body.extend(chunk)
             if not message.get("more_body", False):
@@ -173,6 +176,19 @@ class Eligibility(str, Enum):
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class DocumentReviewValue(StrictModel):
+    kind: Literal["PERSON_NAME", "ADDRESS", "GOVERNMENT_ID", "OTHER_SENSITIVE"]
+    value: str = Field(min_length=2, max_length=150)
+
+
+class DocumentReviewCreate(StrictModel):
+    name: str = Field(min_length=1, max_length=200)
+    content_base64: str = Field(min_length=1, max_length=(MAX_FILE_BYTES + 2) // 3 * 4)
+    review_only: Literal[True]
+    ocr: bool = True
+    reviewed_values: list[DocumentReviewValue] = Field(default_factory=list, max_length=100)
 
 class DatasetMetadata(StrictModel):
     name: str = Field(min_length=1, max_length=160)
@@ -1121,6 +1137,11 @@ def create_app() -> FastAPI:
     async def invalid_payload(request: Request, exc):
         return JSONResponse({"detail": "Unsupported payload"}, status_code=422)
 
+    @app.exception_handler(DocumentError)
+    async def invalid_document(request: Request, exc):
+        return JSONResponse({"detail": "Document review could not complete", "code": str(exc)},
+                            status_code=429 if str(exc) == "REVIEW_BUSY" else 422)
+
     @app.exception_handler(PolicyError)
     @app.exception_handler(RightsError)
     @app.exception_handler(RunError)
@@ -1252,6 +1273,12 @@ def create_app() -> FastAPI:
     # production never has this route, even with otherwise valid JWT identity.
     if (app.state.auth_environment == "development"
             and os.getenv("ANONFLOW_DEMO_MODE") == "enabled"):
+        @app.post("/development/documents/review")
+        def review_local_document(request: DocumentReviewCreate,
+                                  principal: Principal = Depends(require_roles("processor"))):
+            """Rights-cleared local review; no persistence, release or original-format output."""
+            return run_document_review(request.model_dump())
+
         @app.post("/demo/batch/inspect")
         def inspect_synthetic_batch(request: DemoBatchCreate,
                                     principal: Principal = Depends(require_roles("processor"))):

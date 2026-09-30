@@ -4,3 +4,4 @@ cryptography==50.0.1
 PyJWT==2.14.0
 boto3==1.43.101
 pypdf>=5.0,<7.0
+defusedxml==0.7.1

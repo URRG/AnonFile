@@ -49,3 +49,6 @@ Without Docker, run the API and Vite as described in the development guide. The 
 5. Paid design-partner pilots, external security testing and measurable acceptance criteria.
 
 Do not interpret historical architecture documents as implemented controls. [M1 contract](docs/implementation-m1.md) is historical; [M2a contract](docs/implementation-m2.md), [M2b control-plane contract](docs/implementation-m2b.md), [M3 contract](docs/implementation-m3.md), [M4 contract](docs/implementation-m4.md), [M5 contract](docs/implementation-m5.md), [M8 evidence foundations](docs/implementation-m8.md), and [M9 delivery-governance evidence](docs/implementation-m9-delivery-governance.md) describe the current increments. Docker runtime verification remains outstanding on the implementation host; native tests do not substitute for that gate.
+# Document coverage review
+
+The development workbench includes a PDF/DOCX/PPTX/XLSX coverage review at `?mode=documents`. See [setup, limits and validation](docs/document-coverage-review.md). It produces unverified text candidates and inventories hidden/unsupported content; it does not produce cleaned original-format files.
