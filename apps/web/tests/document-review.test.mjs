@@ -57,3 +57,26 @@ test('clean or release-eligible responses, missing coverage, negative counts and
   for (const input of bad) assert.throws(() => parseDocumentReview(input), /invalid review/)
   assert.equal(parseDocumentReview(safe()).posture, 'REVIEW_REQUIRED')
 })
+
+test('document offsets use Unicode code points including non-BMP characters', () => {
+  const review = safe()
+  review.surfaces = [{ id: 'body', kind: 'docx-part', status: 'EXTRACTED', text: '😀a', candidate: '[X]', location: {}, residual_families: {}, known_values_remaining: 0,
+    matches: [{ start: 0, end: 2, kind: 'PERSON_NAME', basis: 'contextual-rule', replacement: '[X]' }] }]
+  assert.equal(parseDocumentReview(review), review)
+  review.surfaces[0].matches[0].end = 3
+  assert.throws(() => parseDocumentReview(review), /invalid review/)
+})
+
+test('a large valid review with 10k findings completes within the interactive budget', async () => {
+  // A subprocess enforces a wall-clock bound even if validation blocks its event
+  // loop. The old repeated whole-text scan takes minutes on this accepted input.
+  const { spawnSync } = await import('node:child_process')
+  const script = `${compiled}\nconst review = ${JSON.stringify(safe())};
+    const text = ('x'.repeat(130) + ' contact@example.test\\n').repeat(10000);
+    review.surfaces = [{id: 'body', kind: 'docx-part', status: 'EXTRACTED', text, candidate: '', location: {}, residual_families: {}, known_values_remaining: 0,
+      matches: Array.from({length: 10000}, (_, i) => ({start: i * 152 + 131, end: i * 152 + 151, kind: 'EMAIL', basis: 'contextual-rule', replacement: '[EMAIL]'}))}];
+    parseDocumentReview(review);`
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], { timeout: 5000, encoding: 'utf8' })
+  assert.equal(result.error, undefined, result.error?.message)
+  assert.equal(result.status, 0, result.stderr)
+})

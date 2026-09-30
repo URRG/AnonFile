@@ -18,7 +18,7 @@ import sys
 import tempfile
 from threading import BoundedSemaphore
 
-from app.document_entities import FULL_NAME, LETTER
+from app.document_entities import FULL_NAME, LETTER, is_court_caption
 from app.document_extract import DocumentError, MAX_FILE_BYTES, extract_office, extract_pdf
 from app.independent_residual import scan_residual_candidate
 from app.processing import detect_text
@@ -32,6 +32,8 @@ _AUTHOR = re.compile(r"(?im)^(?:author|creator|lastmodifiedby|editor):[ \t]*(.+)
 _FORM_CONTEXT = re.compile(r"(?i)\b(?:PrimarySSN|SpouseSSN|DependentSSN|ssn|social\s+security|taxpayer\s+identification)\b")
 _FORM_ID = re.compile(r"(?<!\w)[0-9]{3}[ \t|:'’.-]{1,4}[0-9]{2}[ \t|:'’.-]{1,4}[0-9]{4}(?![\w-])")
 _URL = re.compile(r"(?i)\b(?:https?://|www\.)[^\s<>\"']+")
+_REPEAT_KINDS = frozenset({"PERSON_NAME", "GOVERNMENT_ID", "PAN", "AADHAAR", "EMAIL", "PHONE", "CARD",
+                           "FINANCIAL_ACCOUNT", "DEVICE_ID", "USER_ID", "VEHICLE_ID", "IP_ADDRESS", "IDENTIFYING_LINK"})
 # These common document/title words are not identity evidence on their own.
 # Capitalization proposals are always labelled for review, never qualified NER.
 _TITLE_WORDS = frozenset("The This That These Those Court Supreme United States Department Ministry Government Report Table Figure Page Section Chapter Basic Rights Public Meeting Minutes Document Annual Smart Grid Forum Work Stream Form Schedule Tax Return Total Income Address Social Security Number Date Name Telephone Email University College School Conference Presentation See Note Notes For Of And No Yes Not None".casefold().split())
@@ -67,10 +69,6 @@ def review_document(name: str, raw: bytes, *, ocr: bool = True, reviewed_values:
         text = surface["text"]
         spans = [{"start": span.start, "end": span.end, "kind": span.entity_type, "basis": "contextual-rule"}
                  for span in detect_text(text)]
-        for span in spans:
-            if span["kind"] == "PERSON_NAME":
-                value = text[span["start"]:span["end"]]
-                seeds[("PERSON_NAME", _key(value))] = value
         if surface["kind"] == "metadata":
             for match in _AUTHOR.finditer(text):
                 if _POSSIBLE_NAME.fullmatch(match.group(1).strip()):
@@ -81,6 +79,8 @@ def review_document(name: str, raw: bytes, *, ocr: bool = True, reviewed_values:
         if surface["kind"] in {"pdf-native", "pdf-ocr", "docx-part", "pptx-slide", "pptx-notes", "xlsx-sheet"} or surface["id"].endswith("sharedStrings.xml"):
             # Tabs separate spreadsheet cells, never tokens in one name.
             for line in re.finditer(r"[^\t\r\n]+", text):
+                if is_court_caption(line.group()):
+                    continue
                 for match in _POSSIBLE_NAME.finditer(line.group()):
                     tokens = list(_NAME_WORD.finditer(match.group()))
                     runs, run = [], []
@@ -103,6 +103,13 @@ def review_document(name: str, raw: bytes, *, ocr: bool = True, reviewed_values:
                 spans.append({"start": match.start(), "end": match.end(), "kind": "GOVERNMENT_ID", "basis": "form-context-review"})
         for match in _URL.finditer(text):
             spans.append({"start": match.start(), "end": match.end(), "kind": "IDENTIFYING_LINK", "basis": "link-review"})
+        # Propagate identifiers with direct/contextual evidence, including IDs
+        # found only in form context. Weak capitalization proposals still need
+        # confirmation before they can cause removal elsewhere in the document.
+        for span in spans:
+            if span["kind"] in _REPEAT_KINDS and span["basis"] != "capitalization-review":
+                value = text[span["start"]:span["end"]]
+                seeds[(span["kind"], _key(value))] = value
         per_surface.append(spans)
     for item in reviewed_values:
         if not any(next(_occurrences(surface["text"], item["value"]), None) for surface in source.surfaces):

@@ -51,7 +51,16 @@ def _local(tag: str) -> str:
 
 
 def _strings(element, tags=("t",)) -> str:
-    return "".join(node.text or "" for node in element.iter() if _local(node.tag) in tags)
+    pieces = []
+    for node in element.iter():
+        tag = _local(node.tag)
+        if tag in tags:
+            pieces.append(node.text or "")
+        elif tag == "tab":
+            pieces.append("\t")
+        elif tag in {"br", "cr"}:
+            pieces.append("\n")
+    return "".join(pieces)
 
 
 def _xml(raw: bytes):
@@ -259,12 +268,19 @@ def extract_pdf(raw: bytes, *, ocr: bool) -> Extraction:
                 result.gaps.add("PDF_TEXT_EXTRACTION_FAILED")
             # OCR all small documents and a bounded selection in long files.
             # Native extraction and OCR are separate witnesses, never conflated.
-            needs_ocr = len(reader.pages) <= MAX_OCR_PAGES or not text.strip() or "/OCProperties" in root or "/AcroForm" in root
+            # XObjects can contain scans, including images nested in forms.
+            # Sparse native text (such as a header) is not evidence that all
+            # visible content was extracted. Inline images may lack XObjects.
+            sparse_text = len(text.strip()) < 200
+            resources = page.get("/Resources", {})
+            has_xobjects = bool(resources.get_object().get("/XObject")) if hasattr(resources, "get_object") else bool(resources.get("/XObject"))
+            needs_ocr = (len(reader.pages) <= MAX_OCR_PAGES or sparse_text or has_xobjects
+                         or "/OCProperties" in root or "/AcroForm" in root)
             item = {"id": f"page:{number}", "kind": "pdf-page", "page": number,
                     "status": native_status, "ocr": "UNMEASURED", "visual": "UNMEASURED"}
             result.inventory.append(item)
             if needs_ocr:
-                ocr_targets.append((index, item))
+                ocr_targets.append((index, item, (bool(text.strip()), not sparse_text)))
             for annotation_index, reference in enumerate(page.get("/Annots", [])):
                 annotation = reference.get_object()
                 value = "\n".join(f"{key}: {annotation[key]}" for key in ("/T", "/Contents", "/Subj") if key in annotation)
@@ -275,8 +291,8 @@ def extract_pdf(raw: bytes, *, ocr: bool) -> Extraction:
                 import pypdfium2 as pdfium
                 with pdfium.PdfDocument(raw) as pdf:
                     # Empty/failed native pages take precedence over duplicates.
-                    ordered = sorted(ocr_targets, key=lambda target: (target[1]["status"] == "EXTRACTED", target[0]))
-                    for index, item in ordered[:MAX_OCR_PAGES]:
+                    ordered = sorted(ocr_targets, key=lambda target: (target[2], target[0]))
+                    for index, item, _ in ordered[:MAX_OCR_PAGES]:
                         try:
                             text, words = _ocr_page(pdf, index)
                             result.add(f"page:{index + 1}:ocr", "pdf-ocr", text, page=index + 1, engine="tesseract-eng-psm3")
@@ -293,7 +309,7 @@ def extract_pdf(raw: bytes, *, ocr: bool) -> Extraction:
                 raise
             except Exception:
                 result.gaps.add("OCR_UNAVAILABLE_OR_RENDER_FAILED")
-        if any(item["ocr"] == "UNMEASURED" for _, item in ocr_targets):
+        if any(item.get("ocr") == "UNMEASURED" for item in result.inventory):
             result.gaps.add("PDF_OCR_INCOMPLETE")
         result.gaps.update({"PDF_PIXELS_HANDWRITING_QR_UNMEASURED", "OCR_TEXT_AGREEMENT_UNVERIFIED"})
         return result
