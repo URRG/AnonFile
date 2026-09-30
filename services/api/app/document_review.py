@@ -19,7 +19,7 @@ import tempfile
 from threading import BoundedSemaphore
 import unicodedata
 
-from app.document_entities import FULL_NAME, LETTER, is_court_caption, is_unicode_name
+from app.document_entities import FULL_NAME, LETTER, inline_field_boundaries, is_court_caption, is_unicode_name, name_proposal_end
 from app.document_extract import DocumentError, MAX_FILE_BYTES, extract_office, extract_pdf
 from app.independent_residual import scan_residual_candidate
 from app.processing import detect_text
@@ -72,18 +72,22 @@ def review_document(name: str, raw: bytes, *, ocr: bool = True, reviewed_values:
             for item in reviewed_values):
         raise DocumentError("INVALID_REVIEW_VALUES")
     source = extract_pdf(raw, ocr=ocr) if extension == "pdf" else extract_office(raw, extension)
-    seeds: dict[tuple[str, str], str] = {}
-    possible_names: dict[str, str] = {}
+    # A casefold identity may have several observed spellings (ß / ss), while
+    # re.IGNORECASE does not equate those spellings. Keep every spelling for
+    # repetition and residual checks; canonical replacement IDs remain shared.
+    seeds: dict[tuple[str, str], set[str]] = {}
+    possible_names: dict[str, set[str]] = {}
     per_surface = []
     for surface in source.surfaces:
         text = surface["text"]
+        fields = inline_field_boundaries(text)
         spans = [{"start": span.start, "end": span.end, "kind": span.entity_type, "basis": "contextual-rule"}
                  for span in detect_text(text)]
         if surface["kind"] == "metadata":
             for match in _AUTHOR.finditer(text):
                 if _POSSIBLE_NAME.fullmatch(match.group(1).strip()) or is_unicode_name(match.group(1).strip()):
                     value = match.group(1).strip()
-                    seeds[("PERSON_NAME", _key(value))] = value
+                    seeds.setdefault(("PERSON_NAME", _key(value)), set()).add(value)
         # Document-only proposals catch rosters and name cells. These weaker
         # candidates stay visibly distinct from explicit-context findings.
         if surface["kind"] in {"pdf-native", "pdf-ocr", "docx-part", "pptx-slide", "pptx-notes", "xlsx-sheet"} or surface["id"].endswith("sharedStrings.xml"):
@@ -107,6 +111,9 @@ def review_document(name: str, raw: bytes, *, ocr: bool = True, reviewed_values:
                         if len(run) >= 2:
                             start = line.start() + match.start() + run[0].start()
                             end = line.start() + match.start() + run[-1].end()
+                            end = name_proposal_end(start, end, fields)
+                            if end <= start or (start and unicodedata.category(text[start - 1])[0] == "M"):
+                                continue
                             if end < len(text) and unicodedata.category(text[end])[0] == "M":
                                 continue
                             spans.append({"start": start, "end": end, "kind": "PERSON_NAME", "basis": "capitalization-review"})
@@ -122,18 +129,25 @@ def review_document(name: str, raw: bytes, *, ocr: bool = True, reviewed_values:
             value = text[span["start"]:span["end"]]
             if span["basis"] in _WEAK_NAME_BASES:
                 if len(value) <= 150:
-                    possible_names[_key(value)] = value
+                    possible_names.setdefault(_key(value), set()).add(value)
             elif span["kind"] in _REPEAT_KINDS:
-                seeds[(span["kind"], _key(value))] = value
+                seeds.setdefault((span["kind"], _key(value)), set()).add(value)
         per_surface.append(spans)
     for item in reviewed_values:
         if not any(next(_occurrences(surface["text"], item["value"]), None) for surface in source.surfaces):
             raise DocumentError("REVIEW_VALUE_NOT_FOUND")
-        seeds[(item["kind"], _key(item["value"]))] = item["value"]
-    confirmed_keys = {_key(item["value"]) for item in reviewed_values}
-    possible_names = {key: value for key, value in possible_names.items()
-                      if ("PERSON_NAME", key) not in seeds and key not in confirmed_keys}
-    if len(seeds) + len(possible_names) > 1_000:
+        seeds.setdefault((item["kind"], _key(item["value"])), set()).add(item["value"])
+    # Only stronger evidence with the same matching behavior can supersede a
+    # weak spelling; casefold equality alone must not silently discard it.
+    for key, values in list(possible_names.items()):
+        confirmed = seeds.get(("PERSON_NAME", key), set()) | {
+            item["value"] for item in reviewed_values if _key(item["value"]) == key}
+        remaining = {value for value in values if not any(next(_occurrences(value, known), None) for known in confirmed)}
+        if remaining:
+            possible_names[key] = remaining
+        else:
+            del possible_names[key]
+    if sum(map(len, seeds.values())) + sum(map(len, possible_names.values())) > 1_000:
         raise DocumentError("ENTITY_LIMIT")
     if possible_names:
         source.gaps.add("CAPITALIZATION_REPEAT_REVIEW_REQUIRED")
@@ -141,10 +155,11 @@ def review_document(name: str, raw: bytes, *, ocr: bool = True, reviewed_values:
     entities, counts, total_matches, residual_units = {}, Counter(), 0, 0
     for surface, spans in zip(source.surfaces, per_surface):
         text = surface["text"]
-        for (kind, _), value in seeds.items():
-            for match in _occurrences(text, value):
-                spans.append({"start": match.start(), "end": match.end(), "kind": kind, "basis": "document-repeat"})
-        for value in possible_names.values():
+        for (kind, _), values in seeds.items():
+            for value in sorted(values):
+                for match in _occurrences(text, value):
+                    spans.append({"start": match.start(), "end": match.end(), "kind": kind, "basis": "document-repeat"})
+        for value in (value for values in possible_names.values() for value in sorted(values)):
             for match in _occurrences(text, value):
                 spans.append({"start": match.start(), "end": match.end(), "kind": "PERSON_NAME", "basis": "capitalization-repeat-review"})
         if surface["kind"] in {"metadata", "signature-metadata", "custom-xml", "package-relationship"} and text:
@@ -180,7 +195,7 @@ def review_document(name: str, raw: bytes, *, ocr: bool = True, reviewed_values:
         residual_units += any(residual.residual_counts.values())
         # This is a source-aware equality check, explicitly separate from the
         # independent candidate scanner and not a measure of unknown entities.
-        retained = sum(any(_occurrences(candidate, value)) for value in seeds.values())
+        retained = sum(any(_occurrences(candidate, value)) for values in seeds.values() for value in values)
         surface.update({"matches": merged, "candidate": candidate,
                         "residual_families": dict(residual.residual_counts), "known_values_remaining": retained})
     source.gaps.update({"NAME_ADDRESS_SEMANTIC_COVERAGE_UNQUALIFIED", "TEXT_CANDIDATE_ONLY_ORIGINAL_UNCHANGED"})
