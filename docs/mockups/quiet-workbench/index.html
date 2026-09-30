@@ -1,0 +1,1962 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AnonFlow · Quiet workbench preview</title>
+    <style>
+      :root {
+        --ink: #172c37;
+        --muted: #5a7079;
+        --accent: #076b62;
+        --accent-dark: #05564f;
+        --tint: #e5f3ef;
+        --paper: #fff;
+        --bg: #f4f6f5;
+        --line: #dbe3e1;
+        --amber: #845419;
+        --amber-bg: #fff2d9;
+        --radius: 16px;
+        --space: 8px;
+        font-family:
+          Inter,
+          ui-sans-serif,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          sans-serif;
+        color: var(--ink);
+        background: var(--bg);
+        font-synthesis: none;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+      }
+      button,
+      input,
+      summary {
+        font: inherit;
+      }
+      button,
+      a,
+      input,
+      summary {
+        -webkit-tap-highlight-color: transparent;
+      }
+      button {
+        cursor: pointer;
+      }
+      button:disabled {
+        cursor: default;
+        opacity: 0.55;
+      }
+      button,
+      a,
+      summary {
+        touch-action: manipulation;
+      }
+      button:focus-visible,
+      a:focus-visible,
+      input:focus-visible,
+      summary:focus-visible,
+      [tabindex="-1"]:focus-visible {
+        outline: 3px solid #247dbc;
+        outline-offset: 4px;
+      }
+      button {
+        color: inherit;
+      }
+      button svg,
+      svg.icon {
+        width: 20px;
+        height: 20px;
+        flex: none;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.7;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      button {
+        border: 0;
+        background: none;
+      }
+      a {
+        color: var(--accent);
+      }
+      [hidden] {
+        display: none !important;
+      }
+      .skip {
+        position: fixed;
+        top: -80px;
+        left: 16px;
+        z-index: 10;
+        padding: 16px;
+        background: white;
+      }
+      .skip:focus {
+        top: 16px;
+      }
+      .shell {
+        display: grid;
+        grid-template-columns: 184px minmax(0, 1fr);
+        min-height: 100vh;
+      }
+      .rail {
+        padding: 32px 16px 24px;
+        border-right: 1px solid var(--line);
+        display: flex;
+        flex-direction: column;
+        gap: 48px;
+        background: #fbfcfb;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 0 8px;
+        font-weight: 750;
+        font-size: 21px;
+        letter-spacing: -0.7px;
+      }
+      .brandmark {
+        width: 32px;
+        height: 36px;
+        color: var(--accent);
+      }
+      .brandmark svg {
+        width: 100%;
+        height: 100%;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2;
+      }
+      .nav-label,
+      .eyebrow {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 1.5px;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      .nav-label {
+        margin: 0 16px 16px;
+      }
+      .steps {
+        display: grid;
+        gap: 8px;
+      }
+      .step {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        width: 100%;
+        min-height: 48px;
+        text-align: left;
+        padding: 12px 16px;
+        color: var(--muted);
+        border-radius: 10px;
+        font-size: 14px;
+        font-weight: 600;
+      }
+      .step .num {
+        font-size: 12px;
+        opacity: 0.9;
+      }
+      .step:hover {
+        background: #eef2f0;
+      }
+      .step[aria-current="step"] {
+        background: var(--tint);
+        color: var(--accent);
+      }
+      .rail-bottom {
+        margin-top: auto;
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.6;
+        padding: 0 16px;
+      }
+      .preview-dot {
+        display: inline-block;
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--accent);
+        margin-right: 6px;
+      }
+      .rail-bottom strong {
+        font-weight: 600;
+        color: var(--ink);
+      }
+      .main {
+        min-width: 0;
+      }
+      .topbar {
+        height: 88px;
+        padding: 0 40px;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+      }
+      .crumb {
+        font-size: 13px;
+        color: var(--muted);
+        display: flex;
+        gap: 12px;
+        align-items: center;
+      }
+      .crumb strong {
+        color: var(--ink);
+        font-weight: 550;
+      }
+      .tag {
+        font-size: 11px;
+        padding: 7px 10px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      .page {
+        padding: 36px 40px 32px;
+        max-width: 1640px;
+        margin: 0 auto;
+      }
+      .pagehead {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+        margin-bottom: 28px;
+      }
+      h1 {
+        font-size: 32px;
+        line-height: 1.2;
+        letter-spacing: -1.2px;
+        margin: 0 0 10px;
+        font-weight: 650;
+      }
+      .subline {
+        font-size: 14px;
+        color: var(--muted);
+        margin: 0;
+        line-height: 1.6;
+      }
+      .head-actions {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+      }
+      .button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 9px;
+        min-height: 44px;
+        border-radius: 8px;
+        padding: 11px 16px;
+        font-size: 13px;
+        font-weight: 650;
+        border: 1px solid var(--line);
+        background: var(--paper);
+        white-space: nowrap;
+      }
+      .button:hover {
+        background: #edf2f0;
+      }
+      .button.primary {
+        background: var(--accent);
+        color: white;
+        border-color: var(--accent);
+      }
+      .button.primary:hover {
+        background: var(--accent-dark);
+      }
+      .button.quiet {
+        background: none;
+        border-color: transparent;
+        color: var(--muted);
+      }
+      .button.quiet:hover {
+        background: #e7edeb;
+      }
+      .status {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        border-radius: 24px;
+        padding: 8px 12px;
+        font-size: 12px;
+        font-weight: 600;
+        background: var(--amber-bg);
+        color: var(--amber);
+        white-space: nowrap;
+      }
+      .status-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: currentColor;
+      }
+      .review-grid {
+        display: grid;
+        grid-template-columns: 184px minmax(0, 1fr) 272px;
+        gap: 20px;
+        align-items: start;
+      }
+      .files {
+        padding-top: 8px;
+      }
+      .section-label {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--muted);
+        margin: 0 12px 16px;
+      }
+      .file-list {
+        display: grid;
+        gap: 6px;
+      }
+      .file {
+        width: 100%;
+        min-height: 76px;
+        text-align: left;
+        padding: 14px 12px;
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+        border-radius: 10px;
+        border: 1px solid transparent;
+      }
+      .file:hover {
+        background: #e9eeec;
+      }
+      .file[aria-pressed="true"] {
+        background: white;
+        border-color: var(--line);
+        box-shadow: 0 2px 5px #172c3704;
+      }
+      .file svg {
+        color: var(--muted);
+        margin-top: 2px;
+        width: 18px;
+      }
+      .file span {
+        min-width: 0;
+        display: block;
+      }
+      .file strong {
+        font-size: 12px;
+        font-weight: 600;
+        display: block;
+        line-height: 1.5;
+        overflow-wrap: anywhere;
+      }
+      .file small {
+        font-size: 11px;
+        color: var(--muted);
+        display: block;
+        margin-top: 5px;
+      }
+      .file[aria-pressed="true"] svg {
+        color: var(--accent);
+      }
+      .file-note {
+        font-size: 11px;
+        color: var(--muted);
+        line-height: 1.6;
+        margin: 20px 12px;
+      }
+      .document {
+        background: var(--paper);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        overflow: hidden;
+        box-shadow: 0 3px 12px #172c3703;
+        min-width: 0;
+      }
+      .document-tools {
+        padding: 16px 20px;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .document-tools strong {
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .segmented {
+        display: flex;
+        border-radius: 8px;
+        padding: 3px;
+        background: #f0f3f2;
+        gap: 2px;
+      }
+      .segmented button {
+        border-radius: 6px;
+        min-height: 36px;
+        padding: 8px 11px;
+        font-size: 11px;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      .segmented button[aria-pressed="true"] {
+        background: white;
+        color: var(--ink);
+        box-shadow: 0 1px 4px #172c3715;
+      }
+      .document-body {
+        padding: 36px 32px 48px;
+        min-height: 442px;
+      }
+      .paper-eyebrow {
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 1.8px;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin-bottom: 24px;
+      }
+      .doc-title {
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: 25px;
+        line-height: 1.25;
+        font-weight: 400;
+        letter-spacing: -0.5px;
+        margin: 0 0 28px;
+      }
+      .document-text {
+        font-size: 13px;
+        line-height: 2.25;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        word-break: normal;
+      }
+      .mention {
+        display: inline;
+        padding: 3px 2px;
+        margin: 0;
+        border-bottom: 1px solid #82ada1;
+        border-radius: 3px;
+        background: #eaf4ef;
+        color: #174b3e;
+        font: inherit;
+        line-height: inherit;
+        white-space: normal;
+        text-align: inherit;
+      }
+      .mention[aria-pressed="true"] {
+        background: #d4e9e1;
+        box-shadow: 0 0 0 2px #619684;
+        border-bottom-color: transparent;
+      }
+      .mention.retained {
+        background: #fff2db;
+        border-bottom-color: #c49b5b;
+        color: #744b17;
+      }
+      .mention:hover {
+        background: #cce4da;
+      }
+      .document-footer {
+        padding: 13px 20px;
+        border-top: 1px solid var(--line);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        color: var(--muted);
+        font-size: 11px;
+        gap: 16px;
+      }
+      .legend {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+      }
+      .legend-dot {
+        width: 8px;
+        height: 8px;
+        background: #bfded0;
+        border-radius: 2px;
+      }
+      .inspector {
+        background: white;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        overflow: hidden;
+      }
+      .inspector-top {
+        padding: 20px 20px 16px;
+        border-bottom: 1px solid var(--line);
+      }
+      .inspector-top-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 14px;
+      }
+      .inspector h2 {
+        font-size: 14px;
+        margin: 0;
+        font-weight: 650;
+        letter-spacing: -0.2px;
+      }
+      .count {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .progress {
+        height: 4px;
+        border-radius: 4px;
+        background: #e9eeec;
+        overflow: hidden;
+      }
+      .progress-fill {
+        height: 100%;
+        background: var(--accent);
+        transition: width 0.2s;
+        width: 0;
+      }
+      .findings {
+        padding: 8px;
+        display: grid;
+        gap: 2px;
+      }
+      .finding {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        width: 100%;
+        text-align: left;
+        min-height: 44px;
+        padding: 10px 12px;
+        font-size: 12px;
+        border-radius: 7px;
+      }
+      .finding:hover {
+        background: #f2f5f3;
+      }
+      .finding[aria-pressed="true"] {
+        background: var(--tint);
+        color: var(--accent);
+        font-weight: 600;
+      }
+      .finding span {
+        overflow-wrap: anywhere;
+        min-width: 0;
+      }
+      .finding .tiny-state {
+        width: 16px;
+        flex: none;
+        font-size: 13px;
+        text-align: center;
+        color: var(--muted);
+      }
+      .finding[aria-pressed="true"] .tiny-state {
+        color: var(--accent);
+      }
+      .edit {
+        padding: 20px;
+        border-top: 1px solid var(--line);
+      }
+      .edit .eyebrow {
+        letter-spacing: 1px;
+        font-size: 10px;
+      }
+      .source-value {
+        font-size: 18px;
+        font-weight: 600;
+        line-height: 1.4;
+        letter-spacing: -0.5px;
+        margin: 12px 0 8px;
+        overflow-wrap: anywhere;
+      }
+      .occurrences {
+        font-size: 11px;
+        color: var(--muted);
+        margin: 0 0 24px;
+      }
+      .field-label {
+        font-size: 11px;
+        font-weight: 600;
+        display: block;
+        margin-bottom: 8px;
+      }
+      .input {
+        width: 100%;
+        min-height: 44px;
+        padding: 10px 12px;
+        border: 1px solid #a6b8b1;
+        border-radius: 8px;
+        font-size: 13px;
+        background: #fcfdfc;
+        color: var(--ink);
+      }
+      .decision-actions {
+        display: grid;
+        gap: 4px;
+        margin-top: 16px;
+      }
+      .decision-actions .button {
+        width: 100%;
+      }
+      .error {
+        font-size: 12px;
+        color: #a0342a;
+        line-height: 1.5;
+        margin: 8px 0;
+      }
+      .decision-state {
+        font-size: 11px;
+        color: var(--accent);
+        min-height: 16px;
+        margin-top: 10px;
+      }
+      .review-note {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        align-items: center;
+        margin-top: 24px;
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+      .review-note .button {
+        padding: 8px 12px;
+        min-height: 44px;
+        font-size: 12px;
+      }
+      .review-note-main {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+      }
+      .review-note svg {
+        width: 16px;
+      }
+      .intake {
+        max-width: 840px;
+        margin: 24px auto 0;
+      }
+      .dropzone {
+        border: 1px dashed #9db9ac;
+        border-radius: 20px;
+        text-align: center;
+        padding: 64px 24px;
+        background: #fbfdfb;
+      }
+      .upload-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 64px;
+        height: 64px;
+        border-radius: 18px;
+        background: var(--tint);
+        color: var(--accent);
+        margin-bottom: 24px;
+      }
+      .upload-icon svg {
+        width: 28px;
+        height: 28px;
+      }
+      .dropzone h2 {
+        font-weight: 600;
+        font-size: 23px;
+        letter-spacing: -0.6px;
+        margin: 0 0 10px;
+      }
+      .dropzone p {
+        font-size: 13px;
+        color: var(--muted);
+        margin: 0 0 24px;
+        line-height: 1.6;
+      }
+      .sample-files {
+        display: flex;
+        gap: 12px;
+        margin: 24px 0;
+      }
+      .sample-file {
+        padding: 20px;
+        background: white;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        flex: 1;
+        min-width: 0;
+      }
+      .sample-file svg {
+        color: var(--accent);
+        margin-bottom: 12px;
+      }
+      .sample-file strong {
+        display: block;
+        font-size: 12px;
+        overflow-wrap: anywhere;
+      }
+      .sample-file small {
+        display: block;
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 8px;
+      }
+      .intake-bottom {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 20px;
+      }
+      .intake-bottom p {
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+      .summary {
+        max-width: 900px;
+        margin: 16px auto;
+      }
+      .summary-card {
+        background: white;
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        padding: 32px;
+      }
+      .summary-heading {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        margin-bottom: 32px;
+      }
+      .summary-heading .upload-icon {
+        width: 52px;
+        height: 52px;
+        margin: 0;
+        flex: none;
+      }
+      .summary-heading h2 {
+        font-size: 22px;
+        letter-spacing: -0.5px;
+        margin: 0 0 8px;
+      }
+      .summary-heading p {
+        font-size: 13px;
+        color: var(--muted);
+        margin: 0;
+        line-height: 1.6;
+      }
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 24px;
+        border-bottom: 1px solid var(--line);
+        padding-bottom: 28px;
+        margin-bottom: 8px;
+      }
+      .metric strong {
+        display: block;
+        font-size: 32px;
+        font-weight: 550;
+        letter-spacing: -1px;
+        margin-bottom: 8px;
+      }
+      .metric span {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .summary-file {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 20px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .summary-file:last-child {
+        border: 0;
+      }
+      .summary-file strong {
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .summary-file small {
+        display: block;
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .summary-file .button {
+        font-size: 12px;
+      }
+      .summary-bottom {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 24px;
+        margin-top: 24px;
+      }
+      .summary-bottom p {
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.6;
+        margin: 0;
+      }
+      .toast {
+        position: fixed;
+        bottom: 24px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: var(--ink);
+        color: white;
+        padding: 13px 20px;
+        border-radius: 10px;
+        max-width: calc(100% - 32px);
+        font-size: 13px;
+        box-shadow: 0 6px 30px #172c3730;
+        z-index: 10;
+      }
+      .toast:empty {
+        display: none;
+      }
+      dialog {
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        padding: 28px;
+        width: min(480px, calc(100% - 32px));
+        color: var(--ink);
+        box-shadow: 0 20px 100px #172c3730;
+      }
+      dialog::backdrop {
+        background: #172c3755;
+      }
+      dialog h2 {
+        font-size: 22px;
+        letter-spacing: -0.6px;
+        margin: 0 0 20px;
+      }
+      dialog p,
+      dialog li {
+        font-size: 14px;
+        color: var(--muted);
+        line-height: 1.7;
+      }
+      dialog ul {
+        padding-left: 20px;
+      }
+      dialog .dialog-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 12px;
+        margin-top: 24px;
+      }
+      .check-label {
+        display: flex;
+        gap: 12px;
+        align-items: flex-start;
+        font-size: 13px;
+        line-height: 1.6;
+        padding: 12px 0;
+      }
+      .check-label input {
+        margin-top: 3px;
+        width: 18px;
+        height: 18px;
+        accent-color: var(--accent);
+      }
+      @media (min-width: 1600px) {
+        .review-grid {
+          grid-template-columns: 208px minmax(0, 1fr) 296px;
+          gap: 24px;
+        }
+        .document-body {
+          padding: 48px;
+        }
+        .document-text {
+          font-size: 14px;
+        }
+      }
+      @media (max-width: 1250px) {
+        .rail {
+          padding-left: 10px;
+          padding-right: 10px;
+        }
+        .shell {
+          grid-template-columns: 164px minmax(0, 1fr);
+        }
+        .topbar {
+          padding: 0 24px;
+        }
+        .page {
+          padding: 28px 24px;
+        }
+        .review-grid {
+          grid-template-columns: minmax(0, 1fr) 272px;
+        }
+        .files {
+          grid-column: 1/-1;
+          padding-top: 0;
+        }
+        .section-label,
+        .file-note {
+          display: none;
+        }
+        .file-list {
+          display: flex;
+          gap: 8px;
+        }
+        .file {
+          min-height: 60px;
+          flex: 1;
+          padding: 10px 12px;
+          align-items: center;
+        }
+        .file strong {
+          font-size: 12px;
+        }
+        .file small {
+          margin-top: 2px;
+        }
+        .document-tools {
+          flex-wrap: wrap;
+        }
+        .pagehead {
+          margin-bottom: 24px;
+        }
+        .document-body {
+          padding: 28px 24px;
+        }
+      }
+      @media (max-width: 800px) {
+        .shell {
+          display: block;
+        }
+        .rail {
+          display: flex;
+          gap: 20px;
+          padding: 16px 20px;
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+        }
+        .brand {
+          padding: 0;
+          font-size: 21px;
+        }
+        .brandmark {
+          height: 28px;
+          width: 28px;
+        }
+        .nav-label,
+        .rail-bottom {
+          display: none;
+        }
+        .steps {
+          display: flex;
+          gap: 8px;
+        }
+        .step {
+          min-height: 44px;
+          justify-content: center;
+          padding: 10px 16px;
+          font-size: 13px;
+        }
+        .topbar {
+          height: 60px;
+          padding: 0 20px;
+        }
+        .crumb .workspace,
+        .crumb .slash {
+          display: none;
+        }
+        .page {
+          padding: 28px 20px;
+        }
+        .pagehead {
+          align-items: flex-start;
+          gap: 16px;
+        }
+        h1 {
+          font-size: 28px;
+        }
+        .head-actions {
+          flex-direction: column;
+          align-items: flex-end;
+          gap: 6px;
+        }
+        .head-actions .button {
+          padding: 8px 10px;
+          font-size: 12px;
+        }
+        .status {
+          padding: 6px 10px;
+          font-size: 11px;
+        }
+        .review-grid {
+          grid-template-columns: minmax(0, 1fr) 248px;
+          gap: 16px;
+        }
+        .document-body {
+          padding: 24px 20px;
+        }
+        .edit {
+          padding: 16px;
+        }
+        .inspector-top {
+          padding: 16px;
+        }
+        .document-text {
+          font-size: 12px;
+        }
+        .document-tools {
+          padding: 12px;
+        }
+        .document-tools > strong {
+          display: none;
+        }
+        .review-note {
+          align-items: flex-start;
+        }
+        .review-note-main {
+          align-items: flex-start;
+        }
+        .review-note-main svg {
+          margin-top: 3px;
+          flex: none;
+        }
+      }
+      @media (max-width: 600px) {
+        .review-grid {
+          display: flex;
+          flex-direction: column;
+        }
+        .files,
+        .document,
+        .inspector {
+          width: 100%;
+        }
+        .files {
+          overflow: auto;
+          padding: 3px;
+        }
+        .file-list {
+          min-width: 510px;
+        }
+        .file {
+          min-width: 164px;
+        }
+        .pagehead {
+          gap: 8px;
+        }
+        h1 {
+          font-size: 27px;
+        }
+        .subline {
+          font-size: 12px;
+        }
+        .document-body {
+          min-height: 360px;
+          padding: 24px;
+        }
+        .document-text {
+          font-size: 13px;
+        }
+        .document-tools > strong {
+          display: block;
+        }
+        .document-tools {
+          gap: 8px;
+        }
+        .inspector {
+          display: grid;
+          grid-template-columns: 1fr;
+        }
+        .findings {
+          grid-template-columns: 1fr 1fr;
+        }
+        .finding {
+          font-size: 11px;
+        }
+        .source-value {
+          font-size: 21px;
+        }
+        .edit {
+          padding: 20px;
+        }
+        .occurrences {
+          margin-bottom: 16px;
+        }
+        .decision-actions {
+          grid-template-columns: 1fr 1fr;
+          gap: 8px;
+        }
+        .decision-actions .button {
+          white-space: normal;
+          min-height: 48px;
+        }
+        .review-note {
+          margin-top: 16px;
+          font-size: 11px;
+        }
+        .review-note .button {
+          flex: none;
+        }
+        .summary-card {
+          padding: 24px 20px;
+        }
+        .summary-heading {
+          align-items: flex-start;
+        }
+        .summary-heading h2 {
+          font-size: 21px;
+        }
+        .metrics {
+          gap: 12px;
+        }
+        .metric strong {
+          font-size: 28px;
+        }
+        .metric span {
+          font-size: 11px;
+        }
+        .summary-bottom {
+          align-items: flex-start;
+          flex-direction: column;
+          gap: 16px;
+        }
+        .summary-bottom .button {
+          width: 100%;
+        }
+        .sample-files {
+          flex-direction: column;
+        }
+        .sample-file {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          padding: 16px;
+        }
+        .sample-file svg {
+          margin: 0;
+        }
+        .sample-file small {
+          margin: 0 0 0 auto;
+        }
+        .intake-bottom {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+        .intake-bottom .button {
+          width: 100%;
+        }
+        .dropzone {
+          padding: 40px 24px;
+        }
+        .tag {
+          font-size: 10px;
+        }
+        .steps {
+          gap: 4px;
+        }
+        .step {
+          flex: 1;
+        }
+        .doc-title {
+          font-size: 24px;
+        }
+      }
+      @media (max-width: 360px) {
+        .step {
+          padding: 10px 8px;
+          gap: 6px;
+        }
+        .pagehead {
+          display: block;
+        }
+        .head-actions {
+          flex-direction: row;
+          justify-content: space-between;
+          margin-top: 16px;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        * {
+          scroll-behavior: auto !important;
+          transition: none !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <svg aria-hidden="true" width="0" height="0" style="position: absolute">
+      <defs>
+        <symbol id="file-icon" viewBox="0 0 24 24">
+          <path
+            d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9zM14 3v6h6M8 13h8M8 17h5"
+          />
+        </symbol>
+        <symbol id="arrow-icon" viewBox="0 0 24 24">
+          <path d="M4 12h16m-6-6 6 6-6 6" />
+        </symbol>
+        <symbol id="check-icon" viewBox="0 0 24 24">
+          <path d="m5 12 4 4L19 6" />
+        </symbol>
+        <symbol id="lock-icon" viewBox="0 0 24 24">
+          <rect x="5" y="10" width="14" height="11" rx="2" />
+          <path d="M8 10V7a4 4 0 0 1 8 0v3m-4 5v2" />
+        </symbol>
+        <symbol id="upload-icon" viewBox="0 0 24 24">
+          <path
+            d="M12 16V3M7 8l5-5 5 5M4 15v5a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5"
+          />
+        </symbol>
+      </defs>
+    </svg>
+    <a class="skip" href="#main">Skip to review</a>
+    <div class="shell">
+      <aside class="rail">
+        <div class="brand">
+          <span class="brandmark" aria-hidden="true"
+            ><svg viewBox="0 0 32 36">
+              <path d="M16 2 29 7v10c0 8-6 13-13 17C9 30 3 25 3 17V7z" />
+              <path
+                d="M10 21v-7a6 6 0 0 1 12 0v4m-8 6V14a2 2 0 0 1 4 0v11M7 17v2m15 3v2"
+              /></svg></span
+          >AnonFlow
+        </div>
+        <nav aria-label="Workflow">
+          <div class="nav-label">Workspace</div>
+          <div class="steps">
+            <button class="step" data-screen="files">
+              <span class="num">01</span>Files
+            </button>
+            <button class="step" data-screen="review" aria-current="step">
+              <span class="num">02</span>Review
+            </button>
+            <button class="step" data-screen="summary">
+              <span class="num">03</span>Summary
+            </button>
+          </div>
+        </nav>
+        <div class="rail-bottom">
+          <strong><span class="preview-dot"></span>Design preview</strong
+          ><br />Fictional data only
+        </div>
+      </aside>
+      <main id="main" class="main" tabindex="-1">
+        <header class="topbar">
+          <div class="crumb">
+            <span class="workspace">Workspace</span
+            ><span class="slash" aria-hidden="true">/</span
+            ><strong>Customer handoff</strong>
+          </div>
+          <span class="tag">Preview · fictional data</span>
+        </header>
+        <section class="page" id="screen-review" aria-labelledby="review-title">
+          <div class="pagehead">
+            <div>
+              <h1 id="review-title" tabindex="-1">Review changes</h1>
+              <p class="subline">
+                3 files <span aria-hidden="true">·</span> 4 suggestions
+              </p>
+            </div>
+            <div class="head-actions">
+              <span class="status"
+                ><span class="status-dot"></span
+                ><span id="review-status">Needs review</span></span
+              ><button class="button quiet" data-screen="summary">
+                View summary
+                <svg aria-hidden="true"><use href="#arrow-icon" /></svg>
+              </button>
+            </div>
+          </div>
+          <div class="review-grid">
+            <aside class="files" aria-label="Sample files">
+              <div class="section-label">Files <span>3</span></div>
+              <div class="file-list" id="file-list"></div>
+              <p class="file-note">
+                One replacement.<br />Every matching mention.
+              </p>
+            </aside>
+            <article class="document" aria-label="Document preview">
+              <div class="document-tools">
+                <strong id="document-label">Email</strong>
+                <div class="segmented" role="group" aria-label="Document view">
+                  <button data-view="original" aria-pressed="true">
+                    Original</button
+                  ><button data-view="copy" aria-pressed="false">
+                    Review copy
+                  </button>
+                </div>
+              </div>
+              <div class="document-body">
+                <div class="paper-eyebrow" id="paper-type">Customer email</div>
+                <h2 class="doc-title" id="document-title">A smooth handoff.</h2>
+                <div class="document-text" id="document-text"></div>
+              </div>
+              <div class="document-footer">
+                <span class="legend"
+                  ><span class="legend-dot"></span
+                  ><span id="legend-label">Suggested change</span></span
+                ><span id="document-count"></span>
+              </div>
+            </article>
+            <aside class="inspector" aria-label="Review suggestions">
+              <div class="inspector-top">
+                <div class="inspector-top-row">
+                  <h2>Suggestions</h2>
+                  <span class="count" id="progress-label">0 / 4 reviewed</span>
+                </div>
+                <div
+                  class="progress"
+                  role="progressbar"
+                  aria-label="Suggestions reviewed"
+                  aria-valuemin="0"
+                  aria-valuemax="4"
+                  aria-valuenow="0"
+                >
+                  <div class="progress-fill" id="progress-fill"></div>
+                </div>
+              </div>
+              <div class="findings" id="finding-list"></div>
+              <form class="edit" id="edit-form" novalidate>
+                <div class="eyebrow" id="finding-kind">Person</div>
+                <h3 class="source-value" id="source-value">Maya Patel</h3>
+                <p class="occurrences" id="occurrences"></p>
+                <label class="field-label" for="replacement">Replace with</label
+                ><input
+                  class="input"
+                  id="replacement"
+                  name="replacement"
+                  maxlength="100"
+                  autocomplete="off"
+                  spellcheck="false"
+                  aria-describedby="replacement-error"
+                />
+                <p class="error" id="replacement-error" role="alert" hidden></p>
+                <div class="decision-state" id="decision-state"></div>
+                <div class="decision-actions">
+                  <button class="button primary" type="submit">
+                    <svg aria-hidden="true"><use href="#check-icon" /></svg
+                    >Confirm change</button
+                  ><button
+                    class="button quiet"
+                    type="button"
+                    id="keep-original"
+                  >
+                    Keep original
+                  </button>
+                </div>
+              </form>
+            </aside>
+          </div>
+          <div class="review-note">
+            <span class="review-note-main"
+              ><svg class="icon" aria-hidden="true">
+                <use href="#lock-icon" /></svg
+              >Review copy. Not cleared for sharing.</span
+            ><button class="button quiet" data-details>
+              Details <svg aria-hidden="true"><use href="#arrow-icon" /></svg>
+            </button>
+          </div>
+        </section>
+        <section
+          class="page"
+          id="screen-files"
+          aria-labelledby="files-title"
+          hidden
+        >
+          <div class="pagehead">
+            <div>
+              <h1 id="files-title" tabindex="-1">Start with your files</h1>
+              <p class="subline">Keep related documents together.</p>
+            </div>
+            <button class="button quiet" id="reset-sample">Reset sample</button>
+          </div>
+          <div class="intake">
+            <div class="dropzone" id="dropzone">
+              <span class="upload-icon"
+                ><svg class="icon" aria-hidden="true">
+                  <use href="#upload-icon" /></svg
+              ></span>
+              <h2>A little less exposed.</h2>
+              <p>Try a three-file customer handoff.</p>
+              <button class="button primary" id="load-sample">
+                Load sample
+                <svg aria-hidden="true"><use href="#arrow-icon" /></svg>
+              </button>
+              <p id="load-status" role="status" style="margin: 16px 0 0">
+                This preview uses fictional files.
+              </p>
+            </div>
+            <div class="sample-files" id="sample-files"></div>
+            <div class="intake-bottom">
+              <p>
+                Samples stay in this browser.<br />No upload or detection runs
+                here.
+              </p>
+              <button class="button" data-screen="review">
+                Open review
+                <svg aria-hidden="true"><use href="#arrow-icon" /></svg>
+              </button>
+            </div>
+          </div>
+        </section>
+        <section
+          class="page"
+          id="screen-summary"
+          aria-labelledby="summary-title"
+          hidden
+        >
+          <div class="pagehead">
+            <div>
+              <h1 id="summary-title" tabindex="-1">Your review</h1>
+              <p class="subline">A clear view of what changed.</p>
+            </div>
+            <span class="status"
+              ><span class="status-dot"></span>Review copy</span
+            >
+          </div>
+          <div class="summary">
+            <div class="summary-card">
+              <div class="summary-heading">
+                <span class="upload-icon"
+                  ><svg class="icon" aria-hidden="true">
+                    <use href="#file-icon" /></svg
+                ></span>
+                <div>
+                  <h2 id="summary-heading">4 suggestions to review</h2>
+                  <p id="summary-description">
+                    Confirm a replacement or keep the original.
+                  </p>
+                </div>
+              </div>
+              <div class="metrics">
+                <div class="metric"><strong>3</strong><span>Files</span></div>
+                <div class="metric">
+                  <strong id="confirmed-count">0</strong
+                  ><span>Changes confirmed</span>
+                </div>
+                <div class="metric">
+                  <strong id="kept-count">0</strong><span>Kept original</span>
+                </div>
+              </div>
+              <div id="summary-files"></div>
+            </div>
+            <div class="summary-bottom">
+              <p>
+                Review copy. Not cleared for sharing.<br /><button
+                  class="button quiet"
+                  data-details
+                  style="padding-left: 0"
+                >
+                  What does this mean?
+                </button>
+              </p>
+              <button class="button primary" id="summary-primary">
+                Continue review
+                <svg aria-hidden="true"><use href="#arrow-icon" /></svg>
+              </button>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+    <dialog id="details-dialog" aria-labelledby="details-title">
+      <h2 id="details-title">A review copy, with limits.</h2>
+      <p>
+        This is an interactive design preview. It uses fictional samples and
+        does not run AnonFlow’s detection or verification.
+      </p>
+      <ul>
+        <li>Confirming a suggestion records a sample decision.</li>
+        <li>Kept values remain visible in the review copy.</li>
+        <li>
+          Review completion does not establish that a document is safe to share.
+        </li>
+      </ul>
+      <div class="dialog-actions">
+        <button class="button primary" data-close>Got it</button>
+      </div>
+    </dialog>
+    <dialog id="download-dialog" aria-labelledby="download-title">
+      <h2 id="download-title">Download a sample</h2>
+      <p>
+        A JSON file with fictional text and your preview decisions. This is not
+        a verified product export.
+      </p>
+      <label class="check-label"
+        ><input type="checkbox" id="download-ack" />I understand this is a
+        fictional review sample.</label
+      >
+      <div class="dialog-actions">
+        <button class="button quiet" data-close>Cancel</button
+        ><button class="button primary" id="download-sample" disabled>
+          Download sample
+        </button>
+      </div>
+    </dialog>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script>
+      "use strict";
+      const docs = [
+        {
+          name: "customer-email.txt",
+          short: "Email",
+          type: "Customer email",
+          title: "A smooth handoff.",
+          text: "From: Maya Patel <maya@example.test>\nTo: Isha Rao <isha@example.test>\n\nHi Isha Rao,\n\nPlease send the handoff to Maya Patel by Friday. The customer record and account notes are attached.\n\nThanks,\nMaya Patel",
+        },
+        {
+          name: "customer-record.json",
+          short: "Customer record",
+          type: "Customer record",
+          title: "The person behind the account.",
+          text: '{\n  "name": "Maya Patel",\n  "email": "maya@example.test",\n  "account_owner": "Isha Rao",\n  "company": "Northstar Studio"\n}',
+        },
+        {
+          name: "account-owners.csv",
+          short: "Account owners",
+          type: "Account owners",
+          title: "Keep the context connected.",
+          text: "Customer,Account owner,Owner email\nMaya Patel,Isha Rao,isha@example.test\n\nAccount: Northstar Studio\nHandoff: Friday",
+        },
+      ];
+      docs[2].rows = [
+        ["Customer", "Account owner", "Owner email"],
+        ["Maya Patel", "Isha Rao", "isha@example.test"],
+        [],
+        ["Account: Northstar Studio"],
+        ["Handoff: Friday"],
+      ];
+      const initial = [
+        { value: "Maya Patel", kind: "Person", alias: "Gita Singh" },
+        { value: "Isha Rao", kind: "Person", alias: "John Lee" },
+        {
+          value: "maya@example.test",
+          kind: "Email",
+          alias: "gita@example.test",
+        },
+        {
+          value: "isha@example.test",
+          kind: "Email",
+          alias: "john@example.test",
+        },
+      ];
+      let findings = initial.map((f) => ({ ...f, decision: null })),
+        selected = 0,
+        file = 0,
+        view = "original",
+        toastTimer,
+        loading = false;
+      const $ = (id) => document.getElementById(id);
+      const icon = (name) => {
+        const svg = document.createElementNS(
+          "http://www.w3.org/2000/svg",
+          "svg",
+        );
+        svg.classList.add("icon");
+        svg.setAttribute("aria-hidden", "true");
+        const use = document.createElementNS(svg.namespaceURI, "use");
+        use.setAttribute("href", "#" + name + "-icon");
+        svg.append(use);
+        return svg;
+      };
+      function node(tag, text, className) {
+        const el = document.createElement(tag);
+        if (text !== undefined) el.textContent = text;
+        if (className) el.className = className;
+        return el;
+      }
+      const occurrences = (text, value) => text.split(value).length - 1;
+      function announce(message) {
+        clearTimeout(toastTimer);
+        $("toast").textContent = message;
+        toastTimer = setTimeout(() => ($("toast").textContent = ""), 4000);
+      }
+      function clearError() {
+        $("replacement-error").hidden = true;
+        $("replacement").removeAttribute("aria-invalid");
+      }
+      function navigate(screen) {
+        document
+          .querySelectorAll('[id^="screen-"]')
+          .forEach((el) => (el.hidden = el.id !== "screen-" + screen));
+        document.querySelectorAll(".step").forEach((el) => {
+          if (el.dataset.screen === screen)
+            el.setAttribute("aria-current", "step");
+          else el.removeAttribute("aria-current");
+        });
+        renderSummary();
+        $(screen + "-title").focus();
+        window.scrollTo({ top: 0, behavior: "instant" });
+      }
+      function selectFinding(index) {
+        selected = index;
+        clearError();
+        if (!docs[file].text.includes(findings[index].value))
+          file = docs.findIndex((d) => d.text.includes(findings[index].value));
+        render();
+      }
+      function renderDocument() {
+        const doc = docs[file];
+        $("document-label").textContent = doc.short;
+        $("paper-type").textContent = doc.type;
+        $("document-title").textContent = doc.title;
+        $("document-count").textContent =
+          String(file + 1).padStart(2, "0") + " / 03";
+        $("legend-label").textContent =
+          view === "original" ? "Suggested change" : "Draft replacement";
+        const output = $("document-text");
+        output.replaceChildren();
+        let offset = 0;
+        while (offset < doc.text.length) {
+          let next = -1,
+            match = -1;
+          findings.forEach((f, i) => {
+            const at = doc.text.indexOf(f.value, offset);
+            if (at !== -1 && (next === -1 || at < next)) {
+              next = at;
+              match = i;
+            }
+          });
+          if (next === -1) {
+            output.append(document.createTextNode(doc.text.slice(offset)));
+            break;
+          }
+          output.append(document.createTextNode(doc.text.slice(offset, next)));
+          const f = findings[match];
+          let text =
+            view === "copy" && f.decision !== "keep" ? f.alias : f.value;
+          if (view === "copy" && f.decision !== "keep") {
+            if (doc.name.endsWith(".json"))
+              text = JSON.stringify(text).slice(1, -1);
+            else if (doc.rows) text = csvCell(text);
+          }
+          const mark = node(
+            "button",
+            text,
+            "mention" + (f.decision === "keep" ? " retained" : ""),
+          );
+          mark.type = "button";
+          mark.setAttribute("aria-pressed", String(match === selected));
+          mark.setAttribute(
+            "aria-label",
+            text + " — review " + f.kind.toLowerCase(),
+          );
+          mark.addEventListener("click", () => {
+            selectFinding(match);
+            $("replacement").focus();
+          });
+          output.append(mark);
+          offset = next + f.value.length;
+        }
+        document
+          .querySelectorAll("[data-view]")
+          .forEach((b) =>
+            b.setAttribute("aria-pressed", String(b.dataset.view === view)),
+          );
+      }
+      function render() {
+        const reviewed = findings.filter((f) => f.decision).length;
+        $("progress-label").textContent = reviewed + " / 4 reviewed";
+        $("progress-fill").style.width = (reviewed / 4) * 100 + "%";
+        document
+          .querySelector('[role="progressbar"]')
+          .setAttribute("aria-valuenow", reviewed);
+        $("review-status").textContent =
+          reviewed === 4 ? "Review complete" : "Needs review";
+        $("file-list").replaceChildren(
+          ...docs.map((d, i) => {
+            const b = node("button", undefined, "file");
+            b.setAttribute("aria-pressed", String(i === file));
+            b.setAttribute("aria-label", d.name);
+            b.append(icon("file"));
+            const content = node("span");
+            content.append(
+              node("strong", d.short),
+              node(
+                "small",
+                d.name.split(".").pop().toUpperCase() +
+                  " · " +
+                  findings.reduce(
+                    (n, f) => n + occurrences(d.text, f.value),
+                    0,
+                  ) +
+                  " mentions",
+              ),
+            );
+            b.append(content);
+            b.onclick = () => {
+              file = i;
+              render();
+              $("file-list").children[i].focus({ preventScroll: true });
+            };
+            return b;
+          }),
+        );
+        $("finding-list").replaceChildren(
+          ...findings.map((f, i) => {
+            const b = node("button", undefined, "finding");
+            b.setAttribute("aria-pressed", String(i === selected));
+            b.setAttribute(
+              "aria-label",
+              f.value +
+                (f.decision
+                  ? f.decision === "keep"
+                    ? ", kept original"
+                    : ", change confirmed"
+                  : ", needs review"),
+            );
+            b.append(
+              node("span", f.value),
+              node("span", f.decision ? "✓" : "·", "tiny-state"),
+            );
+            b.onclick = () => {
+              selectFinding(i);
+              $("finding-list").children[i].focus({ preventScroll: true });
+            };
+            return b;
+          }),
+        );
+        const f = findings[selected];
+        $("finding-kind").textContent = f.kind;
+        $("source-value").textContent = f.value;
+        $("occurrences").textContent =
+          docs.reduce((n, d) => n + occurrences(d.text, f.value), 0) +
+          " mentions · " +
+          docs.filter((d) => d.text.includes(f.value)).length +
+          " files";
+        $("replacement").value = f.alias;
+        $("decision-state").textContent =
+          f.decision === "replace"
+            ? "Change confirmed"
+            : f.decision === "keep"
+              ? "Original kept"
+              : "";
+        renderDocument();
+        renderSummary();
+      }
+      function nextFinding() {
+        const next = findings.findIndex((f, i) => i > selected && !f.decision);
+        const first = findings.findIndex((f) => !f.decision);
+        if (first !== -1) selectFinding(next === -1 ? first : next);
+        else render();
+      }
+      function record(decision) {
+        const f = findings[selected];
+        if (decision === "replace") {
+          const value = $("replacement").value.trim();
+          let error = "";
+          if (!value) error = "Enter a replacement.";
+          else if (value === f.value)
+            error = "Choose a different value, or keep the original.";
+          else if (f.kind === "Email" && !/^[^\s@]+@[^\s@]+\.test$/.test(value))
+            error = "Use a fictional .test email address.";
+          if (error) {
+            $("replacement-error").textContent = error;
+            $("replacement-error").hidden = false;
+            $("replacement").setAttribute("aria-invalid", "true");
+            $("replacement").focus();
+            return;
+          }
+          f.alias = value;
+        }
+        clearError();
+        f.decision = decision;
+        announce(
+          decision === "replace"
+            ? "Change confirmed."
+            : "Original kept in the review copy.",
+        );
+        nextFinding();
+      }
+      function renderSummary() {
+        const reviewed = findings.filter((f) => f.decision).length;
+        $("confirmed-count").textContent = findings.filter(
+          (f) => f.decision === "replace",
+        ).length;
+        $("kept-count").textContent = findings.filter(
+          (f) => f.decision === "keep",
+        ).length;
+        $("summary-heading").textContent =
+          reviewed === 4
+            ? "All suggestions reviewed"
+            : 4 -
+              reviewed +
+              " suggestion" +
+              (4 - reviewed === 1 ? "" : "s") +
+              " to review";
+        $("summary-description").textContent =
+          reviewed === 4
+            ? "Your sample decisions are recorded."
+            : "Confirm a replacement or keep the original.";
+        $("summary-files").replaceChildren(
+          ...docs.map((d, i) => {
+            const row = node("div", undefined, "summary-file");
+            const label = node("div");
+            label.append(node("strong", d.short), node("small", d.name));
+            const button = node("button", "View copy", "button quiet");
+            button.onclick = () => {
+              file = i;
+              view = "copy";
+              render();
+              navigate("review");
+            };
+            row.append(label, button);
+            return row;
+          }),
+        );
+        $("summary-primary").replaceChildren(
+          document.createTextNode(
+            reviewed === 4 ? "Download sample" : "Continue review",
+          ),
+          icon("arrow"),
+        );
+      }
+      document
+        .querySelectorAll("[data-screen]")
+        .forEach((b) => (b.onclick = () => navigate(b.dataset.screen)));
+      document.querySelectorAll("[data-view]").forEach(
+        (b) =>
+          (b.onclick = () => {
+            view = b.dataset.view;
+            renderDocument();
+          }),
+      );
+      document
+        .querySelectorAll("[data-details]")
+        .forEach((b) => (b.onclick = () => $("details-dialog").showModal()));
+      document
+        .querySelectorAll("[data-close]")
+        .forEach((b) => (b.onclick = () => b.closest("dialog").close()));
+      $("edit-form").onsubmit = (event) => {
+        event.preventDefault();
+        record("replace");
+      };
+      $("keep-original").onclick = () => record("keep");
+      $("replacement").oninput = clearError;
+      $("summary-primary").onclick = () => {
+        if (findings.some((f) => !f.decision)) {
+          selectFinding(findings.findIndex((f) => !f.decision));
+          navigate("review");
+        } else {
+          $("download-ack").checked = false;
+          $("download-sample").disabled = true;
+          $("download-dialog").showModal();
+        }
+      };
+      $("download-ack").onchange = () => {
+        $("download-sample").disabled = !$("download-ack").checked;
+      };
+      function csvCell(value) {
+        return /[",\r\n]/.test(value)
+          ? '"' + value.replaceAll('"', '""') + '"'
+          : value;
+      }
+      function replaceTerms(text) {
+        return text.replace(
+          /Maya Patel|Isha Rao|maya@example\.test|isha@example\.test/g,
+          (value) => {
+            const f = findings.find((f) => f.value === value);
+            return f.decision === "replace" ? f.alias : value;
+          },
+        );
+      }
+      function sampleText(doc) {
+        if (doc.name.endsWith(".json"))
+          return JSON.stringify(
+            Object.fromEntries(
+              Object.entries(JSON.parse(doc.text)).map(([key, value]) => [
+                key,
+                replaceTerms(value),
+              ]),
+            ),
+            null,
+            2,
+          );
+        if (doc.rows)
+          return doc.rows
+            .map((row) =>
+              row.map((value) => csvCell(replaceTerms(value))).join(","),
+            )
+            .join("\n");
+        return replaceTerms(doc.text);
+      }
+      $("download-sample").onclick = () => {
+        if (!$("download-ack").checked) return;
+        const result = {
+          designPreview: true,
+          fictionalData: true,
+          verified: false,
+          clearedForSharing: false,
+          decisions: findings.map((f) => ({ ...f })),
+          documents: docs.map((d) => ({
+            name: d.name,
+            type: d.type,
+            title: d.title,
+            text: sampleText(d),
+          })),
+        };
+        const url = URL.createObjectURL(
+          new Blob([JSON.stringify(result, null, 2)], {
+            type: "application/json",
+          }),
+        );
+        const a = node("a");
+        a.href = url;
+        a.download = "anonflow-fictional-review-sample.json";
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        $("download-dialog").close();
+        announce("Fictional sample downloaded.");
+      };
+      $("reset-sample").onclick = () => {
+        findings = initial.map((f) => ({ ...f, decision: null }));
+        selected = 0;
+        file = 0;
+        view = "original";
+        clearError();
+        render();
+        announce("Sample reset.");
+      };
+      $("load-sample").onclick = () => {
+        if (loading) return;
+        loading = true;
+        $("load-sample").disabled = true;
+        $("load-status").textContent = "Opening sample…";
+        $("dropzone").setAttribute("aria-busy", "true");
+        setTimeout(() => {
+          loading = false;
+          $("load-sample").disabled = false;
+          $("load-status").textContent = "This preview uses fictional files.";
+          $("dropzone").removeAttribute("aria-busy");
+          navigate("review");
+        }, 600);
+      };
+      $("sample-files").replaceChildren(
+        ...docs.map((d) => {
+          const card = node("div", undefined, "sample-file");
+          card.append(
+            icon("file"),
+            node("strong", d.short),
+            node("small", d.name.split(".").pop().toUpperCase()),
+          );
+          return card;
+        }),
+      );
+      render();
+    </script>
+  </body>
+</html>
