@@ -163,22 +163,18 @@ TLS container recipes. When capturing them locally, filter `::add-mask::` lines:
 GitHub treats them as masking commands, while ordinary terminals print their
 credential values. Preserve the underlying command's exit status.
 
-## Hosted CI and UI work
+## Hosted CI and original workbench
 
 GitHub Actions has separately reported account billing/spending-limit failures
 before jobs execute. Local evidence is recorded explicitly; no failed hosted
 check is described as passed and no protection or workflow is disabled.
 
-The accompanying [quiet workbench](mockups/quiet-workbench/README.md) is a
-standalone UI design preview. It does not change product detection, storage, or
-release behavior. Browser QA covers its actual interactions and responsive
-layout separately from the API/database tests.
+The [original React workbench](../apps/web/README.md) is the product interface.
+The proposed standalone redesign has been removed at the user's request.
+The web application's source and entry HTML match the version before the
+mockup PRs (`3321153001c94caede35c64ced8d34acebbd5b2a`). Its existing upload,
+detection review, document comparison, relationship evidence, evaluation
+scorecards, and document coverage review remain available.
 
-### Restored workbench preview
-
-The follow-up mockup restores the earlier entity register/correction layout and
-the Documents, Relationships, and Evaluation result tabs. Independent GPT-6.1
-Sol browser QA accepted the final source after correcting an existing-finding
-category/reconfirmation issue. It covers 15 viewport/view combinations, keyboard
-controls, graph evidence, score arithmetic, safe downloads, and reset. Its fixed
-fictional scorecard remains separate from actual product validation results.
+The container fixes and validation results above are retained. The design
+rollback does not change product processing, dependencies, or release behavior.
