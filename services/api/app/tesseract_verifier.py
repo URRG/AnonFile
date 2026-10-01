@@ -18,6 +18,7 @@ import re
 import subprocess
 from threading import Event, Thread
 import time
+import unicodedata
 from typing import Any, Callable, Protocol, Sequence
 
 
@@ -64,7 +65,7 @@ def _normalised_values(values: Sequence[str]) -> tuple[str, ...]:
         _reject("Independent final OCR verification input is invalid.")
     result = []
     for value in values:
-        if not isinstance(value, str) or not value or len(value) > 500 or not value.isprintable():
+        if not isinstance(value, str) or not value.strip() or len(value) > 500 or not value.isprintable():
             _reject("Independent final OCR verification input is invalid.")
         result.append(value)
     return tuple(result)
@@ -76,8 +77,15 @@ def _digest(value: str) -> bool:
 
 def _contains_source_value(transcript: str, values: Sequence[str]) -> bool:
     """Keep matching values private: callers receive only a fixed outcome."""
+    # OCR can change spacing, line breaks, or equivalent Unicode glyphs while
+    # retaining the same source value. Preserve exact matching as well as this
+    # conservative comparison; neither branch establishes OCR completeness.
+    canonical_transcript = " ".join(unicodedata.normalize("NFKC", transcript).casefold().split())
     for value in values:
         if re.search(r"(?<!\w)" + re.escape(value) + r"(?!\w)", transcript, re.IGNORECASE):
+            return True
+        canonical_value = " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+        if re.search(r"(?<!\w)" + re.escape(canonical_value) + r"(?!\w)", canonical_transcript):
             return True
     return False
 

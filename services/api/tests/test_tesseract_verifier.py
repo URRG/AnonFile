@@ -110,6 +110,44 @@ def test_tesseract_output_is_bounded_and_residual_is_source_free():
     assert secret not in str(error.value)
 
 
+@pytest.mark.parametrize("source, transcript", [
+    ("Maya Patel", "Maya   Patel"),
+    ("Maya Patel", "MAYA\nPATEL"),
+    ("Maya Patel", "Maya\tPatel"),
+    ("Maya Patel", "Maya\u00a0Patel"),
+    ("Maya Patel", "Ｍａｙａ Ｐａｔｅｌ"),
+    ("José Alvarez", "Jose\u0301 Alvarez"),
+    ("Straße", "STRASSE"),
+])
+def test_final_ocr_rejects_source_values_despite_spacing_or_unicode_variation(source, transcript):
+    checked = verifier(lambda *_args, **_kwargs: FakeProcess(stdout=transcript.encode()))
+    with pytest.raises(FinalOcrVerificationError, match="found residual content") as error:
+        checked.verify_pngs((b"exact-final-png",), (source,))
+    assert source not in str(error.value)
+    assert transcript not in str(error.value)
+
+
+@pytest.mark.parametrize("transcript", ["Maya Patelsson", "SuperMaya Patel", "Ｍａｙａ Ｐａｔｅｌsson"])
+def test_final_ocr_normalization_preserves_source_value_word_boundaries(transcript):
+    checked = verifier(lambda *_args, **_kwargs: FakeProcess(stdout=transcript.encode()))
+    checked.verify_pngs((b"exact-final-png",), ("Maya Patel",))
+
+
+@pytest.mark.parametrize("source", ["   ", "\u00a0"])
+def test_final_ocr_rejects_whitespace_only_source_values_before_candidate_ocr(source):
+    calls = []
+    checked = verifier(lambda *_args, **_kwargs: calls.append(True))
+    with pytest.raises(FinalOcrVerificationError, match="input is invalid"):
+        checked.verify_pngs((b"exact-final-png",), (source,))
+    assert calls == []
+
+
+def test_final_ocr_keeps_existing_unicode_case_insensitive_matching():
+    checked = verifier(lambda *_args, **_kwargs: FakeProcess(stdout="İRIS".encode()))
+    with pytest.raises(FinalOcrVerificationError, match="found residual content"):
+        checked.verify_pngs((b"exact-final-png",), ("Iris",))
+
+
 def test_pdf_verifier_rasterizes_exact_final_pdf_bytes_before_ocr():
     received = []
     checked = TesseractCliVerifier(executable=EXECUTABLE, allowed_executables=(EXECUTABLE,),

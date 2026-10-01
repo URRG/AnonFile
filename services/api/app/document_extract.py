@@ -50,10 +50,19 @@ def _local(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
-def _strings(element, tags=("t",)) -> str:
+def _strings(element, tags=("t",), *, paragraph=False) -> str:
     pieces = []
-    for node in element.iter():
+    pending = [element]
+    while pending:
+        node = pending.pop()
         tag = _local(node.tag)
+        # Text-box paragraphs are inventoried independently by the caller.
+        # Reading them through their enclosing paragraph duplicates findings
+        # and can join unrelated visible text into an invented name.
+        if paragraph and node is not element and tag == "p":
+            pieces.append("\n")
+            continue
+        pending.extend(reversed(list(node)))
         if tag in tags:
             pieces.append(node.text or "")
         elif tag == "tab":
@@ -149,12 +158,12 @@ def extract_office(raw: bytes, extension: str) -> Extraction:
                       or name.startswith(("ppt/slides/", "ppt/notesSlides/"))) and not name.endswith(".rels"):
                     kind = "docx-part" if name.startswith("word/") else "pptx-notes" if name.startswith("ppt/notesSlides/") else "pptx-slide"
                     location["visibility"] = "hidden" if element.attrib.get("show") == "0" else "visible"
-                    paragraphs = [_strings(node, ("t", "delText", "instrText")) for node in element.iter() if _local(node.tag) == "p"]
+                    paragraphs = [_strings(node, ("t", "delText", "instrText", "delInstrText"), paragraph=True) for node in element.iter() if _local(node.tag) == "p"]
                     text = "\n".join(paragraphs)
                     # Comments, tracked deletions and alternate object text are
                     # retained for review, regardless of displayed state.
                     extras = [f"{'object name' if _local(key) == 'name' else _local(key)}: {value}" for node in element.iter() for key, value in node.attrib.items()
-                              if _local(key) in {"title", "descr", "author", "initials", "name"} and value]
+                              if _local(key) in {"title", "descr", "author", "initials", "name", "instr", "tooltip"} and value]
                     text += ("\n" + "\n".join(extras)) if extras else ""
                     if not paragraphs:
                         text = "\n".join(node.text for node in element.iter() if node.text and node.text.strip()) + text
