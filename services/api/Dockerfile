@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends libgl1 tesserac
 # BuildKit mounts it only for this step; it is not copied into the image.
 RUN --mount=type=secret,id=package_ca \
     if [ -f /run/secrets/package_ca ]; then export PIP_CERT=/run/secrets/package_ca; fi \
+    && python -m pip install --no-cache-dir --upgrade pip==26.2.1 \
     && pip install --no-cache-dir -r requirements-dev.txt
 COPY app ./app
 COPY tests ./tests

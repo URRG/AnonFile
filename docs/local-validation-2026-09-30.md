@@ -1,4 +1,8 @@
-# Local validation while hosted Actions is unavailable
+# Historical local validation while hosted Actions was unavailable
+
+Hosted runners are available again. See the
+[current bug fixes and validation](pending-bug-fixes-2026-10-01.md) for the
+dependency-audit fix, document/OCR regressions, and current integration results.
 
 ## Historical native PostgreSQL validation
 

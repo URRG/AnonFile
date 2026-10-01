@@ -92,8 +92,8 @@ supplier data. `Blocked externally` is not the same as done.
   - [x] An opt-in, bounded Tesseract CLI final-artifact checker is isolated from
     RapidOCR. It receives exact returned candidate PNG bytes (or rerasterizes
     exact returned PDF bytes), has fixed source-free unavailable/timeout/failure
-    outcomes, and never changes `REVIEW_REQUIRED`. It is not installed in this
-    demo environment and does not establish OCR completeness, layout fidelity,
+    outcomes, and never changes `REVIEW_REQUIRED`. Its separately approved runtime
+    is not provisioned here and does not establish OCR completeness, layout fidelity,
     privacy qualification, or release approval.
     It is held unavailable by default until a provisioned, immutable executable
     allowlist, executable SHA-256 and Tesseract-version/config identity are
